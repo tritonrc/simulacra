@@ -7,7 +7,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: "0"
+  # Deny warnings, and drop debug info: the test binaries statically link the
+  # whole workspace (wasmtime/cranelift included), and full debuginfo makes the
+  # linker run out of memory on standard runners (ld "bus error").
+  RUSTFLAGS: "-D warnings -C debuginfo=0"
 
 jobs:
   lint:
@@ -36,7 +40,7 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y python3-dev
       - name: Build workspace
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace
       # Most crates run their tests in parallel. The simulacra-cli interactive
       # TUI suite is timing-sensitive and must be serialized, so it runs on its
       # own with a single test thread.
