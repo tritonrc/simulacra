@@ -293,7 +293,7 @@ fn resolved_credentials_are_never_written_to_logs() {
     )]))
     .expect("registry should resolve oauth env vars");
 
-    // Validated via Obsidian log queries per S010. The registry uses tracing::info!
+    // Validated via Aniani log queries per S010. The registry uses tracing::info!
     // at startup which logs integration count and names but never credential values.
 }
 

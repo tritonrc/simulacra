@@ -2990,9 +2990,9 @@ async fn skill_authored_via_graphql_visible_in_running_task_vfs() {
 cargo test -p simulacra-server --test graphql_e2e -- --nocapture
 ```
 
-- [ ] **Step 4: Validate observability via Obsidian (per R010)**
+- [ ] **Step 4: Validate observability via Aniani (per R010)**
 
-After running the e2e test against a local OTLP collector, query Obsidian:
+After running the e2e test against a local OTLP collector, query Aniani:
 
 - TraceQL: `{ name="simulacra.graphql.request" && resource.service.name="simulacra-server" }` — expect spans with `op_kind=mutation` and `tenant_id="<default tenant ULID>"`.
 - TraceQL: `{ name="simulacra.engine.resolve_agent" }` — expect spans with the agent name and id.

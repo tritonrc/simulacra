@@ -24,7 +24,7 @@
 //
 // Prereq:
 //   ANTHROPIC_API_KEY=sk-...  (real LLM calls)
-//   Obsidian on localhost:4320 (optional — traces)
+//   Aniani on localhost:4320 (optional — traces)
 //
 // Run:
 //   ANTHROPIC_API_KEY=sk-... cargo run -p simulacra-server --example s037_virtual_coworkers
@@ -1235,8 +1235,8 @@ async fn main() {
         format!("nova_rag={nova_rag_id}({nova_rag_state})"),
     ));
 
-    // ── Flush + query Obsidian traces ────────────────────────────────────
-    println!("\n[Traces] Flushing OTLP spans to Obsidian...");
+    // ── Flush + query Aniani traces ────────────────────────────────────
+    println!("\n[Traces] Flushing OTLP spans to Aniani...");
     if let Err(e) = trace_provider.force_flush() {
         println!("       Flush error: {e}");
     }
@@ -1268,8 +1268,8 @@ async fn main() {
                 println!("         {root:<20} trace={tid}  spans={span_count}  {dur_ms:.1}ms");
             }
         }
-        Ok(r) => println!("       Obsidian returned {}", r.status()),
-        Err(e) => println!("       Obsidian unreachable: {e}"),
+        Ok(r) => println!("       Aniani returned {}", r.status()),
+        Err(e) => println!("       Aniani unreachable: {e}"),
     }
     if let Err(e) = trace_provider.shutdown() {
         eprintln!("       Trace provider shutdown error: {e}");

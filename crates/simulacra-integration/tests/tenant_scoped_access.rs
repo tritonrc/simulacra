@@ -472,4 +472,4 @@ fn var_skills_reads_produce_journal_entries_through_normal_vfs_journaling() {
 }
 
 // Observability assertions (tracing::warn! on capability-denied access) are validated
-// via Obsidian queries per S010, not unit tests.
+// via Aniani queries per S010, not unit tests.

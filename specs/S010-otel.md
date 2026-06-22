@@ -124,9 +124,9 @@ Severity: `WARN`
 | MCP connection failed | `WARN` | Server name, error |
 | Schema version mismatch | `ERROR` | Expected version, found version |
 
-## Local Validation via Obsidian
+## Local Validation via Aniani
 
-[Obsidian](https://github.com/tritonrc/obsidian) is a single-binary o11y backend that accepts OTLP and exposes PromQL, LogQL, and TraceQL. Every dev session runs a local instance. Coding agents query Obsidian to validate o11y assertions — see `rules/R010-observability-validation.md` for the process.
+[Aniani](https://github.com/tritonrc/aniani) is a single-binary o11y backend that accepts OTLP and exposes PromQL, LogQL, and TraceQL. Every dev session runs a local instance. Coding agents query Aniani to validate o11y assertions — see `rules/R010-observability-validation.md` for the process.
 
 | Signal | Ingest | Query |
 |---|---|---|
@@ -134,7 +134,7 @@ Severity: `WARN`
 | Metrics | OTLP protobuf | PromQL via `/api/v1/query` |
 | Logs | Loki JSON/protobuf | LogQL via `/loki/api/v1/query` |
 
-OTLP endpoint: `http://localhost:${OBSIDIAN_PORT:-4320}`
+OTLP endpoint: `http://localhost:${ANIANI_PORT:-4320}`
 
 ## Namespace Rule
 

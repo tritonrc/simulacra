@@ -674,6 +674,6 @@ async fn hook_chain_internal_error_fails_closed_with_error_outcome_not_violation
         "no event should be emitted on hook chain error, got {received:?}"
     );
     // Note: the span attribute `simulacra.vfs.hook_outcome = error` is asserted
-    // by the o11y test in s039_vfs_write_o11y.rs (Obsidian path); here we pin
+    // by the o11y test in s039_vfs_write_o11y.rs (Aniani path); here we pin
     // the error mapping at the API boundary.
 }

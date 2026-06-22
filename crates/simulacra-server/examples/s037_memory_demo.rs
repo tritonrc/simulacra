@@ -16,7 +16,7 @@
 //
 // Prereq:
 //   ANTHROPIC_API_KEY=sk-...  (real LLM calls)
-//   Obsidian on localhost:4320 (optional — traces)
+//   Aniani on localhost:4320 (optional — traces)
 //
 // Run:
 //   ANTHROPIC_API_KEY=sk-... cargo run -p simulacra-server --example s037_memory_demo
@@ -473,8 +473,8 @@ async fn main() {
         pass = false;
     }
 
-    // ── Flush + query Obsidian traces ────────────────────────────────────
-    println!("\n[Traces] Flushing OTLP spans to Obsidian...");
+    // ── Flush + query Aniani traces ────────────────────────────────────
+    println!("\n[Traces] Flushing OTLP spans to Aniani...");
     if let Err(e) = trace_provider.force_flush() {
         println!("       Flush error: {e}");
     }
@@ -513,8 +513,8 @@ async fn main() {
                 }
             }
         }
-        Ok(r) => println!("       Obsidian returned {}", r.status()),
-        Err(e) => println!("       Obsidian unreachable: {e}"),
+        Ok(r) => println!("       Aniani returned {}", r.status()),
+        Err(e) => println!("       Aniani unreachable: {e}"),
     }
     if let Err(e) = trace_provider.shutdown() {
         eprintln!("       Trace provider shutdown error: {e}");

@@ -644,7 +644,7 @@ fn simulacra_wasm_fuel_consumed_histogram_records_per_call_with_module_and_tool_
 
     // After the OTel meter switch, fuel-consumed lands as a real
     // `simulacra.wasm.fuel_consumed` histogram via the meter API (verified
-    // end-to-end against Obsidian). Locally we assert the mirror
+    // end-to-end against Aniani). Locally we assert the mirror
     // structured log carries the labels and a non-zero value so the
     // recording site is exercised by every WASM MCP tool call.
     assert!(

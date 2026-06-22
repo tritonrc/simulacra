@@ -1,22 +1,22 @@
-# R010 — Observability Validation via Obsidian
+# R010 — Observability Validation via Aniani
 
 ## Rule
 
-Coding agents validate o11y assertions by querying a local Obsidian instance, not just by running `cargo test`.
+Coding agents validate o11y assertions by querying a local Aniani instance, not just by running `cargo test`.
 
 ### Setup
 
-Every development session (worktree, local dev, CI) runs a local [Obsidian](https://github.com/tritonrc/obsidian) instance. Obsidian is a single-binary o11y backend that accepts OTLP and exposes PromQL, LogQL, and TraceQL.
+Every development session (worktree, local dev, CI) runs a local [Aniani](https://github.com/tritonrc/aniani) instance. Aniani is a single-binary o11y backend that accepts OTLP and exposes PromQL, LogQL, and TraceQL.
 
 ```bash
-obsidian --port ${OBSIDIAN_PORT:-4320} --retention 2h &
+aniani --port ${ANIANI_PORT:-4320} --retention 2h &
 ```
 
-The OTLP exporter in Simulacra points at `http://localhost:${OBSIDIAN_PORT}`.
+The OTLP exporter in Simulacra points at `http://localhost:${ANIANI_PORT}`.
 
 ### What Agents Must Do
 
-During the **green phase**, after tests pass, the implementing agent queries Obsidian to verify that the o11y assertions in the spec are satisfied:
+During the **green phase**, after tests pass, the implementing agent queries Aniani to verify that the o11y assertions in the spec are satisfied:
 
 1. **Traces** — Query `/api/search` (TraceQL) to verify spans exist with the correct operation names, attributes, and parent-child relationships.
 2. **Metrics** — Query `/api/v1/query` (PromQL) to verify counters incremented, histograms recorded, gauges updated.
@@ -40,9 +40,9 @@ curl -s "http://localhost:4320/loki/api/v1/query" \
 
 ### When To Query
 
-- **After green phase:** Run the test suite with OTLP export enabled, then query Obsidian to verify o11y assertions from the spec.
+- **After green phase:** Run the test suite with OTLP export enabled, then query Aniani to verify o11y assertions from the spec.
 - **During debugging:** Query traces to understand execution flow, logs to find errors, metrics to spot anomalies.
-- **During review phase:** The reviewer (Gemini) can reference Obsidian query results as evidence of o11y compliance.
+- **During review phase:** The reviewer (Gemini) can reference Aniani query results as evidence of o11y compliance.
 
 ### Agents Know These Query Languages
 
@@ -50,4 +50,4 @@ LLMs are trained on PromQL, LogQL, and TraceQL. Agents can construct and interpr
 
 ## Why
 
-Unit tests verify that spans/metrics/logs are *emitted*. Obsidian queries verify they are *correct* — right attributes, right relationships, right values. The difference matters: a span with the wrong `gen_ai.operation.name` passes a "span exists" unit test but fails a TraceQL query for `{gen_ai.operation.name="chat"}`. Obsidian closes the feedback loop between "code emits telemetry" and "telemetry is useful."
+Unit tests verify that spans/metrics/logs are *emitted*. Aniani queries verify they are *correct* — right attributes, right relationships, right values. The difference matters: a span with the wrong `gen_ai.operation.name` passes a "span exists" unit test but fails a TraceQL query for `{gen_ai.operation.name="chat"}`. Aniani closes the feedback loop between "code emits telemetry" and "telemetry is useful."

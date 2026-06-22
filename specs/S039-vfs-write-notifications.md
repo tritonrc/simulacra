@@ -163,7 +163,7 @@ The hook chain uses S026's existing JSON-context plumbing.
 
 - [ ] On every `VfsEvent` published (across all layer impls), the counter `simulacra.vfs.events` is incremented with attributes `kind ∈ {written, removed}` and `layer ∈ {memory_store_fs, notifying, ...}`. `VfsEvent::Skipped` is a watcher-side synthetic signal (consumer-observed, derived from broadcast `Lagged`) and is not counted as a published event.
 - [ ] On every `Operation::VfsWrite` hook chain invocation, a span `vfs_write_hook` is emitted as a child of the calling span with attributes `simulacra.vfs.tenant`, `simulacra.vfs.path` (the original requested path), `simulacra.vfs.bytes_len`, `simulacra.vfs.hook_outcome ∈ {allow, mutate, deny, kill, violation, error}`. Semantics: `allow` = `Verdict::Continue` with no path change; `mutate` = `Continue` with a mutated `path`; `deny` = `Verdict::Deny`; `kill` = `Verdict::Kill`; `violation` = `Continue` returned with a different `tenant` or `op` (rejected as `VfsError::HookContractViolation`); `error` = any other hook-chain failure (e.g., serde failure, hook execution error propagated as `Err`).
-- [ ] An integration test runs a small program that issues VFS writes through a `HookedVfsLayer` + `NotifyingFsLayer` stack and verifies the counter and span are visible via local Obsidian PromQL/TraceQL queries (per `rules/R010-observability-validation.md`).
+- [ ] An integration test runs a small program that issues VFS writes through a `HookedVfsLayer` + `NotifyingFsLayer` stack and verifies the counter and span are visible via local Aniani PromQL/TraceQL queries (per `rules/R010-observability-validation.md`).
 
 ## Test Strategy
 

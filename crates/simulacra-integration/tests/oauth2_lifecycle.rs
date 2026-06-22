@@ -531,4 +531,4 @@ async fn failed_refresh_retries_with_exponential_backoff() {
 }
 
 // Observability assertions (spans, counters, warn/error logs) are validated
-// via Obsidian queries per S010, not unit tests.
+// via Aniani queries per S010, not unit tests.

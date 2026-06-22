@@ -70,9 +70,9 @@ Each sub-agent implements until its tests pass. It does NOT write new tests — 
 
 After all sub-agents complete, verify the full test suite passes together. Fix any integration conflicts between sub-agent outputs.
 
-After tests pass, the sub-agent queries the local Obsidian instance to verify o11y assertions from the spec (see `rules/R010-observability-validation.md`). Traces, metrics, and logs are validated via TraceQL, PromQL, and LogQL — not just unit tests.
+After tests pass, the sub-agent queries the local Aniani instance to verify o11y assertions from the spec (see `rules/R010-observability-validation.md`). Traces, metrics, and logs are validated via TraceQL, PromQL, and LogQL — not just unit tests.
 
-**Gate:** `cargo test -p simulacra-<crate>` — all tests pass. Obsidian queries confirm o11y assertions.
+**Gate:** `cargo test -p simulacra-<crate>` — all tests pass. Aniani queries confirm o11y assertions.
 
 ### Phase 3: Integration & Mechanical Checks
 
@@ -148,7 +148,7 @@ These rules are not guidelines. They are the protocol.
 | Full design + diagrams | `docs/simulacra-design.md` |
 | Feature specs + acceptance criteria | `specs/` (indexed by `SPECS.md`) |
 | Process rules (TDD, review, scope) | `rules/` |
-| O11y validation | Local Obsidian instance (PromQL, LogQL, TraceQL) |
+| O11y validation | Local Aniani instance (PromQL, LogQL, TraceQL) |
 
 ## When You Get Stuck
 

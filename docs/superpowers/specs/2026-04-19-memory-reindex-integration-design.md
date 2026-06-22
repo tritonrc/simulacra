@@ -202,7 +202,7 @@ Under `reindex_background`, vectors exist but the index is incomplete while the 
 
 ### Observability validation
 
-`simulacra_memory_reindex_backlog{tenant}` visible in local Obsidian during the reindex integration test — confirms end-to-end metric wiring (per `rules/R010-observability-validation.md`).
+`simulacra_memory_reindex_backlog{tenant}` visible in local Aniani during the reindex integration test — confirms end-to-end metric wiring (per `rules/R010-observability-validation.md`).
 
 ## Spec updates (`specs/S037-memory-and-semantic-retrieval.md`)
 

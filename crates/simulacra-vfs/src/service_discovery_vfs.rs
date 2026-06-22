@@ -334,5 +334,5 @@ fn config_json_reflects_connectivity_status() {
 }
 
 // Observability assertions (spans, counters, warn logs) are validated via
-// Obsidian queries per S010, not unit tests. The tracing instrumentation
+// Aniani queries per S010, not unit tests. The tracing instrumentation
 // is present in servicefs.rs — see info_span!("simulacra_svcfs_read"), warn!(), etc.

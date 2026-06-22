@@ -7,7 +7,7 @@
 // Prerequisites:
 //   ANTHROPIC_API_KEY=sk-...   (required — real LLM calls)
 //   TOY_SAAS_TOKEN=toy-saas-secret-token-xyz   (set by this test)
-//   Obsidian running on localhost:4320   (optional — traces)
+//   Aniani running on localhost:4320   (optional — traces)
 //
 // Usage:
 //   TOY_SAAS_TOKEN=toy-saas-secret-token-xyz ANTHROPIC_API_KEY=sk-... \
@@ -534,42 +534,40 @@ async fn main() {
         pass = false;
     }
 
-    // ── Step 6: Flush traces and query Obsidian ─────────────────────────
-    println!("[6/6] Flushing traces and querying Obsidian...");
+    // ── Step 6: Flush traces and query Aniani ─────────────────────────
+    println!("[6/6] Flushing traces and querying Aniani...");
 
     // Force-flush the trace provider so all spans are exported before querying.
     if let Err(e) = trace_provider.force_flush() {
-        println!("       Trace flush error: {e} (Obsidian may not be running)");
+        println!("       Trace flush error: {e} (Aniani may not be running)");
     }
-    // Brief pause for Obsidian to index the flushed spans.
+    // Brief pause for Aniani to index the flushed spans.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    let obsidian_resp = client
+    let aniani_resp = client
         .get("http://localhost:4320/api/v1/traces")
         .query(&[("service", "simulacra-e2e-test"), ("limit", "5")])
         .send()
         .await;
 
-    match obsidian_resp {
+    match aniani_resp {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
             let trace_count = body["traces"].as_array().map(|a| a.len()).unwrap_or(0);
             if trace_count > 0 {
-                println!("       [PASS] Found {trace_count} trace(s) in Obsidian");
+                println!("       [PASS] Found {trace_count} trace(s) in Aniani");
             } else {
-                println!(
-                    "       [WARN] Obsidian reachable but 0 traces found — check OTLP pipeline"
-                );
+                println!("       [WARN] Aniani reachable but 0 traces found — check OTLP pipeline");
             }
         }
         Ok(resp) => {
             println!(
-                "       [WARN] Obsidian query returned {}: traces may not be available",
+                "       [WARN] Aniani query returned {}: traces may not be available",
                 resp.status()
             );
         }
         Err(e) => {
-            println!("       [SKIP] Obsidian not reachable ({e}) — trace verification skipped");
+            println!("       [SKIP] Aniani not reachable ({e}) — trace verification skipped");
         }
     }
 

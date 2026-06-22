@@ -1,19 +1,19 @@
 //! O11y validation for S039.
 //!
 //! Per `rules/R010-observability-validation.md`, this test:
-//!   1. Initializes an OTLP exporter pointing at the local Obsidian instance
-//!      (`OBSIDIAN_PORT`, default 4320).
+//!   1. Initializes an OTLP exporter pointing at the local Aniani instance
+//!      (`ANIANI_PORT`, default 4320).
 //!   2. Issues VFS writes through `HookedVfsLayer + NotifyingFsLayer` so the
 //!      span and metrics fire.
 //!   3. Flushes the exporter (with the parent `s039_parent` span still in
 //!      scope so the trace tree exports intact).
-//!   4. Queries Obsidian (PromQL `GET /api/v1/query`, TraceQL
+//!   4. Queries Aniani (PromQL `GET /api/v1/query`, TraceQL
 //!      `GET /api/search`, span detail `GET /api/traces/{traceID}`) and
 //!      asserts on parsed JSON: the counter has the expected `kind`/`layer`
 //!      labels, the `vfs_write_hook` span has the documented attribute set,
 //!      and that span's `parentSpanId` matches `s039_parent`'s span ID.
 //!
-//! The test is gated on Obsidian being reachable. When `OBSIDIAN_PORT` is set
+//! The test is gated on Aniani being reachable. When `ANIANI_PORT` is set
 //! and the endpoint accepts queries, this test must validate the o11y
 //! contract — not just smoke-check that some text contains a substring.
 
@@ -38,9 +38,30 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-fn obsidian_base_url() -> String {
-    let port = std::env::var("OBSIDIAN_PORT").unwrap_or_else(|_| "4320".to_string());
+fn aniani_base_url() -> String {
+    let port = std::env::var("ANIANI_PORT").unwrap_or_else(|_| "4320".to_string());
     format!("http://localhost:{port}")
+}
+
+/// Probe whether the Aniani endpoint is accepting connections. Returns false
+/// when the host is unreachable (e.g. in CI, where the o11y stack isn't
+/// running), so the test can skip rather than panic. This realizes the
+/// "gated on Aniani being reachable" contract documented at the top of this
+/// file: when the stack is up the test validates the full o11y contract;
+/// otherwise it is skipped.
+fn aniani_reachable() -> bool {
+    Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "--max-time",
+            "3",
+            &aniani_base_url(),
+        ])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// HTTP GET with a single `?<field>=<value>` query parameter (URL-encoded by
@@ -85,7 +106,7 @@ fn parse_json(s: &str) -> Option<Value> {
 /// flushed; if the OTLP endpoint isn't reachable, init may still succeed
 /// (the exporter buffers and reports failures asynchronously).
 fn init_otlp() -> (SdkTracerProvider, SdkMeterProvider) {
-    let endpoint = obsidian_base_url();
+    let endpoint = aniani_base_url();
     // SAFETY: tests typically run in a single thread; this is a one-time set
     // for the duration of the test.
     unsafe {
@@ -125,13 +146,13 @@ fn init_otlp() -> (SdkTracerProvider, SdkMeterProvider) {
     (tracer_provider, meter_provider)
 }
 
-/// Poll Obsidian until the search response contains a trace whose `traceID`
+/// Poll Aniani until the search response contains a trace whose `traceID`
 /// matches `wanted_trace_id` (case-insensitive), or `deadline` elapses.
 /// Returns the parsed response on success. Pinning by trace ID makes the test
 /// resilient to retained traces from prior runs.
 fn wait_for_trace_id(query: &str, wanted_trace_id: &str, deadline: Duration) -> Option<Value> {
     let start = Instant::now();
-    let url = format!("{}/api/search", obsidian_base_url());
+    let url = format!("{}/api/search", aniani_base_url());
     while start.elapsed() < deadline {
         if let Some(raw) = curl_get(&url, "q", query)
             && let Some(parsed) = parse_json(&raw)
@@ -152,10 +173,10 @@ fn wait_for_trace_id(query: &str, wanted_trace_id: &str, deadline: Duration) -> 
 /// Extract `spanID` of a span named `target` from a search-API response,
 /// restricted to a specific `wanted_trace_id`. Returns `(trace_id, span_id)`.
 ///
-/// Obsidian's `/api/search` response follows the Tempo TraceQL shape:
+/// Aniani's `/api/search` response follows the Tempo TraceQL shape:
 /// `traces[].spanSets[].spans[]` with `name` + `spanID` (no per-span
 /// attributes — those require the trace-detail endpoint). Old runs are
-/// retained per Obsidian's `--retention` flag, so the response can include
+/// retained per Aniani's `--retention` flag, so the response can include
 /// stale traces; pinning to `wanted_trace_id` keeps the assertions deterministic
 /// across repeat runs.
 fn span_id_in_trace(
@@ -253,7 +274,16 @@ fn otlp_attr<'a>(span: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 #[tokio::test]
-async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidian() {
+async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_aniani() {
+    if !aniani_reachable() {
+        eprintln!(
+            "skipping s039 o11y test: Aniani endpoint {} is unreachable \
+             (start the o11y stack, or set ANIANI_PORT, to run it)",
+            aniani_base_url()
+        );
+        return;
+    }
+
     let (tracer_provider, meter_provider) = init_otlp();
 
     let tenant = TenantId::parse("tenant-a").unwrap();
@@ -269,7 +299,7 @@ async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidi
 
     // The parent span lifetime is critical:
     //   1. Capture its OTel span context BEFORE the writes so we can correlate
-    //      what Obsidian indexes with what the SDK assigned at create time.
+    //      what Aniani indexes with what the SDK assigned at create time.
     //   2. Keep the span ALIVE while the child writes happen (via
     //      `.instrument(parent.clone())`) so the children inherit it as parent.
     //   3. Drop the span BEFORE `force_flush` so its end-time is recorded and
@@ -302,13 +332,13 @@ async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidi
 
     // -------- PromQL: counter with documented `kind` / `layer` labels ------
     // OTel uses dot-separated metric names (`simulacra.vfs.events`); per known
-    // Obsidian quirks, dot-name PromQL queries don't always match. Query the
+    // Aniani quirks, dot-name PromQL queries don't always match. Query the
     // underscore form first; fall back to the matcher-syntax form so this
-    // test is robust to either Obsidian normalization strategy.
-    let metrics_url = format!("{}/api/v1/query", obsidian_base_url());
+    // test is robust to either Aniani normalization strategy.
+    let metrics_url = format!("{}/api/v1/query", aniani_base_url());
     let metrics_raw = curl_get(&metrics_url, "query", "simulacra_vfs_events")
         .or_else(|| curl_get(&metrics_url, "query", "{__name__=\"simulacra.vfs.events\"}"))
-        .expect("Obsidian PromQL endpoint must be reachable on OBSIDIAN_PORT");
+        .expect("Aniani PromQL endpoint must be reachable on ANIANI_PORT");
     let metrics = parse_json(&metrics_raw)
         .unwrap_or_else(|| panic!("PromQL response was not JSON: {metrics_raw}"));
     let result = metrics
@@ -345,7 +375,7 @@ async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidi
     );
 
     // -------- TraceQL: locate the `vfs_write_hook` span ------------------
-    // Wait until Obsidian indexes a trace with our parent's trace ID.
+    // Wait until Aniani indexes a trace with our parent's trace ID.
     // Without trace-ID pinning the test would race against retained traces
     // from prior runs.
     let search = wait_for_trace_id(
@@ -355,7 +385,7 @@ async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidi
     )
     .unwrap_or_else(|| {
         panic!(
-            "Obsidian did not index parent trace {parent_trace_id} within 8s; \
+            "Aniani did not index parent trace {parent_trace_id} within 8s; \
              instrumentation likely lost the parent context"
         )
     });
@@ -366,9 +396,9 @@ async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidi
         });
 
     // -------- Trace detail: validate attributes + parent linkage ----------
-    let detail_url = format!("{}/api/traces/{}", obsidian_base_url(), trace_id);
+    let detail_url = format!("{}/api/traces/{}", aniani_base_url(), trace_id);
     let detail_raw =
-        curl_get_plain(&detail_url).expect("Obsidian /api/traces/{trace_id} must be reachable");
+        curl_get_plain(&detail_url).expect("Aniani /api/traces/{trace_id} must be reachable");
     let detail = parse_json(&detail_raw)
         .unwrap_or_else(|| panic!("trace-detail response was not JSON: {detail_raw}"));
 
@@ -433,10 +463,10 @@ async fn vfs_write_stack_exports_event_counter_and_vfs_write_hook_span_to_obsidi
 
     // Sanity: cross-check against the SDK-side context we recorded before
     // dropping `parent` — same span ID seen by the OpenTelemetrySpanExt API
-    // and by Obsidian's stored OTLP batch.
+    // and by Aniani's stored OTLP batch.
     assert_eq!(
         parent_span_id_in_detail.to_lowercase(),
         parent_span_id.to_lowercase(),
-        "Obsidian's stored parent span ID disagrees with the SDK context"
+        "Aniani's stored parent span ID disagrees with the SDK context"
     );
 }

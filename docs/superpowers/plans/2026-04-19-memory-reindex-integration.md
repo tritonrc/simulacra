@@ -1535,17 +1535,17 @@ cargo fmt --all -- --check 2>&1 | tail -5
 
 All four must pass. Fix any regressions surfaced in other crates.
 
-- [ ] **Step 2: Obsidian metric check (observability validation per `rules/R010`)**
+- [ ] **Step 2: Aniani metric check (observability validation per `rules/R010`)**
 
-Run the wipe_and_rebuild integration test with OTLP export to Obsidian, then verify the `simulacra_memory_reindex_backlog` gauge ticks down to zero as the worker drains.
+Run the wipe_and_rebuild integration test with OTLP export to Aniani, then verify the `simulacra_memory_reindex_backlog` gauge ticks down to zero as the worker drains.
 
 ```bash
-# Example — adjust flags to match how local dev runs export to Obsidian.
+# Example — adjust flags to match how local dev runs export to Aniani.
 SIMULACRA_OTLP_ENDPOINT=http://localhost:4317 \
     cargo test -p simulacra-memory --test model_change_reindex -- --nocapture
 ```
 
-Then query Obsidian PromQL:
+Then query Aniani PromQL:
 ```
 simulacra_memory_reindex_backlog{tenant="cli"}
 ```
@@ -1602,6 +1602,6 @@ git commit -m "docs(specs): check off S037 1140/1143/1144 reindex integration [S
 - [ ] `cargo test --workspace` — all green
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` — clean
 - [ ] `cargo fmt --all -- --check` — clean
-- [ ] `simulacra_memory_reindex_backlog` gauge visible in Obsidian during the integration test run
+- [ ] `simulacra_memory_reindex_backlog` gauge visible in Aniani during the integration test run
 - [ ] `specs/S037-memory-and-semantic-retrieval.md` updated with impl/test pointers on flipped assertions
 - [ ] No uncommitted diff in `crates/simulacra-provider/src/openai/mod.rs` (session-initial modification — leave alone unless separately addressed)

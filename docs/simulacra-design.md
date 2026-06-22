@@ -476,7 +476,7 @@ Skills are **composable** — an agent can have multiple skills active simultane
 
 Simulacra emits OpenTelemetry signals following the **OTel GenAI Semantic Conventions** (v1.37+) so any OTLP-compatible backend can observe the agent runtime using standard schemas. The journal is the *internal* state (recovery, replay, fork). OTLP is the *external* observability interface.
 
-**Why standard conventions:** The OTel GenAI SIG has defined specific semantic conventions for LLM operations, agent spans, tool calls, and token usage. Datadog, Grafana, Jaeger, and your own Obsidian instance all understand these conventions. Agents know PromQL/LogQL/TraceQL from training data. Standard conventions, not custom schemas.
+**Why standard conventions:** The OTel GenAI SIG has defined specific semantic conventions for LLM operations, agent spans, tool calls, and token usage. Datadog, Grafana, Jaeger, and your own Aniani instance all understand these conventions. Agents know PromQL/LogQL/TraceQL from training data. Standard conventions, not custom schemas.
 
 **GenAI span conventions we follow:**
 
@@ -518,7 +518,7 @@ Tool call events:
 
 Spec reference: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-metrics/
 
-**Implementation:** `tracing` crate for instrumentation + `tracing-opentelemetry` bridge + `opentelemetry-otlp` exporter. The OTLP endpoint is configurable — point it at Obsidian, Jaeger, Grafana, Datadog, or any OTLP-compatible backend.
+**Implementation:** `tracing` crate for instrumentation + `tracing-opentelemetry` bridge + `opentelemetry-otlp` exporter. The OTLP endpoint is configurable — point it at Aniani, Jaeger, Grafana, Datadog, or any OTLP-compatible backend.
 
 **Relationship to journal:** The journal records *what happened* for replay. OTLP records *how it happened* for monitoring. They capture overlapping data but serve different purposes. The journal is authoritative for state recovery; OTLP is authoritative for performance analysis and live monitoring.
 
@@ -694,7 +694,7 @@ We studied skelegent (secbear, formerly neuron), yoagent, AutoAgents, and other 
 | `rust_decimal` | Precise cost tracking without floating-point accumulation errors (pattern from skelegent). |
 | `ratatui` | TUI framework for headed mode. Mature, widely adopted. |
 | `tracing-opentelemetry` | Bridge from `tracing` instrumentation to OpenTelemetry export. |
-| `opentelemetry-otlp` | OTLP exporter — sends traces/metrics/logs to any OTLP backend (Obsidian, Jaeger, Grafana). |
+| `opentelemetry-otlp` | OTLP exporter — sends traces/metrics/logs to any OTLP backend (Aniani, Jaeger, Grafana). |
 | `eventsource-stream` | SSE parsing for streaming LLM responses. Thin, focused. |
 | `toml` | Config file parsing. |
 
@@ -856,7 +856,7 @@ simulacra/
 
 | Project | What we learn from it |
 |---|---|
-| **Obsidian (tritonrc)** | **Single-binary OTLP observability backend, designed for agent introspection.** A Rust binary that ingests OpenTelemetry logs/metrics/traces and exposes PromQL/LogQL/TraceQL query interfaces — built specifically so agents can introspect the execution of code they're working on. Two impacts on Simulacra: (1) Simulacra should **emit OTLP** so tools like Obsidian can observe the agent runtime externally — every LLM call is a span, every tool invocation is a span, token consumption is a metric. (2) The design philosophy validates our approach: single binary, standard protocols, query interfaces the model already knows from training data (PromQL/LogQL/TraceQL), not custom APIs. Part of the harness engineering discipline: give agents the observability tools to diagnose problems autonomously. |
+| **Aniani (tritonrc)** | **Single-binary OTLP observability backend, designed for agent introspection.** A Rust binary that ingests OpenTelemetry logs/metrics/traces and exposes PromQL/LogQL/TraceQL query interfaces — built specifically so agents can introspect the execution of code they're working on. Two impacts on Simulacra: (1) Simulacra should **emit OTLP** so tools like Aniani can observe the agent runtime externally — every LLM call is a span, every tool invocation is a span, token consumption is a metric. (2) The design philosophy validates our approach: single binary, standard protocols, query interfaces the model already knows from training data (PromQL/LogQL/TraceQL), not custom APIs. Part of the harness engineering discipline: give agents the observability tools to diagnose problems autonomously. |
 | **OpenAI Harness Engineering** | **The methodology for building with agents.** AGENTS.md as table of contents, not encyclopedia. 88 per-subsystem instruction files. Strict layered architecture enforced mechanically. Structured docs/ as system of record. "When the agent struggles, treat it as a signal — identify what's missing and feed it back into the repo." Constraints make agents more productive, not less. Background agents for documentation consistency. Built 1M lines in 5 months with 3 engineers. |
 | **Restate** | **Journal-based durable execution at scale.** Append-only command log, conditional replay (skip completed steps, resume from frontier), bidirectional connection with executing handlers, 94K+ actions/sec with 10ms p50 per step. Single Rust binary. Proves our journal architecture is performant, not just theoretically clean. |
 | **LangGraph** | **Checkpoint + time-travel as first-class primitives.** Fork execution from any checkpoint to explore alternatives. Pluggable CheckpointSaver (InMemory/SQLite/Postgres). Schema versioning for state evolution. Production patterns: guardrails before transitions, deterministic routing in critical stages, per-node checkpoint persistence. Battle-tested at Uber, LinkedIn, Klarna. |

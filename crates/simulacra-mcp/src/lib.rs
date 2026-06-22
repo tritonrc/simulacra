@@ -1734,7 +1734,7 @@ impl McpManager {
         // S041 §Observability: record `simulacra.wasm.fuel_consumed` via
         // the OTel meter directly (the tracing-field histogram
         // convention isn't picked up by every downstream bridge —
-        // notably the local Obsidian instance — so we use the
+        // notably the local Aniani instance — so we use the
         // explicit `Histogram::record` path that already works for
         // `simulacra.mcp.tool.duration`).
         McpMeters::get().wasm_fuel_consumed.record(

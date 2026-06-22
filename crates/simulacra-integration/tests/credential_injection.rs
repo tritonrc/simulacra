@@ -250,6 +250,6 @@ async fn url_matching_works_with_query_string() {
     assert!(headers.is_some(), "base_url + query string should match");
 }
 
-// Journaling and observability assertions are validated via Obsidian queries
+// Journaling and observability assertions are validated via Aniani queries
 // per S010, not unit tests. The tracing instrumentation is present in
 // injector.rs — see tracing::debug! with integration name and URL host.
