@@ -1,0 +1,12 @@
+{
+  "name": "simulacra-frontend-composables-tests",
+  "private": true,
+  "type": "module",
+  "description": "Local test scaffolding only — production frontend is no-compile and uses the importmap in /index.html. Tests run under Node and need (a) vue resolved as a real package (b) absolute /api/... specifiers mapped back to assets/. See loader.mjs.",
+  "scripts": {
+    "test": "node --import ./register-loader.mjs --test"
+  },
+  "devDependencies": {
+    "vue": "3.4.21"
+  }
+}

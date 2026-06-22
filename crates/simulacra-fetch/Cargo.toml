@@ -1,0 +1,11 @@
+[package]
+name = "simulacra-fetch"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+simulacra-http.workspace = true
+rquickjs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

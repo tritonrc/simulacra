@@ -1,0 +1,528 @@
+//! Shell executor — runs parsed shell lines against a [`VirtualFs`].
+
+use std::collections::HashMap;
+
+use simulacra_types::VirtualFs;
+use tracing::{Span, field};
+
+use crate::CommandResult;
+use crate::ShellExternalCommand;
+use crate::builtins;
+use crate::http_proxy::ShellHttpProxy;
+use crate::parser::{self, Connector, RedirectKind, ShellLine};
+
+/// Executes shell commands against a virtual filesystem.
+pub struct ShellExecutor<'a> {
+    vfs: &'a dyn VirtualFs,
+    env: HashMap<String, String>,
+    http_proxy: Option<&'a dyn ShellHttpProxy>,
+    external: Option<&'a dyn ShellExternalCommand>,
+    /// Current working directory. Always normalized to an absolute path.
+    /// `cd` updates it; `pwd` reads it; relative path arguments to `ls`
+    /// (and other path-using builtins) are resolved against it.
+    cwd: String,
+}
+
+impl<'a> ShellExecutor<'a> {
+    /// Create a new executor with the given VFS, environment variables, and
+    /// optional HTTP proxy for intercepting network commands (curl, wget).
+    ///
+    /// The shell's initial working directory is `/`. Use [`Self::with_cwd`]
+    /// to override (e.g. when restoring persisted state).
+    pub fn new(
+        vfs: &'a dyn VirtualFs,
+        env: HashMap<String, String>,
+        http_proxy: Option<&'a dyn ShellHttpProxy>,
+    ) -> Self {
+        Self {
+            vfs,
+            env,
+            http_proxy,
+            external: None,
+            cwd: "/".to_string(),
+        }
+    }
+
+    /// Builder: set the initial working directory. The path is normalized
+    /// to an absolute form; if it does not exist or is not a directory,
+    /// the cwd silently falls back to `/`.
+    pub fn with_cwd(mut self, cwd: impl Into<String>) -> Self {
+        let candidate = normalize_path(&cwd.into(), "/");
+        self.cwd = if dir_exists(self.vfs, &candidate) {
+            candidate
+        } else {
+            "/".to_string()
+        };
+        self
+    }
+
+    /// Builder: attach a mediated runner for commands such as `node` or
+    /// `python` that should participate in shell pipes and redirects.
+    pub fn with_external(mut self, external: &'a dyn ShellExternalCommand) -> Self {
+        self.external = Some(external);
+        self
+    }
+
+    /// Returns the current working directory.
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    /// Consume the executor and return its environment variables.
+    ///
+    /// This allows callers to persist shell state (env vars) across
+    /// multiple executor lifetimes.
+    pub fn into_env(self) -> HashMap<String, String> {
+        self.env
+    }
+
+    /// Consume the executor and return its working directory.
+    ///
+    /// Pair with [`Self::into_env`] to persist full shell state.
+    pub fn into_cwd(self) -> String {
+        self.cwd
+    }
+
+    /// Execute a shell command string.
+    pub fn run(&mut self, input: &str) -> CommandResult {
+        let line = parser::parse(input);
+        self.execute_line(&line)
+    }
+
+    fn execute_line(&mut self, line: &ShellLine) -> CommandResult {
+        if line.items.is_empty() {
+            return CommandResult::success("");
+        }
+
+        // Accumulate stdout / stderr across pipelines so that
+        // `echo a && echo b && echo c` returns "a\nb\nc\n" (not just "c\n").
+        // The exit code tracks the most recently executed pipeline.
+        let mut accumulated_stdout = String::new();
+        let mut accumulated_stderr = String::new();
+        let mut last_exit_code = 0;
+
+        // Precedence: `;` is lower than `&&` / `||`. So
+        // `false && skipped ; ran` is `(false && skipped) ; (ran)` —
+        // the `&&` short-circuit only swallows items until the next `;`.
+        // We model this with a `skipping` flag that resets at every `;`.
+        let mut skipping = false;
+
+        for item in &line.items {
+            if !skipping {
+                let result = self.execute_pipeline(&item.pipeline);
+                accumulated_stdout.push_str(&result.stdout);
+                accumulated_stderr.push_str(&result.stderr);
+                last_exit_code = result.exit_code;
+
+                match item.connector {
+                    Some(Connector::And) => {
+                        if last_exit_code != 0 {
+                            skipping = true;
+                        }
+                    }
+                    Some(Connector::Or) => {
+                        if last_exit_code == 0 {
+                            skipping = true;
+                        }
+                    }
+                    Some(Connector::Semicolon) | None => {
+                        // Never short-circuit across `;` or at end of line.
+                    }
+                }
+            } else {
+                // Currently in a short-circuit window; only `;` reopens execution.
+                if matches!(item.connector, Some(Connector::Semicolon) | None) {
+                    skipping = false;
+                }
+            }
+        }
+
+        CommandResult {
+            stdout: accumulated_stdout,
+            stderr: accumulated_stderr,
+            exit_code: last_exit_code,
+        }
+    }
+
+    fn execute_pipeline(&mut self, pipeline: &crate::parser::Pipeline) -> CommandResult {
+        if pipeline.commands.is_empty() {
+            return CommandResult::success("");
+        }
+
+        let is_pipe_chain = pipeline.commands.len() > 1;
+        let pipeline_span = if is_pipe_chain {
+            tracing::info_span!("shell_pipeline")
+        } else {
+            Span::none()
+        };
+        let _pipeline_guard = pipeline_span.enter();
+
+        let mut stdin = String::new();
+
+        // Execute commands in sequence, piping stdout → stdin
+        let last_idx = pipeline.commands.len() - 1;
+        let mut last_result = CommandResult::success("");
+        let mut accumulated_stderr = String::new();
+
+        for (i, cmd) in pipeline.commands.iter().enumerate() {
+            let cmd_span = tracing::info_span!(
+                "shell_command",
+                simulacra.operation.name = "shell_command",
+                simulacra.shell.command = cmd.program.as_str(),
+                simulacra.shell.argc = cmd.args.len(),
+                simulacra.shell.exit_code = field::Empty,
+            );
+            let _cmd_guard = cmd_span.enter();
+
+            let result = self.execute_command(cmd, &stdin);
+            cmd_span.record("simulacra.shell.exit_code", result.exit_code as i64);
+
+            if i < last_idx {
+                // Pipe stdout to next command's stdin
+                stdin = result.stdout.clone();
+            }
+
+            // Accumulate stderr from all stages
+            accumulated_stderr.push_str(&result.stderr);
+
+            last_result = result;
+
+            // Apply redirects
+            for redirect in &cmd.redirects {
+                let target = self.expand_vars(&redirect.target);
+                let target = resolve_against_cwd(&target, &self.cwd);
+                match redirect.kind {
+                    RedirectKind::Truncate => {
+                        match self.vfs.write(&target, last_result.stdout.as_bytes()) {
+                            Ok(_) => {
+                                last_result.stdout = String::new();
+                            }
+                            Err(e) => {
+                                last_result.exit_code = 1;
+                                let msg = format!("redirect: {target}: {e}\n");
+                                accumulated_stderr.push_str(&msg);
+                            }
+                        }
+                    }
+                    RedirectKind::Append => {
+                        let existing = match self.vfs.read(&target) {
+                            Ok(d) => String::from_utf8_lossy(&d).to_string(),
+                            Err(simulacra_types::VfsError::NotFound(_)) => String::new(),
+                            Err(e) => {
+                                last_result.exit_code = 1;
+                                let msg = format!("redirect: {target}: {e}\n");
+                                accumulated_stderr.push_str(&msg);
+                                continue;
+                            }
+                        };
+                        let combined = format!("{}{}", existing, last_result.stdout);
+                        match self.vfs.write(&target, combined.as_bytes()) {
+                            Ok(_) => {
+                                last_result.stdout = String::new();
+                            }
+                            Err(e) => {
+                                last_result.exit_code = 1;
+                                let msg = format!("redirect: {target}: {e}\n");
+                                accumulated_stderr.push_str(&msg);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // For pipe: pass stdout forward
+            if i < last_idx {
+                stdin = last_result.stdout.clone();
+                // Reset for intermediate pipe stages
+            }
+        }
+
+        last_result.stderr = accumulated_stderr;
+        last_result
+    }
+
+    fn execute_command(&mut self, cmd: &crate::parser::Command, stdin: &str) -> CommandResult {
+        let program = if cmd.program_literal {
+            cmd.program.clone()
+        } else {
+            self.expand_vars(&cmd.program)
+        };
+        let args: Vec<String> = cmd
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if cmd.literal_args.get(i).copied().unwrap_or(false) {
+                    a.clone()
+                } else {
+                    self.expand_vars(a)
+                }
+            })
+            .collect();
+
+        if program.is_empty() {
+            return CommandResult::success("");
+        }
+
+        // Handle export: set environment variables
+        if program == "export" {
+            for arg in &args {
+                if let Some((key, value)) = arg.split_once('=') {
+                    self.env.insert(key.to_string(), value.to_string());
+                }
+            }
+            return CommandResult::success("");
+        }
+
+        // ── Stateful builtins (need executor state) ──────────────────
+        // These cannot be in `try_builtin` because that table is pure.
+
+        // `cd [dir]` — update self.cwd. With no arg, cd to '/'.
+        if program == "cd" {
+            return self.builtin_cd(&args);
+        }
+
+        // `pwd` — print current working directory.
+        if program == "pwd" {
+            return CommandResult::success(format!("{}\n", self.cwd));
+        }
+
+        // `env` — print environment as KEY=VALUE lines (sorted for determinism).
+        if program == "env" {
+            let mut keys: Vec<&String> = self.env.keys().collect();
+            keys.sort();
+            let mut out = String::new();
+            for key in keys {
+                if let Some(value) = self.env.get(key) {
+                    out.push_str(&format!("{key}={value}\n"));
+                }
+            }
+            return CommandResult::success(out);
+        }
+
+        // `which CMD ...` — for each name, print the name if it's a known
+        // builtin (or `cd`/`pwd`/`env`/`which`/`export`), else stderr + nonzero.
+        if program == "which" {
+            return self.builtin_which(&args);
+        }
+
+        // Try builtins first
+        if let Some(result) =
+            builtins::try_builtin(&program, &args, stdin, self.vfs, self.http_proxy, &self.cwd)
+        {
+            return result;
+        }
+
+        if let Some(external) = self.external
+            && let Some(result) = external.run_external(&program, &args, stdin, &self.cwd)
+        {
+            return result;
+        }
+
+        // Unknown command
+        CommandResult::error(127, format!("command not found: {program}\n"))
+    }
+
+    /// `cd` builtin — updates the executor's cwd. POSIX-ish:
+    ///   - no args → `/` (we do not have $HOME semantics)
+    ///   - relative arg resolved against current cwd
+    ///   - target must exist and be a directory
+    fn builtin_cd(&mut self, args: &[String]) -> CommandResult {
+        let target = if args.is_empty() {
+            "/".to_string()
+        } else {
+            resolve_against_cwd(&args[0], &self.cwd)
+        };
+
+        match self.vfs.metadata(&target) {
+            Ok(m) if m.is_dir => {
+                self.cwd = target;
+                CommandResult::success("")
+            }
+            Ok(_) => CommandResult::error(1, format!("cd: not a directory: {target}\n")),
+            Err(_) => CommandResult::error(1, format!("cd: no such file or directory: {target}\n")),
+        }
+    }
+
+    /// `which` builtin — reports whether each argument is a known shell command.
+    /// We don't have a $PATH; everything is either a builtin or unknown.
+    fn builtin_which(&self, args: &[String]) -> CommandResult {
+        if args.is_empty() {
+            return CommandResult::error(1, "which: missing operand\n".to_string());
+        }
+        let mut out = String::new();
+        let mut all_found = true;
+        for name in args {
+            if is_known_command(name) {
+                out.push_str(&format!("{name}: shell builtin\n"));
+            } else {
+                all_found = false;
+            }
+        }
+        if all_found {
+            CommandResult::success(out)
+        } else {
+            CommandResult {
+                stdout: out,
+                stderr: String::new(),
+                exit_code: 1,
+            }
+        }
+    }
+
+    /// Expand `$VAR`, `${VAR}`, and `$(cmd)` in a string.
+    fn expand_vars(&mut self, input: &str) -> String {
+        let chars: Vec<char> = input.chars().collect();
+        let len = chars.len();
+        let mut result = String::new();
+        let mut i = 0;
+
+        while i < len {
+            if chars[i] == '$' && i + 1 < len {
+                // $(cmd) — command substitution
+                if chars[i + 1] == '(' {
+                    i += 2;
+                    let mut depth = 1;
+                    let mut cmd_str = String::new();
+                    while i < len && depth > 0 {
+                        if chars[i] == '(' {
+                            depth += 1;
+                        } else if chars[i] == ')' {
+                            depth -= 1;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        cmd_str.push(chars[i]);
+                        i += 1;
+                    }
+                    let sub_result = self.run(&cmd_str);
+                    // Strip trailing newline from command substitution
+                    let out = sub_result.stdout.trim_end_matches('\n').to_string();
+                    result.push_str(&out);
+                    continue;
+                }
+
+                // ${VAR}
+                if chars[i + 1] == '{' {
+                    i += 2;
+                    let mut var_name = String::new();
+                    while i < len && chars[i] != '}' {
+                        var_name.push(chars[i]);
+                        i += 1;
+                    }
+                    if i < len {
+                        i += 1; // skip }
+                    }
+                    let val = self.env.get(&var_name).cloned().unwrap_or_default();
+                    result.push_str(&val);
+                    continue;
+                }
+
+                // $VAR
+                i += 1;
+                let mut var_name = String::new();
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    var_name.push(chars[i]);
+                    i += 1;
+                }
+                let val = self.env.get(&var_name).cloned().unwrap_or_default();
+                result.push_str(&val);
+                continue;
+            }
+
+            result.push(chars[i]);
+            i += 1;
+        }
+
+        result
+    }
+}
+
+// ── Path helpers ─────────────────────────────────────────────────────
+
+/// Normalize a path. Mirrors the VFS `normalize` helper: collapses `.`, `..`,
+/// double slashes, and resolves `..` that would escape root to `/`.
+/// If `path` is relative, it is treated as relative to `base`.
+pub(crate) fn normalize_path(path: &str, base: &str) -> String {
+    let combined = if path.starts_with('/') {
+        path.to_string()
+    } else if base == "/" {
+        format!("/{path}")
+    } else {
+        format!("{base}/{path}")
+    };
+
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in combined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
+/// Resolve a possibly-relative path argument against the current working
+/// directory. Always returns an absolute, normalized path.
+pub(crate) fn resolve_against_cwd(arg: &str, cwd: &str) -> String {
+    normalize_path(arg, cwd)
+}
+
+/// Returns `true` iff `path` exists in the VFS and is a directory.
+fn dir_exists(vfs: &dyn VirtualFs, path: &str) -> bool {
+    matches!(vfs.metadata(path), Ok(m) if m.is_dir)
+}
+
+/// Whether `name` is a known shell command (builtin or executor-level).
+/// Used by `which` to decide whether to report success.
+fn is_known_command(name: &str) -> bool {
+    matches!(
+        name,
+        "echo"
+            | "cat"
+            | "ls"
+            | "mkdir"
+            | "grep"
+            | "true"
+            | "false"
+            | "cp"
+            | "mv"
+            | "rm"
+            | "head"
+            | "tail"
+            | "sed"
+            | "wc"
+            | "find"
+            | "sort"
+            | "uniq"
+            | "cut"
+            | "tr"
+            | "tee"
+            | "curl"
+            | "wget"
+            | "touch"
+            | "test"
+            | "["
+            | "printf"
+            | "basename"
+            | "dirname"
+            | "node"
+            | "nodejs"
+            | "python"
+            | "python3"
+            | "cd"
+            | "pwd"
+            | "env"
+            | "which"
+            | "export"
+    )
+}

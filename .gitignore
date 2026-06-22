@@ -1,0 +1,14 @@
+/target
+.env*
+*.swp
+*.swo
+*~
+.DS_Store
+simulacra.toml
+!demos/**/simulacra.toml
+# SQLite ephemeral files — demos regenerate these at runtime
+demos/**/*.db
+demos/**/*.db-shm
+demos/**/*.db-wal
+.claude/worktrees/
+.superpowers/

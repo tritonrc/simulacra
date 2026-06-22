@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Simulacra</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    // Vue feature flags (must be defined before vue is imported).
+    window.__VUE_OPTIONS_API__ = true;
+    window.__VUE_PROD_DEVTOOLS__ = false;
+    window.__VUE_PROD_HYDRATION_MISMATCH_DETAILS__ = false;
+  </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "vue": "https://cdn.jsdelivr.net/npm/vue@3.4.21/dist/vue.esm-browser.js",
+      "vue-router": "https://cdn.jsdelivr.net/npm/vue-router@4.3.0/dist/vue-router.esm-browser.js",
+      "@vue/devtools-api": "https://esm.sh/@vue/devtools-api@6.6.4"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

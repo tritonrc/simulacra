@@ -1,0 +1,32 @@
+[package]
+name = "simulacra-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simulacra-types.workspace = true
+simulacra-hooks.workspace = true
+simulacra-wasm = { workspace = true, optional = true }
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+opentelemetry.workspace = true
+url = "2"
+base64 = "0.22"
+wasmtime = { version = "43", default-features = false, features = ["component-model", "cranelift", "std", "runtime"], optional = true }
+wasmtime-wasi = { version = "43", optional = true }
+
+[features]
+default = ["wasm"]
+wasm = ["dep:simulacra-wasm", "dep:wasmtime", "dep:wasmtime-wasi"]
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+simulacra-config.workspace = true
+toml.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

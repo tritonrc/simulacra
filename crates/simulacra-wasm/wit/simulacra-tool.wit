@@ -1,0 +1,21 @@
+package simulacra:tools@0.1.0;
+
+interface types {
+    record tool-def {
+        name: string,
+        description: string,
+        input-schema: string,
+    }
+
+    variant tool-error {
+        invalid-arguments(string),
+        execution-failed(string),
+    }
+}
+
+world tool {
+    use types.{tool-def, tool-error};
+
+    export list-tools: func() -> list<tool-def>;
+    export call-tool: func(name: string, arguments: string) -> result<string, tool-error>;
+}

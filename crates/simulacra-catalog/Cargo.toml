@@ -1,0 +1,29 @@
+[package]
+name = "simulacra-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+test-internals = []
+
+[dependencies]
+simulacra-types.workspace = true
+async-trait.workspace = true
+base64 = "0.22"
+chrono = { workspace = true, features = ["serde"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+tokio.workspace = true
+ulid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+simulacra-catalog = { path = ".", features = ["test-internals"] }
+simulacra-vfs.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber.workspace = true

@@ -1,0 +1,34 @@
+[package]
+name = "simulacra-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simulacra-config.workspace = true
+simulacra-types.workspace = true
+simulacra-provider.workspace = true
+simulacra-context.workspace = true
+simulacra-sandbox.workspace = true
+simulacra-http.workspace = true
+simulacra-mcp.workspace = true
+simulacra-tool.workspace = true
+simulacra-hooks.workspace = true
+simulacra-vfs.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+opentelemetry.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rust_decimal.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+simulacra-provider = { path = "../simulacra-provider", features = ["anthropic"] }
+simulacra-context = { path = "../simulacra-context" }
+simulacra-memory.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true

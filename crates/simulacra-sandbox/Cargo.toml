@@ -1,0 +1,30 @@
+[package]
+name = "simulacra-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+python = ["dep:simulacra-python-runtime"]
+
+[dependencies]
+simulacra-types.workspace = true
+simulacra-vfs.workspace = true
+simulacra-shell.workspace = true
+simulacra-quickjs.workspace = true
+simulacra-http.workspace = true
+simulacra-fetch.workspace = true
+simulacra-integration.workspace = true
+simulacra-python-runtime = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+opentelemetry.workspace = true
+
+[dev-dependencies]
+simulacra-http.workspace = true
+rust_decimal.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

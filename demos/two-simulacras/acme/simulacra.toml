@@ -1,0 +1,27 @@
+[project]
+name = "acme-corp"
+description = "Acme Corp product team — PM and developer agents"
+
+[memory]
+dir = "./acme-mem"
+tenant = "acme"
+
+[vfs]
+auto_mount_skills = false
+
+[task]
+entry_agent = "team"
+
+[agent_types.team]
+model = "claude-sonnet-4-6"
+max_turns = 12
+max_tokens = 24000
+system_prompt = "prompts/team.md"
+
+[agent_types.team.capabilities]
+javascript = true
+
+[agent_types.team.capabilities.memory]
+enabled = true
+search_scopes = ["/var/memory/self/", "/var/memory/outbox/"]
+write_scopes  = ["/var/memory/self/", "/var/memory/outbox/"]

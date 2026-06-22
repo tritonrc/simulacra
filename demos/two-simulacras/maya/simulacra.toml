@@ -1,0 +1,24 @@
+[project]
+name = "maya-client"
+description = "Maya Chen — picky but fair potential customer"
+
+[memory]
+dir = "./maya-mem"
+tenant = "maya"
+
+[vfs]
+auto_mount_skills = false
+
+[task]
+entry_agent = "maya"
+
+[agent_types.maya]
+model = "claude-sonnet-4-6"
+max_turns = 6
+max_tokens = 8000
+system_prompt = "prompts/maya.md"
+
+[agent_types.maya.capabilities.memory]
+enabled = true
+search_scopes = ["/var/memory/self/", "/var/memory/outbox/"]
+write_scopes  = ["/var/memory/self/", "/var/memory/outbox/"]

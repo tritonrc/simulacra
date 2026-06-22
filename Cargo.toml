@@ -1,0 +1,125 @@
+[workspace]
+resolver = "2"
+exclude = [
+    "tools/echo-tool",
+    "tools/sandbox-test-tool",
+]
+members = [
+    "crates/simulacra-types",
+    "crates/simulacra-provider",
+    "crates/simulacra-tool",
+    "crates/simulacra-context",
+    "crates/simulacra-vfs",
+    "crates/simulacra-shell",
+    "crates/simulacra-quickjs",
+    "crates/simulacra-sandbox",
+    "crates/simulacra-mcp",
+    "crates/simulacra-mcp-server-sdk",
+    "crates/simulacra-mcp-server-sdk-macro",
+    "crates/simulacra-runtime",
+    "crates/simulacra-config",
+    "crates/simulacra-cli",
+    "crates/simulacra-http",
+    "crates/simulacra-fetch",
+    "crates/simulacra-mcp-test-server",
+    "crates/simulacra-wasm",
+    "crates/simulacra-hooks",
+    "crates/simulacra-python-runtime",
+    "crates/simulacra-python",
+    "crates/simulacra-server",
+    "crates/simulacra-integration",
+    "crates/simulacra-memory",
+    "crates/simulacra-catalog",
+    "crates/simulacra-graphql",
+    "crates/simulacra-frontend",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Schema generation
+schemars = "0.8"
+
+# Decimal for money
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+ureq = "3"
+
+# Database
+rusqlite = { version = "0.34", features = ["bundled"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+ulid = { version = "1.1", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+
+# Config
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "2", features = ["serde"] }
+
+# Tracing / OTel
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-json", "trace", "metrics", "logs", "reqwest-blocking-client"] }
+tracing-opentelemetry = "0.32"
+opentelemetry-appender-tracing = "0.31"
+
+# QuickJS
+rquickjs = { version = "0.9", features = ["bindgen", "loader", "macro", "futures"] }
+
+# Internal crates
+simulacra-types = { path = "crates/simulacra-types" }
+simulacra-provider = { path = "crates/simulacra-provider" }
+simulacra-tool = { path = "crates/simulacra-tool" }
+simulacra-context = { path = "crates/simulacra-context" }
+simulacra-vfs = { path = "crates/simulacra-vfs" }
+simulacra-shell = { path = "crates/simulacra-shell" }
+simulacra-quickjs = { path = "crates/simulacra-quickjs" }
+simulacra-sandbox = { path = "crates/simulacra-sandbox" }
+simulacra-mcp = { path = "crates/simulacra-mcp" }
+simulacra-runtime = { path = "crates/simulacra-runtime" }
+simulacra-config = { path = "crates/simulacra-config" }
+simulacra-http = { path = "crates/simulacra-http" }
+simulacra-fetch = { path = "crates/simulacra-fetch" }
+simulacra-wasm = { path = "crates/simulacra-wasm" }
+simulacra-hooks = { path = "crates/simulacra-hooks" }
+simulacra-python-runtime = { path = "crates/simulacra-python-runtime" }
+simulacra-python = { path = "crates/simulacra-python" }
+simulacra-server = { path = "crates/simulacra-server" }
+simulacra-integration = { path = "crates/simulacra-integration" }
+simulacra-memory = { path = "crates/simulacra-memory" }
+simulacra-catalog = { path = "crates/simulacra-catalog" }
+simulacra-graphql = { path = "crates/simulacra-graphql" }
+simulacra-frontend = { path = "crates/simulacra-frontend" }
+
+# GraphQL
+async-graphql = { version = "7", features = ["chrono"] }
+parking_lot = "0.12"
+
+# HTTP stack (used by simulacra-graphql + simulacra-server)
+axum = { version = "0.7", features = ["json", "macros"] }
+http = "1"
+hyper = "1"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs", "set-header"] }

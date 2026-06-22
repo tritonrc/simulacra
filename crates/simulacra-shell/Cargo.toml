@@ -1,0 +1,15 @@
+[package]
+name = "simulacra-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simulacra-types.workspace = true
+simulacra-vfs.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,47 @@
+package simulacra:mcp@0.1.0;
+
+interface types {
+    record tool-def {
+        name: string,
+        description: string,
+        input-schema: string,
+    }
+
+    variant tool-error {
+        invalid-arguments(string),
+        execution-failed(string),
+    }
+}
+
+interface http {
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    variant fetch-error {
+        capability-denied(string),
+        hook-denied(string),
+        transport(string),
+        timeout,
+    }
+
+    fetch: func(req: request) -> result<response, fetch-error>;
+}
+
+world server {
+    use types.{tool-def, tool-error};
+
+    import http;
+
+    export list-tools: func() -> list<tool-def>;
+    export call-tool: func(name: string, arguments: string) -> result<string, tool-error>;
+}

@@ -1,0 +1,72 @@
+[package]
+name = "simulacra-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-graphql = { workspace = true }
+async-trait = "0.1"
+axum = { version = "0.7", features = ["json", "ws", "macros", "multipart"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+crossbeam-channel = "0.5"
+cron = "0.12"
+simulacra-catalog.workspace = true
+simulacra-config.workspace = true
+simulacra-context.workspace = true
+simulacra-frontend.workspace = true
+simulacra-graphql.workspace = true
+simulacra-python = { workspace = true, optional = true }
+simulacra-hooks.workspace = true
+simulacra-http.workspace = true
+simulacra-integration.workspace = true
+simulacra-memory.workspace = true
+simulacra-mcp.workspace = true
+simulacra-provider.workspace = true
+simulacra-runtime.workspace = true
+simulacra-sandbox.workspace = true
+simulacra-tool.workspace = true
+simulacra-types.workspace = true
+simulacra-vfs.workspace = true
+rust_decimal.workspace = true
+futures = "0.3"
+hex = "0.4"
+hmac = "0.12"
+jsonwebtoken = "9"
+regex-lite = "0.1"
+ureq.workspace = true
+sha2 = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+base64 = "0.22"
+uuid.workspace = true
+
+tracing-subscriber.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+
+[features]
+default = ["python"]
+python = ["dep:simulacra-python", "simulacra-sandbox/python"]
+
+[dev-dependencies]
+tempfile = "3"
+axum-test = { version = "16", features = ["ws"] }
+tokio = { workspace = true, features = ["test-util"] }
+simulacra-config.workspace = true
+simulacra-integration.workspace = true
+simulacra-runtime.workspace = true
+simulacra-types.workspace = true
+rust_decimal.workspace = true
+reqwest.workspace = true

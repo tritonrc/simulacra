@@ -1,0 +1,15 @@
+[package]
+name = "simulacra-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+tower-http.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tower = { workspace = true, features = ["util"] }
+hyper.workspace = true
+http-body-util = "0.1"

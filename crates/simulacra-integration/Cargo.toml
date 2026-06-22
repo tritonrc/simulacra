@@ -1,0 +1,26 @@
+[package]
+name = "simulacra-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simulacra-config.workspace = true
+simulacra-types.workspace = true
+opentelemetry.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+async-trait = "0.1"
+
+[dev-dependencies]
+simulacra-http.workspace = true
+simulacra-sandbox.workspace = true
+simulacra-vfs.workspace = true
+rust_decimal.workspace = true
+tokio = { version = "1", features = ["full", "test-util"] }
+toml.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "simulacra-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+simulacra-types.workspace = true
+opentelemetry.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+sha2 = "0.10"
+sqlite-vec = "0.1.9"
+rand = "0.9"
+data-encoding = "2"
+
+[dev-dependencies]
+simulacra-config.workspace = true
+simulacra-vfs.workspace = true
+opentelemetry_sdk.workspace = true
+tempfile = "3"
+tracing-subscriber.workspace = true
