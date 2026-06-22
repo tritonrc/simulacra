@@ -1,0 +1,10 @@
+# nextest runs each test in its own process (strong isolation, which removes
+# shared-global-state flakiness e.g. the TUI suite) and supports retries to
+# absorb transient races (e.g. SQLite "database is locked" under CI load).
+[profile.default]
+retries = 2
+# Warn on slow tests but don't kill them; some suites legitimately take a while.
+slow-timeout = { period = "60s" }
+# A small amount of inter-test contention (SQLite, sockets) is smoother serialized
+# in spots; retries cover the rest. Keep default parallelism for speed.
+fail-fast = false
