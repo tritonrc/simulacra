@@ -228,7 +228,7 @@ impl JournalStorage for CountingJournalStorage {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "spawn"))]
 mod tests {
     use super::*;
     use rust_decimal::Decimal;

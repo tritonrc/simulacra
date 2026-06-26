@@ -14,7 +14,9 @@ mod replay;
 mod session;
 mod session_file;
 mod session_sqlite;
+#[cfg(feature = "spawn")]
 mod spawn_tool;
+#[cfg(feature = "spawn")]
 mod vfs_hook;
 
 // Re-export all public types at the crate root.
@@ -30,10 +32,12 @@ pub use replay::JournalReplayIterator;
 pub use session::{InMemorySessionStorage, Session, SessionStorage};
 pub use session_file::FileSessionStorage;
 pub use session_sqlite::SqliteSessionStorage;
+#[cfg(feature = "spawn")]
 pub use spawn_tool::{
     AgentTaskFactory, ChildCellConfigurator, ChildToolRegistrar, DEFAULT_SYSTEM_PROMPT,
     NoopContextStrategy, ProviderKind, SpawnAgentTool,
 };
+#[cfg(feature = "spawn")]
 pub use vfs_hook::HookedVfsLayer;
 
 // ---------------------------------------------------------------------------
@@ -47,8 +51,39 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ResourceBudget};
+use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ExitReason, ResourceBudget};
 use tokio::task::JoinHandle;
+
+#[cfg(not(feature = "spawn"))]
+const FALLBACK_GENERIC_AGENT_SYSTEM_PROMPT: &str =
+    "You are a helpful AI assistant running inside Simulacra.";
+
+fn default_generic_agent_system_prompt() -> String {
+    #[cfg(feature = "spawn")]
+    {
+        crate::spawn_tool::DEFAULT_SYSTEM_PROMPT.to_string()
+    }
+    #[cfg(not(feature = "spawn"))]
+    {
+        FALLBACK_GENERIC_AGENT_SYSTEM_PROMPT.to_string()
+    }
+}
+
+/// Convert an `ExitReason` to a snake_case string per spec.
+fn exit_reason_to_snake_case(reason: &ExitReason) -> String {
+    match reason {
+        ExitReason::Complete => "completed".into(),
+        ExitReason::MaxTurns => "max_turns".into(),
+        ExitReason::BudgetExhausted => "budget_exhausted".into(),
+        ExitReason::GuardrailTripped(s) => format!("guardrail_tripped:{s}"),
+        ExitReason::AwaitingApproval => "awaiting_approval".into(),
+        ExitReason::Cancelled => "cancelled".into(),
+        ExitReason::PolicyKill { hook, reason } => {
+            format!("policy_kill:{hook}:{reason}")
+        }
+        ExitReason::Error(s) => format!("error:{s}"),
+    }
+}
 
 /// A boxed future that resolves to an agent loop result.
 pub type BoxTaskFuture =
@@ -455,9 +490,7 @@ impl AgentSupervisor {
                                 .system_prompt
                                 .clone()
                                 .filter(|prompt| !prompt.is_empty())
-                                .unwrap_or_else(|| {
-                                    crate::spawn_tool::DEFAULT_SYSTEM_PROMPT.to_string()
-                                }),
+                                .unwrap_or_else(default_generic_agent_system_prompt),
                         )
                     } else {
                         None
@@ -640,7 +673,7 @@ impl AgentSupervisor {
                     let _ = j.append(completed_entry);
                 }
 
-                let exit_reason_str = spawn_tool::exit_reason_to_snake_case(&output.exit_reason);
+                let exit_reason_str = exit_reason_to_snake_case(&output.exit_reason);
 
                 // S019: Emit ActivityEvent::ChildFinished with aggregated stats
                 sink.emit(ActivityEvent::ChildFinished {

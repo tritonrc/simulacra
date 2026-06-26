@@ -7,7 +7,8 @@ license.workspace = true
 [dependencies]
 simulacra-types.workspace = true
 simulacra-memory.workspace = true
-simulacra-sandbox.workspace = true
+simulacra-sandbox = { workspace = true, optional = true }
+simulacra-vfs = { workspace = true, optional = true }
 simulacra-hooks.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -15,9 +16,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+sandbox = ["dep:simulacra-sandbox", "dep:simulacra-vfs"]
+
 [dev-dependencies]
 simulacra-http.workspace = true
-simulacra-vfs.workspace = true
 rust_decimal.workspace = true
 tokio.workspace = true
 tracing.workspace = true

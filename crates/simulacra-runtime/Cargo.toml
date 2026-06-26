@@ -9,12 +9,12 @@ simulacra-config.workspace = true
 simulacra-types.workspace = true
 simulacra-provider.workspace = true
 simulacra-context.workspace = true
-simulacra-sandbox.workspace = true
+simulacra-sandbox = { workspace = true, optional = true }
 simulacra-http.workspace = true
 simulacra-mcp.workspace = true
 simulacra-tool.workspace = true
 simulacra-hooks.workspace = true
-simulacra-vfs.workspace = true
+simulacra-vfs = { workspace = true, optional = true }
 rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -23,6 +23,9 @@ opentelemetry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rust_decimal.workspace = true
+
+[features]
+spawn = ["dep:simulacra-vfs", "dep:simulacra-sandbox", "simulacra-tool/sandbox"]
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

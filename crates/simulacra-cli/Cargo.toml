@@ -22,8 +22,8 @@ simulacra-mcp.workspace = true
 simulacra-types.workspace = true
 simulacra-sandbox.workspace = true
 simulacra-http.workspace = true
-simulacra-tool.workspace = true
-simulacra-runtime.workspace = true
+simulacra-tool = { workspace = true, features = ["sandbox"] }
+simulacra-runtime = { workspace = true, features = ["spawn"] }
 simulacra-hooks.workspace = true
 simulacra-provider.workspace = true
 simulacra-vfs.workspace = true

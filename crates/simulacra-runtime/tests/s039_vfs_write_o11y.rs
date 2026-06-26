@@ -1,3 +1,5 @@
+#![cfg(feature = "spawn")]
+
 //! O11y validation for S039.
 //!
 //! Per `rules/R010-observability-validation.md`, this test:

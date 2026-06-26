@@ -1,3 +1,5 @@
+#![cfg(feature = "sandbox")]
+
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use simulacra_sandbox::AgentCell;

@@ -1,4 +1,5 @@
 #![allow(clippy::type_complexity)]
+#![cfg(feature = "spawn")]
 
 use rust_decimal::Decimal;
 use simulacra_config::{

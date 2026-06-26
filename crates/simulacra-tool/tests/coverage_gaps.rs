@@ -1,3 +1,5 @@
+#![cfg(feature = "sandbox")]
+
 //! Additional behavioural tests for simulacra-tool coverage gaps.
 //!
 //! Covers: FT1 (SkillTool surface), FT2 (skill frontmatter parsing),

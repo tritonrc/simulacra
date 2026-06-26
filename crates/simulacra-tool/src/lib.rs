@@ -4,13 +4,16 @@
 //! when the model returns a tool-use response.
 
 use std::collections::HashMap;
+#[cfg(feature = "sandbox")]
 use std::future::Future;
+#[cfg(feature = "sandbox")]
 use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use simulacra_hooks::pipeline::HookPipeline;
 use simulacra_hooks::verdict::Operation;
+#[cfg(feature = "sandbox")]
 use simulacra_sandbox::{AgentCell, SandboxError};
 use simulacra_types::VirtualFs;
 
@@ -232,6 +235,7 @@ impl Default for ToolRegistry {
 // Error mapping
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 fn map_sandbox_error(err: SandboxError) -> ToolError {
     match err {
         SandboxError::CapabilityDenied(denied) => ToolError::CapabilityDenied(denied),
@@ -247,6 +251,7 @@ fn map_sandbox_error(err: SandboxError) -> ToolError {
 // Helper: extract a required string field from JSON args
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 fn require_str(args: &Value, field: &str) -> Result<String, ToolError> {
     args.get(field)
         .and_then(Value::as_str)
@@ -258,10 +263,12 @@ fn require_str(args: &Value, field: &str) -> Result<String, ToolError> {
 // FileReadTool
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 struct FileReadTool {
     cell: Arc<AgentCell>,
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for FileReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -307,10 +314,12 @@ impl Tool for FileReadTool {
 // FileWriteTool
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 struct FileWriteTool {
     cell: Arc<AgentCell>,
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for FileWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -352,10 +361,12 @@ impl Tool for FileWriteTool {
 // FileEditTool
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 struct FileEditTool {
     cell: Arc<AgentCell>,
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for FileEditTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -429,10 +440,12 @@ impl Tool for FileEditTool {
 // ShellExecTool
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 struct ShellExecTool {
     cell: Arc<AgentCell>,
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for ShellExecTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -484,10 +497,12 @@ impl Tool for ShellExecTool {
 // JsExecTool
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 struct JsExecTool {
     cell: Arc<AgentCell>,
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for JsExecTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -546,10 +561,12 @@ impl Tool for JsExecTool {
 // ListDirTool
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "sandbox")]
 struct ListDirTool {
     cell: Arc<AgentCell>,
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for ListDirTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
@@ -695,6 +712,7 @@ pub struct SkillMeta {
 ///
 /// If the named skill has `disable_model_invocation: true`, a model-triggered
 /// call returns an error tool result even if the model guessed the name.
+#[cfg(feature = "sandbox")]
 pub struct SkillTool {
     cell: Arc<AgentCell>,
     /// The effective skill catalog is the intersection of discovered skills,
@@ -703,6 +721,7 @@ pub struct SkillTool {
     catalog: Vec<SkillMeta>,
 }
 
+#[cfg(feature = "sandbox")]
 impl SkillTool {
     pub fn new(cell: Arc<AgentCell>, catalog: Vec<SkillMeta>) -> Self {
         Self { cell, catalog }
@@ -759,6 +778,7 @@ impl SkillTool {
     }
 }
 
+#[cfg(feature = "sandbox")]
 impl Tool for SkillTool {
     fn definition(&self) -> ToolDefinition {
         // The Skill tool definition is built from the current agent's effective
@@ -875,6 +895,7 @@ impl Tool for SkillTool {
 
 /// Strip YAML frontmatter (delimited by `---`) from a SKILL.md string,
 /// returning only the markdown body after the closing `---`.
+#[cfg(feature = "sandbox")]
 fn strip_yaml_frontmatter(content: &str) -> String {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -1088,6 +1109,7 @@ pub fn discover_and_filter_skills(
 // ---------------------------------------------------------------------------
 
 /// Register all built-in tools into the given registry.
+#[cfg(feature = "sandbox")]
 pub fn register_builtins(registry: &mut ToolRegistry, cell: Arc<AgentCell>) {
     registry.register(Box::new(FileReadTool {
         cell: Arc::clone(&cell),
