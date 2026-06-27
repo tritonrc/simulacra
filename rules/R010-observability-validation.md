@@ -42,7 +42,7 @@ curl -s "http://localhost:4320/loki/api/v1/query" \
 
 - **After green phase:** Run the test suite with OTLP export enabled, then query Aniani to verify o11y assertions from the spec.
 - **During debugging:** Query traces to understand execution flow, logs to find errors, metrics to spot anomalies.
-- **During review phase:** The reviewer (Gemini) can reference Aniani query results as evidence of o11y compliance.
+- **During review phase:** The reviewer, Codex (gpt-5.5), can reference Aniani query results as evidence of o11y compliance.
 
 ### Agents Know These Query Languages
 

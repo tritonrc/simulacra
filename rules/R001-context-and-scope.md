@@ -31,11 +31,13 @@ Sub-agents are scoped to a single phase of the protocol (see AGENTS.md § The Pr
 
 | Phase | Sub-agent scope |
 |---|---|
-| Red | NOT a sub-agent — shell to `copilot --model gpt-5.4` |
+| Red | NOT a sub-agent — shell to `codex exec --model gpt-5.5 --full-auto --cd . "..." < /dev/null` |
 | Green | One Claude sub-agent per spec. Receives failing tests + spec. Writes implementation only. |
-| Review | NOT a sub-agent — shell to `copilot --model gemini-3-pro-preview` |
+| Review | NOT a sub-agent — shell to `codex exec --model gpt-5.5 --cd . "..." < /dev/null` |
 
-A sub-agent that writes tests AND implementation violates the adversarial boundary. The whole point of multi-model TDD is that the test author and the implementer are different.
+> `codex exec` hangs unless stdin is closed (`< /dev/null`); macOS has no `timeout`.
+
+A sub-agent that writes tests AND implementation violates the adversarial boundary. The whole point of the protocol is that the test author and the implementer are different: Codex (gpt-5.5) writes tests and reviews, Claude implements, and the human remains the architectural authority.
 
 ### Stay In Your Crate
 
@@ -57,4 +59,4 @@ A sub-agent that writes tests AND implementation violates the adversarial bounda
 
 ## Why
 
-Context windows are finite. Loading irrelevant files wastes tokens, increases unintended changes, and makes review harder. Scoped changes are easier to test, review, and revert. Separating phases across models and sub-agents preserves the adversarial diversity that makes the protocol work.
+Context windows are finite. Loading irrelevant files wastes tokens, increases unintended changes, and makes review harder. Scoped changes are easier to test, review, and revert. Separating phases across Codex (gpt-5.5), Claude sub-agents, and human architectural review preserves the adversarial diversity that makes the protocol work.

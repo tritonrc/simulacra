@@ -30,16 +30,17 @@ Every implementation task follows this protocol. No exceptions. No shortcuts.
 
 Three steps, each in a **sub-agent** to keep the top-level context clean.
 
-**Step 1a — Draft tests.** `copilot --model gpt-5.4` writes the first pass.
+**Step 1a — Draft tests.** `codex exec --model gpt-5.5` writes the first pass.
 
 ```bash
-copilot --model gpt-5.4 --allow-all --prompt "Write failing tests for spec S00N. \
+codex exec --model gpt-5.5 --full-auto --cd . "Write failing tests for spec S00N. \
   Read specs/S00N-*.md for assertions. \
   Read rules/R004-test-against-fakes.md for test patterns. \
   Read the existing code in crates/simulacra-<crate>/src/. \
   Every '- [ ]' assertion in the spec MUST have a corresponding #[test]. \
-  Tests must compile but FAIL. Output only Rust code."
+  Tests must compile but FAIL. Output only Rust code." < /dev/null
 ```
+> `codex exec` hangs unless stdin is closed (`< /dev/null`). macOS has no `timeout`; for long runs write output to a file, not a tail pipe.
 
 **Step 1b — Review tests.** A Claude **sub-agent** reviews the draft tests with heavy emphasis on:
 - Behavioral coverage (every spec assertion has a test that exercises real code paths)
@@ -98,22 +99,22 @@ All four must pass. The compiler + clippy are the first reviewers.
 
 Three independent reviewers, **all run as sub-agents or background tasks**:
 
-**4a — Gemini Pro:**
+**4a — Codex (gpt-5.5), spec-compliance lens:**
 ```bash
-copilot --model gemini-3-pro-preview --allow-all --prompt "Review the changes in \
+codex exec --model gpt-5.5 --cd . "Review the changes in \
   crates/simulacra-<crate>/. Read the spec (specs/S00N-*.md), ARCHITECTURE.md, and rules/. \
   Classify issues as BLOCKER (must fix) or WARNING (should fix) or NIT (optional). \
   Focus on: spec compliance, journal completeness, capability enforcement, \
-  no invented behavior, test coverage of every spec assertion."
+  no invented behavior, test coverage of every spec assertion." < /dev/null
 ```
 
-**4b — GPT-5.4:**
+**4b — Codex (gpt-5.5), edge-case/security lens:**
 ```bash
-copilot --model gpt-5.4 --allow-all --prompt "Review the changes in \
+codex exec --model gpt-5.5 --cd . "Review the changes in \
   crates/simulacra-<crate>/. Read the spec (specs/S00N-*.md), ARCHITECTURE.md, and rules/. \
   Classify issues as BLOCKER (must fix) or WARNING (should fix) or NIT (optional). \
   Focus on: edge cases, error handling, security (capability bypasses, path traversal), \
-  and whether the tests actually verify what they claim to verify."
+  and whether the tests actually verify what they claim to verify." < /dev/null
 ```
 
 **4c — Claude sub-agent:** Reviews the overall work holistically:
@@ -134,7 +135,7 @@ Only after all gates pass.
 
 These rules are not guidelines. They are the protocol.
 
-- If Claude writes tests instead of shelling to copilot GPT-5.4 for the initial draft, the tests are invalid. Delete and redo Phase 1a.
+- If Claude writes tests instead of shelling to `codex exec --model gpt-5.5` for the initial draft, the tests are invalid. Delete and redo Phase 1a.
 - If a sub-agent handles both tests and implementation, the adversarial boundary is violated. Restart.
 - If review is skipped or done by the implementing agent, the review is invalid. Redo Phase 4.
 - If any of the 4 mechanical checks fail, do not proceed to review.

@@ -9,17 +9,19 @@ The 5-phase protocol (Scope → Red → Green → Refactor → Review) is mandat
 | Phase | Who | Violation |
 |---|---|---|
 | 0 — Scope | Claude (main conversation) | — |
-| 1 — Red | `copilot --model gpt-5.4` | Claude writes tests directly |
+| 1 — Red | `codex exec --model gpt-5.5 --full-auto --cd . "..." < /dev/null` | Claude writes tests directly |
 | 2 — Green | Claude sub-agent (one per task) | Claude writes implementation in the main conversation |
 | 3 — Refactor | `cargo` (mechanical) | Any gate skipped |
-| 4 — Review | `copilot --model gemini-3-pro-preview` | Claude reviews its own work |
+| 4 — Review | `codex exec --model gpt-5.5 --cd . "..." < /dev/null` | Claude reviews its own work |
 | 5 — Commit | Claude (main conversation) | Committed before all gates pass |
+
+> `codex exec` hangs unless stdin is closed (`< /dev/null`); macOS has no `timeout`.
 
 ### What Claude MUST NOT Do
 
-1. **Write tests.** Phase 1 shells to `copilot --model gpt-5.4`. If Claude writes a `#[test]`, delete it and redo Phase 1. No exceptions.
+1. **Write tests.** Phase 1 shells to `codex exec --model gpt-5.5 --full-auto --cd . "..." < /dev/null`. If Claude writes a `#[test]`, delete it and redo Phase 1. No exceptions.
 2. **Write implementation code in the main conversation.** Phase 2 delegates to a sub-agent. The main conversation orchestrates — it does not implement.
-3. **Review its own work.** Phase 4 shells to `copilot --model gemini-3-pro-preview`. If Claude performs the review, it is invalid. Redo Phase 4.
+3. **Review its own work.** Phase 4 shells to `codex exec --model gpt-5.5 --cd . "..." < /dev/null`. If Claude performs the review, it is invalid. Redo Phase 4.
 
 ### Mechanical Gates Are Non-Negotiable
 
@@ -48,10 +50,10 @@ If you notice any of these, stop and correct:
 
 | Symptom | Violation | Fix |
 |---|---|---|
-| Claude writing `#[test]` functions | Phase 1 bypass | Delete tests, shell to copilot GPT-5.4 |
+| Claude writing `#[test]` functions | Phase 1 bypass | Delete tests, shell to Codex (gpt-5.5) |
 | Implementation code in main conversation | Phase 2 bypass | Discard, delegate to sub-agent |
 | `cargo clippy` or `cargo fmt` not run | Phase 3 incomplete | Run all 4 mechanical checks |
-| Claude summarizing code quality instead of shelling to copilot | Phase 4 bypass | Shell to copilot Gemini |
+| Claude summarizing code quality instead of shelling to Codex | Phase 4 bypass | Shell to Codex (gpt-5.5) |
 | Commit before review | Phase 4 skipped | Reset commit, run review |
 
 ### Restarting After a Violation
@@ -64,4 +66,4 @@ If any phase was skipped or self-performed:
 
 ## Why
 
-The protocol exists to enforce adversarial diversity — different models testing, implementing, and reviewing the same spec. When Claude writes its own tests, it tests what it plans to implement, not what the spec requires. When Claude reviews its own code, it has the same blind spots as the author. The mechanical gates catch what all models miss. Every shortcut reduces the probability that bugs are caught before commit.
+The protocol exists to enforce adversarial diversity: Codex (gpt-5.5) writes tests and reviews, Claude implements, and the human remains the architectural authority. When Claude writes its own tests, it tests what it plans to implement, not what the spec requires. When Claude reviews its own code, it has the same blind spots as the author. The mechanical gates catch what all models miss. Every shortcut reduces the probability that bugs are caught before commit.

@@ -8,24 +8,26 @@ Tests are written by a **different model** than the implementation. This is non-
 
 | Phase | Model | Tool | Responsibility |
 |---|---|---|---|
-| Red (tests) | GPT-5.4 | `copilot --model gpt-5.4` | Write failing tests from spec |
+| Red (tests) | Codex (gpt-5.5) | `codex exec --model gpt-5.5 --full-auto --cd . "..." < /dev/null` | Write failing tests from spec |
 | Green (impl) | Claude Code | sub-agent | Make tests pass |
 | Refactor | Any | `cargo clippy` / `cargo fmt` | Mechanical cleanup |
 
-**Claude MUST NOT write tests.** Claude makes the red tests green. If Claude writes tests, delete them and redo the red phase via copilot.
+**Claude MUST NOT write tests.** Claude makes the red tests green. If Claude writes tests, delete them and redo the red phase via Codex (gpt-5.5).
 
 ### Red Phase — Exact Command
 
 ```bash
-copilot --model gpt-5.4 --allow-all --prompt "You are the RED team test writer for \
-  the Simulacra Rust project. Read specs/S00N-*.md for the assertions to cover. \
+codex exec --model gpt-5.5 --full-auto --cd . "You are the RED team test writer for \
+  the Simulacra Rust project. \
+  Read specs/S00N-*.md for the assertions to cover. \
   Read rules/R004-test-against-fakes.md for test patterns. \
   Read the existing code in crates/simulacra-<crate>/src/ for types and traits. \
   Write #[test] functions covering every '- [ ]' assertion in the spec. \
   Tests must compile but FAIL (no implementation yet). \
   Focus on edge cases, boundary conditions, and adversarial inputs. \
-  Output only Rust test code."
+  Output only Rust test code." < /dev/null
 ```
+> `codex exec` hangs unless stdin is closed (`< /dev/null`); macOS has no `timeout`.
 
 ### Green Phase
 
@@ -58,4 +60,4 @@ It implements until `cargo test -p simulacra-<crate>` passes. It does NOT write 
 
 ## Why
 
-Model diversity catches different classes of bugs. The test author doesn't know the implementation shortcuts — they test the contract, not the code. This produces tests that survive refactoring, because they were written against the spec, not against the current implementation. GPT-5.4 and Claude have different training data, different reasoning patterns, and different blind spots. Their disagreements surface bugs that self-testing never would.
+Adversarial pairing catches different classes of bugs. The test author doesn't know the implementation shortcuts — they test the contract, not the code. This produces tests that survive refactoring, because they were written against the spec, not against the current implementation. Codex (gpt-5.5) and Claude have different training data, reasoning patterns, and blind spots; the human remains the architectural authority. Their disagreements surface bugs that self-testing never would.
