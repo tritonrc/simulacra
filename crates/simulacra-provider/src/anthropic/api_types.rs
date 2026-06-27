@@ -111,53 +111,55 @@ use simulacra_types::{
 };
 
 fn normalize_tool_pairs(messages: &[Message]) -> Vec<Message> {
-    let valid_tool_use_ids: HashSet<String> = messages
-        .iter()
-        .flat_map(|message| {
-            message
-                .tool_calls
-                .iter()
-                .map(|tool_call| tool_call.id.clone())
-        })
-        .collect();
-
-    if valid_tool_use_ids.is_empty() {
-        return messages
-            .iter()
-            .filter(|message| message.role != Role::Tool || message.tool_call_id.is_none())
-            .cloned()
-            .collect();
-    }
-
-    let mut latest_tool_results: HashMap<String, Message> = HashMap::new();
-    for message in messages {
-        if message.role != Role::Tool {
-            continue;
-        }
-
-        let Some(tool_call_id) = &message.tool_call_id else {
-            continue;
-        };
-
-        if valid_tool_use_ids.contains(tool_call_id) {
-            latest_tool_results.insert(tool_call_id.clone(), message.clone());
-        }
-    }
-
     let mut normalized = Vec::with_capacity(messages.len());
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message.role {
-            Role::Tool if message.tool_call_id.is_some() => {
+            Role::Tool => {
                 // Tool results are injected immediately after their assistant
-                // tool_use anchor below. Unknown ids are dropped as orphans.
+                // tool_use anchor below. Unknown and malformed ids are dropped
+                // as orphans.
             }
             _ => {
                 normalized.push(message.clone());
-                if message.role == Role::Assistant {
-                    for tool_call in &message.tool_calls {
-                        if let Some(tool_result) = latest_tool_results.remove(&tool_call.id) {
-                            normalized.push(tool_result);
-                        }
+
+                if message.role != Role::Assistant || message.tool_calls.is_empty() {
+                    continue;
+                }
+
+                let expected_tool_use_ids: HashSet<&str> = message
+                    .tool_calls
+                    .iter()
+                    .map(|tool_call| tool_call.id.as_str())
+                    .collect();
+                let mut latest_tool_results: HashMap<&str, Message> = HashMap::new();
+
+                for candidate in messages
+                    .iter()
+                    .skip(index + 1)
+                    .take_while(|candidate| candidate.role != Role::Assistant)
+                {
+                    if candidate.role != Role::Tool {
+                        continue;
+                    }
+
+                    let Some(tool_call_id) = candidate.tool_call_id.as_deref() else {
+                        continue;
+                    };
+
+                    if expected_tool_use_ids.contains(tool_call_id) {
+                        latest_tool_results.insert(tool_call_id, candidate.clone());
+                    }
+                }
+
+                for tool_call in &message.tool_calls {
+                    if let Some(tool_result) = latest_tool_results.remove(tool_call.id.as_str()) {
+                        normalized.push(tool_result);
+                    } else {
+                        tracing::warn!(
+                            tool_use_id = %tool_call.id,
+                            content_preview = %message.content.chars().take(120).collect::<String>(),
+                            "assistant tool_use has no matching tool_result before the next assistant message; Anthropic will likely reject the request"
+                        );
                     }
                 }
             }
@@ -211,11 +213,12 @@ pub(crate) fn build_request_parts<'a>(
 ) -> ApiRequest<'a> {
     let normalized = normalize_tool_pairs(messages);
     if message_sequence_changed(messages, &normalized) {
+        let original_tool_results = tool_result_count(messages);
+        let normalized_tool_results = tool_result_count(&normalized);
         tracing::debug!(
-            original_tool_results = tool_result_count(messages),
-            normalized_tool_results = tool_result_count(&normalized),
-            "normalized {} tool_result block(s) for Anthropic tool-pairing",
-            tool_result_count(messages)
+            original_tool_results,
+            normalized_tool_results,
+            "normalized Anthropic tool_result sequence"
         );
     }
 
@@ -268,15 +271,7 @@ pub(crate) fn build_request_parts<'a>(
             }
             Role::Tool => {
                 // Tool results go as user messages with tool_result content blocks.
-                // Missing tool_call_id is a data integrity issue: sending an empty
-                // tool_use_id guarantees Anthropic rejects the request with an
-                // unmatched tool result error, so we skip the message entirely
-                // and log loudly instead of emitting a malformed payload.
                 let Some(tool_call_id) = msg.tool_call_id.clone() else {
-                    tracing::error!(
-                        content_preview = %msg.content.chars().take(120).collect::<String>(),
-                        "Role::Tool message missing tool_call_id — skipping (would produce malformed Anthropic request)"
-                    );
                     continue;
                 };
                 api_messages.push(ApiMessage {
@@ -392,6 +387,15 @@ mod tests {
         }
     }
 
+    fn malformed_tool(content: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
     fn assert_message(message: &Message, role: Role, content: &str, tool_call_id: Option<&str>) {
         assert_eq!(message.role, role);
         assert_eq!(message.content, content);
@@ -436,6 +440,53 @@ mod tests {
         })
     }
 
+    fn assert_same_messages(actual: &[Message], expected: &[Message]) {
+        let actual = serde_json::to_vec(actual).expect("actual messages should serialize");
+        let expected = serde_json::to_vec(expected).expect("expected messages should serialize");
+        assert_eq!(actual, expected);
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedEvents(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for CapturedEvents
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor<'a> {
+                fields: &'a mut Vec<String>,
+            }
+
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.fields.push(format!("{}={value:?}", field.name()));
+                }
+            }
+
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+
+            let mut fields = Vec::new();
+            event.record(&mut Visitor {
+                fields: &mut fields,
+            });
+            self.0
+                .lock()
+                .expect("captured events mutex poisoned")
+                .push(fields.into_iter().collect::<Vec<_>>().join(" "));
+        }
+    }
+
     #[test]
     fn normalize_dedups_and_reorders_resume_sequence() {
         let messages = vec![
@@ -451,14 +502,44 @@ mod tests {
         assert_eq!(normalized.len(), 4);
         assert_message(&normalized[0], Role::Assistant, "", None);
         assert_eq!(normalized[0].tool_calls[0].id, "X");
-        assert_message(&normalized[1], Role::Tool, "real", Some("X"));
+        assert_message(&normalized[1], Role::Tool, "paused", Some("X"));
         assert_message(&normalized[2], Role::Assistant, "evidence", None);
         assert_message(&normalized[3], Role::User, "ship it", None);
     }
 
     #[test]
+    fn normalize_dedups_tool_results_per_assistant_turn() {
+        let messages = vec![
+            assistant("first", &["X"]),
+            tool("X", "first result"),
+            assistant("second", &["X"]),
+            tool("X", "second result"),
+            user("done"),
+        ];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_eq!(normalized.len(), 5);
+        assert_message(&normalized[0], Role::Assistant, "first", None);
+        assert_message(&normalized[1], Role::Tool, "first result", Some("X"));
+        assert_message(&normalized[2], Role::Assistant, "second", None);
+        assert_message(&normalized[3], Role::Tool, "second result", Some("X"));
+        assert_message(&normalized[4], Role::User, "done", None);
+    }
+
+    #[test]
     fn normalize_drops_orphan_tool_result() {
         let messages = vec![user("hello"), tool("orphan", "no matching call")];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_eq!(normalized.len(), 1);
+        assert_message(&normalized[0], Role::User, "hello", None);
+    }
+
+    #[test]
+    fn normalize_drops_malformed_tool_result_without_tool_call_id() {
+        let messages = vec![user("hello"), malformed_tool("missing id")];
 
         let normalized = normalize_tool_pairs(&messages);
 
@@ -507,6 +588,40 @@ mod tests {
     }
 
     #[test]
+    fn normalize_is_identity_for_valid_two_turn_multi_tool_transcript() {
+        let messages = vec![
+            assistant("first", &["A"]),
+            tool("A", "result a"),
+            assistant("second", &["B"]),
+            tool("B", "result b"),
+            user("done"),
+        ];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_same_messages(&normalized, &messages);
+    }
+
+    #[test]
+    fn build_request_parts_warns_for_unmatched_assistant_tool_use() {
+        use tracing_subscriber::prelude::*;
+
+        let captured = CapturedEvents::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let messages = vec![assistant("need the missing value", &["missing"])];
+
+        tracing::subscriber::with_default(subscriber, || {
+            let _request = build_request_parts(&messages, &[], "claude-test", 1024);
+        });
+
+        let events = captured.0.lock().expect("captured events mutex poisoned");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("tool_use_id=missing"));
+        assert!(events[0].contains("content_preview=need the missing value"));
+        assert!(events[0].contains("Anthropic will likely reject"));
+    }
+
+    #[test]
     fn build_request_parts_emits_one_tool_result_per_id() {
         let messages = vec![
             assistant("", &["X"]),
@@ -524,8 +639,19 @@ mod tests {
             .collect();
 
         assert_eq!(tool_results.len(), 1);
-        assert_eq!(tool_result_content(tool_results[0]), Some("real"));
+        assert_eq!(tool_result_content(tool_results[0]), Some("paused"));
+        assert_eq!(request.messages.len(), 4);
         assert!(has_tool_use(&request.messages[0], "X"));
         assert_eq!(tool_result_id(&request.messages[1]), Some("X"));
+        assert_eq!(request.messages[2].role, "assistant");
+        assert!(matches!(
+            &request.messages[2].content,
+            ApiMessageContent::Text(content) if content == "evidence"
+        ));
+        assert_eq!(request.messages[3].role, "user");
+        assert!(matches!(
+            &request.messages[3].content,
+            ApiMessageContent::Text(content) if content == "ship it"
+        ));
     }
 }
