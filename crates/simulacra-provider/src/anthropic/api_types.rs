@@ -1,6 +1,7 @@
 //! Serde models for the Anthropic Messages API.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 // ── Request types ──────────────────────────────────────────────────
 
@@ -109,6 +110,97 @@ use simulacra_types::{
     FinishReason, Message, ProviderResponse, Role, TokenUsage, ToolCallMessage, ToolDefinition,
 };
 
+fn normalize_tool_pairs(messages: &[Message]) -> Vec<Message> {
+    let valid_tool_use_ids: HashSet<String> = messages
+        .iter()
+        .flat_map(|message| {
+            message
+                .tool_calls
+                .iter()
+                .map(|tool_call| tool_call.id.clone())
+        })
+        .collect();
+
+    if valid_tool_use_ids.is_empty() {
+        return messages
+            .iter()
+            .filter(|message| message.role != Role::Tool || message.tool_call_id.is_none())
+            .cloned()
+            .collect();
+    }
+
+    let mut latest_tool_results: HashMap<String, Message> = HashMap::new();
+    for message in messages {
+        if message.role != Role::Tool {
+            continue;
+        }
+
+        let Some(tool_call_id) = &message.tool_call_id else {
+            continue;
+        };
+
+        if valid_tool_use_ids.contains(tool_call_id) {
+            latest_tool_results.insert(tool_call_id.clone(), message.clone());
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(messages.len());
+    for message in messages {
+        match message.role {
+            Role::Tool if message.tool_call_id.is_some() => {
+                // Tool results are injected immediately after their assistant
+                // tool_use anchor below. Unknown ids are dropped as orphans.
+            }
+            _ => {
+                normalized.push(message.clone());
+                if message.role == Role::Assistant {
+                    for tool_call in &message.tool_calls {
+                        if let Some(tool_result) = latest_tool_results.remove(&tool_call.id) {
+                            normalized.push(tool_result);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    normalized
+}
+
+fn message_sequence_changed(original: &[Message], normalized: &[Message]) -> bool {
+    if original.len() != normalized.len() {
+        return true;
+    }
+
+    original
+        .iter()
+        .zip(normalized.iter())
+        .any(|(left, right)| !messages_equal(left, right))
+}
+
+fn messages_equal(left: &Message, right: &Message) -> bool {
+    left.role == right.role
+        && left.content == right.content
+        && left.tool_call_id == right.tool_call_id
+        && left.tool_calls.len() == right.tool_calls.len()
+        && left
+            .tool_calls
+            .iter()
+            .zip(right.tool_calls.iter())
+            .all(|(left_call, right_call)| {
+                left_call.id == right_call.id
+                    && left_call.name == right_call.name
+                    && left_call.arguments == right_call.arguments
+            })
+}
+
+fn tool_result_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .count()
+}
+
 /// Convert simulacra Messages into Anthropic API messages, extracting system messages separately.
 /// `max_tokens` should be derived from the remaining budget by the caller.
 pub(crate) fn build_request_parts<'a>(
@@ -117,10 +209,20 @@ pub(crate) fn build_request_parts<'a>(
     model: &'a str,
     max_tokens: u32,
 ) -> ApiRequest<'a> {
+    let normalized = normalize_tool_pairs(messages);
+    if message_sequence_changed(messages, &normalized) {
+        tracing::debug!(
+            original_tool_results = tool_result_count(messages),
+            normalized_tool_results = tool_result_count(&normalized),
+            "normalized {} tool_result block(s) for Anthropic tool-pairing",
+            tool_result_count(messages)
+        );
+    }
+
     let mut system_text: Option<String> = None;
     let mut api_messages: Vec<ApiMessage> = Vec::new();
 
-    for msg in messages {
+    for msg in &normalized {
         match msg.role {
             Role::System => {
                 // Anthropic takes system as a top-level field, not in messages.
@@ -248,5 +350,182 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
         finish_reason,
         provider_response_id: Some(resp.id),
         model: resp.model,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn assistant(content: &str, tool_call_ids: &[&str]) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls: tool_call_ids
+                .iter()
+                .map(|id| ToolCallMessage {
+                    id: (*id).into(),
+                    name: format!("tool_{id}"),
+                    arguments: json!({ "id": id }),
+                })
+                .collect(),
+            tool_call_id: None,
+        }
+    }
+
+    fn user(content: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
+    }
+
+    fn tool(tool_call_id: &str, content: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+
+    fn assert_message(message: &Message, role: Role, content: &str, tool_call_id: Option<&str>) {
+        assert_eq!(message.role, role);
+        assert_eq!(message.content, content);
+        assert_eq!(message.tool_call_id.as_deref(), tool_call_id);
+    }
+
+    fn tool_result_id(api_message: &ApiMessage) -> Option<&str> {
+        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
+            return None;
+        };
+        blocks.iter().find_map(|block| {
+            if let ApiRequestContentBlock::ToolResult { tool_use_id, .. } = block {
+                Some(tool_use_id.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn tool_result_content(api_message: &ApiMessage) -> Option<&str> {
+        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
+            return None;
+        };
+        blocks.iter().find_map(|block| {
+            if let ApiRequestContentBlock::ToolResult { content, .. } = block {
+                Some(content.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn has_tool_use(api_message: &ApiMessage, id: &str) -> bool {
+        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
+            return false;
+        };
+        blocks.iter().any(|block| {
+            matches!(
+                block,
+                ApiRequestContentBlock::ToolUse { id: tool_use_id, .. } if tool_use_id == id
+            )
+        })
+    }
+
+    #[test]
+    fn normalize_dedups_and_reorders_resume_sequence() {
+        let messages = vec![
+            assistant("", &["X"]),
+            tool("X", "paused"),
+            assistant("evidence", &[]),
+            user("ship it"),
+            tool("X", "real"),
+        ];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_eq!(normalized.len(), 4);
+        assert_message(&normalized[0], Role::Assistant, "", None);
+        assert_eq!(normalized[0].tool_calls[0].id, "X");
+        assert_message(&normalized[1], Role::Tool, "real", Some("X"));
+        assert_message(&normalized[2], Role::Assistant, "evidence", None);
+        assert_message(&normalized[3], Role::User, "ship it", None);
+    }
+
+    #[test]
+    fn normalize_drops_orphan_tool_result() {
+        let messages = vec![user("hello"), tool("orphan", "no matching call")];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_eq!(normalized.len(), 1);
+        assert_message(&normalized[0], Role::User, "hello", None);
+    }
+
+    #[test]
+    fn normalize_places_multiple_tool_results_after_their_assistant() {
+        let messages = vec![
+            assistant("needs tools", &["A", "B"]),
+            user("later"),
+            tool("B", "result b"),
+            tool("A", "result a"),
+        ];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_eq!(normalized.len(), 4);
+        assert_message(&normalized[0], Role::Assistant, "needs tools", None);
+        assert_message(&normalized[1], Role::Tool, "result a", Some("A"));
+        assert_message(&normalized[2], Role::Tool, "result b", Some("B"));
+        assert_message(&normalized[3], Role::User, "later", None);
+    }
+
+    #[test]
+    fn normalize_is_identity_for_valid_transcript() {
+        let messages = vec![
+            assistant("needs tool", &["A"]),
+            tool("A", "result"),
+            user("done"),
+        ];
+
+        let normalized = normalize_tool_pairs(&messages);
+
+        assert_eq!(normalized.len(), messages.len());
+        for (actual, expected) in normalized.iter().zip(messages.iter()) {
+            assert_message(
+                actual,
+                expected.role.clone(),
+                &expected.content,
+                expected.tool_call_id.as_deref(),
+            );
+            assert_eq!(actual.tool_calls.len(), expected.tool_calls.len());
+        }
+    }
+
+    #[test]
+    fn build_request_parts_emits_one_tool_result_per_id() {
+        let messages = vec![
+            assistant("", &["X"]),
+            tool("X", "paused"),
+            assistant("evidence", &[]),
+            user("ship it"),
+            tool("X", "real"),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+        let tool_results: Vec<_> = request
+            .messages
+            .iter()
+            .filter(|message| tool_result_id(message) == Some("X"))
+            .collect();
+
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(tool_result_content(tool_results[0]), Some("real"));
+        assert!(has_tool_use(&request.messages[0], "X"));
+        assert_eq!(tool_result_id(&request.messages[1]), Some("X"));
     }
 }
