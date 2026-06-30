@@ -2226,3 +2226,109 @@ async fn tool_call_json_response_works() {
         "JSON response should preserve all result fields"
     );
 }
+
+// ── S043 Auth-header tests ─────────────────────────────────────────
+
+/// S043 Assertion: connect_named_with_headers threads per-connection headers into every request.
+///
+/// Every HTTP request sent on a connection established with
+/// `connect_named_with_headers` (initialize, notifications/initialized,
+/// tools/list) must carry the supplied headers verbatim.
+#[tokio::test]
+async fn streamable_handshake_threads_connection_headers() {
+    let _guard = test_guard().await;
+    let tools_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "authed_tool",
+                "description": "A tool behind an auth header",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let server = spawn_streamable_http_server(
+        &tools_body,
+        &json!({"jsonrpc":"2.0","result":{"ok":true}}).to_string(),
+        Some("sess-1"),
+    );
+
+    let mut manager = McpManager::new();
+    manager
+        .connect_named_with_headers(
+            "github",
+            &server.url("/mcp"),
+            Some("http"),
+            vec![
+                ("Authorization".to_string(), "Bearer ghs_test".to_string()),
+                ("X-MCP-Readonly".to_string(), "true".to_string()),
+            ],
+        )
+        .await
+        .expect("connect");
+
+    let _ = list_tools_with_retry(&mut manager).await;
+
+    let reqs = server.requests();
+    for method in ["initialize", "notifications/initialized", "tools/list"] {
+        let needle = format!("\"method\":\"{method}\"");
+        let req = reqs
+            .iter()
+            .find(|r| r.contains(&needle))
+            .unwrap_or_else(|| panic!("no {method} request was sent; recorded requests: {reqs:#?}"));
+        let low = req.to_lowercase();
+        assert!(
+            low.contains("authorization: bearer ghs_test"),
+            "{method} request missing Authorization header: {req}"
+        );
+        assert!(
+            low.contains("x-mcp-readonly: true"),
+            "{method} request missing X-MCP-Readonly header: {req}"
+        );
+    }
+}
+
+/// S043 Assertion: connect_named (no headers) does not inject any Authorization header.
+///
+/// A connection made via the existing `connect_named` must not carry any
+/// Authorization header — confirming header isolation between connections.
+#[tokio::test]
+async fn connect_named_without_headers_sends_no_auth() {
+    let _guard = test_guard().await;
+    let tools_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "open_tool",
+                "description": "A tool with no auth",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let server = spawn_streamable_http_server(
+        &tools_body,
+        &json!({"jsonrpc":"2.0","result":{"ok":true}}).to_string(),
+        Some("sess-2"),
+    );
+
+    let mut manager = McpManager::new();
+    manager
+        .connect_named("github", &server.url("/mcp"), Some("http"))
+        .await
+        .expect("connect");
+
+    let _ = list_tools_with_retry(&mut manager).await;
+
+    for r in &server.requests() {
+        assert!(
+            !r.to_lowercase().contains("authorization:"),
+            "unexpected Authorization header in request: {r}"
+        );
+    }
+}

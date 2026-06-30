@@ -140,6 +140,7 @@ struct McpConnection {
     server_name: String,
     #[allow(dead_code)]
     url: String,
+    headers: Vec<(String, String)>,
     tools: Vec<McpToolSchema>,
     /// Whether the MCP handshake (initialize + tools/list) has been performed.
     handshake_done: bool,
@@ -151,6 +152,36 @@ struct McpConnection {
     /// Configured transport preference from simulacra.toml.
     /// None = auto-detect, Some("sse") = legacy SSE, Some("http") = streamable HTTP.
     configured_transport: Option<String>,
+}
+
+impl McpConnection {
+    fn new(
+        server_name: String,
+        url: String,
+        configured_transport: Option<String>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            server_name,
+            url,
+            headers,
+            tools: Vec::new(),
+            handshake_done: false,
+            was_connected: false,
+            transport_mode: None,
+            configured_transport,
+        }
+    }
+}
+
+fn apply_connection_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder
 }
 
 /// Manager for MCP server connections.
@@ -262,15 +293,12 @@ impl McpManager {
 
         self.connections.insert(
             server_name.clone(),
-            McpConnection {
+            McpConnection::new(
                 server_name,
-                url: url.to_string(),
-                tools: Vec::new(),
-                handshake_done: false,
-                was_connected: false,
-                transport_mode: None,
-                configured_transport: Some("sse".to_string()),
-            },
+                url.to_string(),
+                Some("sse".to_string()),
+                Vec::new(),
+            ),
         );
 
         Ok(())
@@ -297,15 +325,12 @@ impl McpManager {
 
         self.connections.insert(
             server_name.clone(),
-            McpConnection {
+            McpConnection::new(
                 server_name,
-                url: url.to_string(),
-                tools: Vec::new(),
-                handshake_done: false,
-                was_connected: false,
-                transport_mode: None,
-                configured_transport: Some("http".to_string()),
-            },
+                url.to_string(),
+                Some("http".to_string()),
+                Vec::new(),
+            ),
         );
 
         Ok(())
@@ -335,15 +360,12 @@ impl McpManager {
 
         self.connections.insert(
             server_name.clone(),
-            McpConnection {
+            McpConnection::new(
                 server_name,
-                url: url.to_string(),
-                tools: Vec::new(),
-                handshake_done: false,
-                was_connected: false,
-                transport_mode: None,
-                configured_transport: transport,
-            },
+                url.to_string(),
+                transport,
+                Vec::new(),
+            ),
         );
 
         Ok(())
@@ -427,8 +449,8 @@ impl McpManager {
 
     /// Forced streamable HTTP handshake — no fallback.
     async fn forced_http_handshake(&mut self, key: &str) {
-        let url = match self.connections.get(key) {
-            Some(c) => c.url.clone(),
+        let (url, headers) = match self.connections.get(key) {
+            Some(c) => (c.url.clone(), c.headers.clone()),
             None => return,
         };
 
@@ -439,7 +461,7 @@ impl McpManager {
             simulacra.mcp.session_id = tracing::field::Empty,
         );
 
-        match self.perform_streamable_http_handshake(&url).await {
+        match self.perform_streamable_http_handshake(&url, &headers).await {
             Ok((tools, session_id)) => {
                 if let Some(ref sid) = session_id {
                     span.record("simulacra.mcp.session_id", sid.as_str());
@@ -474,8 +496,8 @@ impl McpManager {
 
     /// Auto-detect: try streamable HTTP first, fall back to legacy SSE on 404/405.
     async fn auto_detect_handshake(&mut self, key: &str) {
-        let url = match self.connections.get(key) {
-            Some(c) => c.url.clone(),
+        let (url, headers) = match self.connections.get(key) {
+            Some(c) => (c.url.clone(), c.headers.clone()),
             None => return,
         };
 
@@ -486,7 +508,7 @@ impl McpManager {
             simulacra.mcp.session_id = tracing::field::Empty,
         );
 
-        match self.perform_streamable_http_handshake(&url).await {
+        match self.perform_streamable_http_handshake(&url, &headers).await {
             Ok((tools, session_id)) => {
                 span.record("simulacra.mcp.transport_mode", "streamable_http");
                 span.record("simulacra.mcp.protocol_version", "2025-03-26");
@@ -555,6 +577,7 @@ impl McpManager {
     async fn perform_streamable_http_handshake(
         &self,
         url: &str,
+        headers: &[(String, String)],
     ) -> Result<(Vec<McpToolSchema>, Option<String>), McpError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -576,10 +599,12 @@ impl McpManager {
             }
         });
 
-        let init_response = client
+        let init_request = client
             .post(url)
             .header("Accept", "application/json, text/event-stream")
-            .json(&initialize_request)
+            .json(&initialize_request);
+        let init_request = apply_connection_headers(init_request, headers);
+        let init_response = init_request
             .send()
             .await
             .map_err(|e| McpError::ConnectionFailed(e.to_string()))?;
@@ -653,6 +678,7 @@ impl McpManager {
         if let Some(ref sid) = session_id {
             notif_request = notif_request.header("Mcp-Session-Id", sid.as_str());
         }
+        let notif_request = apply_connection_headers(notif_request, headers);
         let notif_response = notif_request
             .send()
             .await
@@ -683,6 +709,7 @@ impl McpManager {
         if let Some(ref sid) = session_id {
             tools_req = tools_req.header("Mcp-Session-Id", sid.as_str());
         }
+        let tools_req = apply_connection_headers(tools_req, headers);
         let tools_response = tools_req
             .send()
             .await
@@ -1062,6 +1089,19 @@ impl McpManager {
         url: &str,
         transport: Option<&str>,
     ) -> Result<(), McpError> {
+        self.connect_named_with_headers(name, url, transport, Vec::new())
+            .await
+    }
+
+    /// Register a named MCP server and attach headers to streamable HTTP
+    /// handshake requests for that connection.
+    pub async fn connect_named_with_headers(
+        &mut self,
+        name: &str,
+        url: &str,
+        transport: Option<&str>,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), McpError> {
         let transport = normalize_transport(transport)?;
 
         // Validate the URL is parseable.
@@ -1073,15 +1113,7 @@ impl McpManager {
 
         self.connections.insert(
             name.to_string(),
-            McpConnection {
-                server_name: name.to_string(),
-                url: url.to_string(),
-                tools: Vec::new(),
-                handshake_done: false,
-                was_connected: false,
-                transport_mode: None,
-                configured_transport: transport,
-            },
+            McpConnection::new(name.to_string(), url.to_string(), transport, headers),
         );
 
         Ok(())
@@ -1105,6 +1137,7 @@ impl McpManager {
             McpConnection {
                 server_name: name.to_string(),
                 url: "http://127.0.0.1/".to_string(),
+                headers: Vec::new(),
                 tools: Vec::new(),
                 handshake_done: false,
                 was_connected: false,
@@ -1162,6 +1195,7 @@ impl McpManager {
                 McpConnection {
                     server_name: name.to_string(),
                     url: String::new(),
+                    headers: Vec::new(),
                     tools: tool_schemas,
                     handshake_done: true,
                     was_connected: true,
