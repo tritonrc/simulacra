@@ -2278,7 +2278,9 @@ async fn streamable_handshake_threads_connection_headers() {
         let req = reqs
             .iter()
             .find(|r| r.contains(&needle))
-            .unwrap_or_else(|| panic!("no {method} request was sent; recorded requests: {reqs:#?}"));
+            .unwrap_or_else(|| {
+                panic!("no {method} request was sent; recorded requests: {reqs:#?}")
+            });
         let low = req.to_lowercase();
         assert!(
             low.contains("authorization: bearer ghs_test"),
@@ -2329,6 +2331,196 @@ async fn connect_named_without_headers_sends_no_auth() {
         assert!(
             !r.to_lowercase().contains("authorization:"),
             "unexpected Authorization header in request: {r}"
+        );
+    }
+}
+
+// ── A2 tests ───────────────────────────────────────────────────────────
+
+/// S043-A2 Assertion: connection headers are threaded into the tools/call dispatch request.
+///
+/// When a connection is established via `connect_named_with_headers`, every
+/// outbound HTTP request — including `tools/call` — must carry the supplied
+/// headers. Today only the handshake (initialize/initialized/tools/list) is
+/// threaded; tools/call is NOT yet threaded, so this test is RED.
+#[tokio::test]
+async fn tools_call_threads_connection_headers() {
+    let _guard = test_guard().await;
+
+    let tools_list_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "search_code",
+                "description": "Search code",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let tool_call_body = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": { "content": [] }
+    })
+    .to_string();
+
+    let server = spawn_streamable_http_server(&tools_list_body, &tool_call_body, Some("sess-1"));
+
+    let mut manager = McpManager::new();
+    manager
+        .connect_named_with_headers(
+            "github",
+            &server.url("/mcp"),
+            Some("http"),
+            vec![("Authorization".to_string(), "Bearer ghs_secret".to_string())],
+        )
+        .await
+        .expect("connect");
+
+    let _ = list_tools_with_retry(&mut manager).await;
+
+    let cap = capability_with_mcp_tools(&["mcp:github:search_code"]);
+    manager
+        .call_tool(
+            "github",
+            "search_code",
+            json!({"q": "health endpoint"}),
+            &cap,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("tools/call failed: {e}"));
+
+    let call_req = server
+        .requests()
+        .into_iter()
+        .find(|r| r.contains("\"method\":\"tools/call\""))
+        .expect("a tools/call request should have been sent");
+    assert!(
+        call_req
+            .to_lowercase()
+            .contains("authorization: bearer ghs_secret"),
+        "tools/call request missing Authorization header: {call_req}"
+    );
+}
+
+/// S043-A2 Assertion: `redact_headers_for_log` masks secret values while keeping header names.
+///
+/// This is a compile-time RED: `redact_headers_for_log` does not yet exist in
+/// `simulacra_mcp`. The test will fail to compile until the function is added.
+#[test]
+fn redact_headers_for_log_masks_secrets() {
+    let redacted = simulacra_mcp::redact_headers_for_log(&[
+        ("Authorization".to_string(), "Bearer ghs_secret".to_string()),
+        ("X-MCP-Readonly".to_string(), "true".to_string()),
+        (
+            "Proxy-Authorization".to_string(),
+            "Basic abc123".to_string(),
+        ),
+        ("Cookie".to_string(), "session=deadbeef".to_string()),
+        ("x-api-key".to_string(), "ak_live_xyz".to_string()), // lowercase name, prefix match
+        ("Content-Type".to_string(), "application/json".to_string()), // NOT secret
+    ]);
+    // secrets masked
+    assert!(!redacted.contains("ghs_secret"), "{redacted}");
+    assert!(!redacted.contains("abc123"), "{redacted}");
+    assert!(!redacted.contains("deadbeef"), "{redacted}");
+    assert!(!redacted.contains("ak_live_xyz"), "{redacted}");
+    assert!(
+        !redacted.contains("true"),
+        "X-MCP-Readonly value should be masked: {redacted}"
+    ); // x-mcp- prefix
+    // names still visible
+    assert!(redacted.contains("Authorization"), "{redacted}");
+    assert!(redacted.contains("Cookie"), "{redacted}");
+    // non-secret value preserved
+    assert!(
+        redacted.contains("application/json"),
+        "Content-Type value should NOT be masked: {redacted}"
+    );
+}
+
+/// S043-A2 Regression guard: headers do not leak across independent connections.
+///
+/// Server `a` is connected with an Authorization header; server `b` is connected
+/// without any headers. None of `b`'s recorded requests should contain an
+/// Authorization header.
+///
+/// This test may already pass (A1 already scopes headers per connection); it is
+/// included as a non-regression guard for the A2 dispatch-threading change.
+#[tokio::test]
+async fn headers_do_not_leak_across_connections() {
+    let _guard = test_guard().await;
+
+    let tools_body_a = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "authed_tool",
+                "description": "Tool on authed server",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let tools_body_b = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "open_tool",
+                "description": "Tool on open server",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let noop_call_body = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": { "content": [] }
+    })
+    .to_string();
+
+    let a_server = spawn_streamable_http_server(&tools_body_a, &noop_call_body, Some("sess-a"));
+    let b_server = spawn_streamable_http_server(&tools_body_b, &noop_call_body, Some("sess-b"));
+
+    let mut manager = McpManager::new();
+    manager
+        .connect_named_with_headers(
+            "a",
+            &a_server.url("/mcp"),
+            Some("http"),
+            vec![("Authorization".to_string(), "Bearer A".to_string())],
+        )
+        .await
+        .expect("connect a");
+    manager
+        .connect_named("b", &b_server.url("/mcp"), Some("http"))
+        .await
+        .expect("connect b");
+
+    let _ = list_tools_with_retry(&mut manager).await;
+
+    assert!(
+        !b_server.requests().is_empty(),
+        "server b should have received handshake requests"
+    );
+
+    // Also exercise the A2 tools/call dispatch path on server b.
+    let cap_b = capability_with_mcp_tools(&["mcp:b:open_tool"]);
+    let _ = manager.call_tool("b", "open_tool", json!({}), &cap_b).await;
+
+    // None of b's requests (handshake or tools/call) should carry an auth header.
+    for r in &b_server.requests() {
+        assert!(
+            !r.to_lowercase().contains("authorization:"),
+            "leaked auth to headerless connection: {r}"
         );
     }
 }
