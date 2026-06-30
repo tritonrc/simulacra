@@ -677,9 +677,7 @@ impl McpManager {
             .filter(|s| !s.is_empty());
 
         // Validate the initialize response is a proper JSON-RPC result.
-        let init_body: serde_json::Value = init_response.json().await.map_err(|e| {
-            McpError::ProtocolError(format!("failed to parse initialize response: {e}"))
-        })?;
+        let init_body: serde_json::Value = read_jsonrpc_http_response(init_response).await?;
 
         if init_body
             .get("result")
@@ -750,10 +748,7 @@ impl McpManager {
         }
 
         // Parse the tools/list response.
-        let body: serde_json::Value = tools_response
-            .json()
-            .await
-            .map_err(|e| McpError::ProtocolError(e.to_string()))?;
+        let body: serde_json::Value = read_jsonrpc_http_response(tools_response).await?;
 
         // Surface JSON-RPC error envelopes instead of producing empty tools.
         if let Some(err) = body.get("error") {
@@ -3266,6 +3261,41 @@ fn journal_fetch(
         );
         FetchError::Transport(format!("journal append failed: {err}"))
     })
+}
+
+/// Read a non-streaming JSON-RPC response that may be plain JSON or a single
+/// SSE message, per MCP streamable HTTP.
+async fn read_jsonrpc_http_response(
+    response: reqwest::Response,
+) -> Result<serde_json::Value, McpError> {
+    let is_event_stream = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|content_type| content_type.starts_with("text/event-stream"))
+        .unwrap_or(false);
+    let body = response
+        .text()
+        .await
+        .map_err(|e| McpError::ProtocolError(e.to_string()))?;
+    let trimmed = body.trim_start();
+
+    if is_event_stream || trimmed.starts_with("event:") || trimmed.starts_with("data:") {
+        let mut rest = body;
+        while let Some((_event_type, data, remaining)) = parse_next_sse_event(&rest) {
+            rest = remaining;
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+                return Ok(value);
+            }
+        }
+
+        return Err(McpError::ProtocolError(
+            "no JSON data event in SSE response".to_string(),
+        ));
+    }
+
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| McpError::ProtocolError(e.to_string()))
 }
 
 /// Parse the next complete SSE event from a text buffer.
