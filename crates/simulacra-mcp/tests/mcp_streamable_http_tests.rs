@@ -46,6 +46,21 @@ async fn list_tools_with_retry(manager: &mut McpManager) -> Vec<simulacra_mcp::T
     manager.list_tools().await
 }
 
+async fn wait_for_streamable_requests(
+    server: &StreamableHttpServer,
+    predicate: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
+    for _ in 0..10 {
+        let requests = server.requests();
+        if predicate(&requests) {
+            return requests;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    server.requests()
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -527,6 +542,90 @@ async fn autodetect_tries_streamable_http_post_first() {
     );
 }
 
+#[tokio::test]
+async fn transport_auto_is_treated_like_omitted_transport() {
+    let _guard = test_guard().await;
+    let tools_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "auto_tool",
+                "description": "A tool served via explicit auto transport",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let server = spawn_streamable_http_server(
+        &tools_body,
+        &json!({ "jsonrpc": "2.0", "result": { "ok": true } }).to_string(),
+        Some("auto-session-42"),
+    );
+
+    let mut manager = McpManager::new();
+    manager
+        .connect(&server.url("/mcp"), Some("auto"))
+        .await
+        .expect("transport='auto' should use auto-detect");
+
+    let tools = list_tools_with_retry(&mut manager).await;
+
+    assert!(
+        server.post_attempts() >= 2,
+        "transport='auto' should POST initialize and tools/list to the server; got {} POST attempts",
+        server.post_attempts()
+    );
+    assert_eq!(tools.len(), 1, "transport='auto' should discover tools");
+    assert_eq!(tools[0].name, "auto_tool");
+}
+
+#[tokio::test]
+async fn transport_auto_falls_back_to_legacy_sse_on_405() {
+    let _guard = test_guard().await;
+    let tools_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "auto_legacy_tool",
+                "description": "A tool served via explicit auto fallback",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let server = spawn_fallback_test_server(405, "Method Not Allowed", &tools_body);
+
+    let mut manager = McpManager::new();
+    manager
+        .connect(&server.url("/sse"), Some("auto"))
+        .await
+        .expect("transport='auto' should register for auto-detect");
+
+    let tools = list_tools_with_retry(&mut manager).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        server.post_attempts() >= 1,
+        "transport='auto' should attempt streamable HTTP POST before fallback; got {} POST attempts",
+        server.post_attempts()
+    );
+    assert!(
+        server.sse_connections() >= 1,
+        "transport='auto' should fall back to SSE after 405; got {} SSE connections",
+        server.sse_connections()
+    );
+    assert_eq!(
+        tools.len(),
+        1,
+        "transport='auto' should discover tools through SSE fallback"
+    );
+    assert_eq!(tools[0].name, "auto_legacy_tool");
+}
+
 /// S024 Assertion: Auto-detect falls back to legacy SSE when streamable HTTP returns 405.
 ///
 /// Server returns 405 on POST to /sse, but serves proper SSE endpoint
@@ -639,12 +738,11 @@ async fn transport_sse_skips_autodetect() {
     assert_eq!(tools[0].name, "sse_tool");
 }
 
-/// S024 Assertion: `transport = "http"` forces streamable HTTP, no fallback.
+/// S024 Assertion: `transport = "http"` forces streamable HTTP.
 ///
-/// When the transport is explicitly "http", only streamable HTTP is used.
-/// No SSE fallback occurs even if the server would support it.
+/// When the transport is explicitly "http", streamable HTTP is used directly.
 #[tokio::test]
-async fn transport_http_forces_streamable_no_fallback() {
+async fn transport_http_forces_streamable_http() {
     let _guard = test_guard().await;
     let tools_body = json!({
         "jsonrpc": "2.0",
@@ -683,6 +781,55 @@ async fn transport_http_forces_streamable_no_fallback() {
     // Verify tools discovered.
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "forced_http_tool");
+}
+
+/// S024 Assertion: `transport = "http"` does not fall back to legacy SSE.
+///
+/// Even when a server rejects streamable HTTP with a fallback-eligible 405 and
+/// would serve legacy SSE, forced HTTP must not switch transports.
+#[tokio::test]
+async fn transport_http_does_not_fallback_to_legacy_sse_on_405() {
+    let _guard = test_guard().await;
+    let tools_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+            "tools": [{
+                "name": "should_not_be_discovered",
+                "description": "A tool behind legacy SSE",
+                "inputSchema": { "type": "object", "properties": {} }
+            }]
+        }
+    })
+    .to_string();
+
+    let server = spawn_fallback_test_server(405, "Method Not Allowed", &tools_body);
+
+    let mut manager = McpManager::new();
+    manager
+        .connect(&server.url("/sse"), Some("http"))
+        .await
+        .expect("connect with http transport should register without fallback");
+
+    let tools = list_tools_with_retry(&mut manager).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        server.post_attempts() >= 1,
+        "transport='http' should attempt streamable HTTP POST; got {} POST attempts",
+        server.post_attempts()
+    );
+    assert_eq!(
+        server.sse_connections(),
+        0,
+        "transport='http' must not fall back to SSE after 405; got {} SSE connections",
+        server.sse_connections()
+    );
+    assert_eq!(
+        tools.len(),
+        0,
+        "transport='http' should not discover tools through SSE fallback"
+    );
 }
 
 /// S024 Assertion: Both transports failing returns empty tools (graceful degradation).
@@ -899,7 +1046,12 @@ async fn initialize_uses_protocol_version_2025_03_26() {
 
     let _ = manager.list_tools().await;
 
-    let requests = server.requests();
+    let requests = wait_for_streamable_requests(&server, |requests| {
+        requests
+            .iter()
+            .any(|r| r.contains("\"method\":\"initialize\""))
+    })
+    .await;
     let init_request = requests
         .iter()
         .find(|r| r.contains("\"method\":\"initialize\""))
@@ -944,9 +1096,21 @@ async fn initialized_notification_sent_after_initialize() {
         .await
         .expect("connect should succeed");
 
-    let _ = manager.list_tools().await;
+    let tools = list_tools_with_retry(&mut manager).await;
+    assert_eq!(tools.len(), 1, "handshake should discover tools");
 
-    let requests = server.requests();
+    let requests = wait_for_streamable_requests(&server, |requests| {
+        requests
+            .iter()
+            .any(|r| r.contains("\"method\":\"initialize\""))
+            && requests
+                .iter()
+                .any(|r| r.contains("\"method\":\"notifications/initialized\""))
+            && requests
+                .iter()
+                .any(|r| r.contains("\"method\":\"tools/list\""))
+    })
+    .await;
 
     let init_idx = requests
         .iter()
@@ -1079,6 +1243,17 @@ impl Drop for SessionExpiryServer {
 /// - Returns 404 on the first N tool calls (simulating session expiry)
 /// - Succeeds on tool calls after that
 fn spawn_session_expiry_server(reject_first_n_tool_calls: usize) -> SessionExpiryServer {
+    spawn_session_expiry_server_inner(reject_first_n_tool_calls, false)
+}
+
+fn spawn_session_expiry_server_with_failed_rehandshake() -> SessionExpiryServer {
+    spawn_session_expiry_server_inner(1, true)
+}
+
+fn spawn_session_expiry_server_inner(
+    reject_first_n_tool_calls: usize,
+    fail_rehandshake: bool,
+) -> SessionExpiryServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.set_nonblocking(true).expect("nonblocking");
 
@@ -1112,7 +1287,13 @@ fn spawn_session_expiry_server(reject_first_n_tool_calls: usize) -> SessionExpir
                         requests_t.lock().expect("mutex").push(request.clone());
 
                         if request.contains("\"method\":\"initialize\"") {
-                            initialize_count_t.fetch_add(1, Ordering::SeqCst);
+                            let initialize_attempt =
+                                initialize_count_t.fetch_add(1, Ordering::SeqCst);
+                            if fail_rehandshake && initialize_attempt > 0 {
+                                let response = http_response_status(503, "Service Unavailable");
+                                let _ = stream.write_all(response.as_bytes());
+                                break;
+                            }
                             let body = json!({
                                 "jsonrpc": "2.0",
                                 "id": 1,
@@ -1466,6 +1647,48 @@ async fn session_expiry_on_404_triggers_rehandshake() {
     );
 }
 
+/// S024 Assertion: Failed re-handshake after session expiry returns an error.
+///
+/// A failed session-expiry re-handshake must not fall through to a raw
+/// tools/call dispatch with no established transport mode.
+#[tokio::test]
+async fn session_expiry_failed_rehandshake_returns_error_without_retry_dispatch() {
+    let _guard = test_guard().await;
+
+    let server = spawn_session_expiry_server_with_failed_rehandshake();
+
+    let mut manager = McpManager::new();
+    manager
+        .connect(&server.url("/mcp"), None)
+        .await
+        .expect("connect should succeed");
+
+    let tools = list_tools_with_retry(&mut manager).await;
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "session_tool");
+
+    let capability = capability_with_mcp_tools(&["mcp:*:*"]);
+    let err = manager
+        .call_tool("127.0.0.1", "session_tool", json!({}), &capability)
+        .await
+        .expect_err("failed session re-handshake should return an error");
+
+    assert!(
+        matches!(err, McpError::ConnectionFailed(ref msg) if msg.contains("127.0.0.1")),
+        "expected ConnectionFailed mentioning the server after failed re-handshake, got {err:?}"
+    );
+    assert!(
+        server.initialize_count() >= 2,
+        "session expiry should attempt a re-handshake; got {} initializations",
+        server.initialize_count()
+    );
+    assert_eq!(
+        server.tool_call_attempts(),
+        1,
+        "failed re-handshake must not dispatch a retry tools/call without a transport"
+    );
+}
+
 /// S024 Assertion: text/event-stream response is parsed as SSE, progress logged, final result extracted.
 ///
 /// Server returns a tool call response with Content-Type: text/event-stream containing
@@ -1561,6 +1784,10 @@ impl ReconnectionServer {
         self.initialize_count.load(Ordering::SeqCst)
     }
 
+    fn tool_call_attempts(&self) -> usize {
+        self.tool_call_attempts.load(Ordering::SeqCst)
+    }
+
     fn requests(&self) -> Vec<String> {
         self.requests.lock().expect("mutex").clone()
     }
@@ -1580,6 +1807,14 @@ impl Drop for ReconnectionServer {
 /// - Returns HTTP 503 on the first tool call (transport error)
 /// - Succeeds on all subsequent requests (after client reconnects)
 fn spawn_reconnection_server() -> ReconnectionServer {
+    spawn_reconnection_server_inner(false)
+}
+
+fn spawn_reconnection_server_with_failed_rehandshake() -> ReconnectionServer {
+    spawn_reconnection_server_inner(true)
+}
+
+fn spawn_reconnection_server_inner(fail_rehandshake: bool) -> ReconnectionServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.set_nonblocking(true).expect("nonblocking");
 
@@ -1613,7 +1848,13 @@ fn spawn_reconnection_server() -> ReconnectionServer {
                         requests_t.lock().expect("mutex").push(request.clone());
 
                         if request.contains("\"method\":\"initialize\"") {
-                            initialize_count_t.fetch_add(1, Ordering::SeqCst);
+                            let initialize_attempt =
+                                initialize_count_t.fetch_add(1, Ordering::SeqCst);
+                            if fail_rehandshake && initialize_attempt > 0 {
+                                let response = http_response_status(503, "Service Unavailable");
+                                let _ = stream.write_all(response.as_bytes());
+                                break;
+                            }
                             let body = json!({
                                 "jsonrpc": "2.0",
                                 "id": 1,
@@ -1761,6 +2002,49 @@ async fn reconnection_preserves_transport_mode() {
             &req[..req.len().min(80)]
         );
     }
+}
+
+/// S024 Assertion: Failed reconnection handshake returns an error.
+///
+/// A failed reconnection handshake must not fall through to a raw tools/call
+/// dispatch with `transport_mode = None`.
+#[tokio::test]
+async fn reconnection_failed_rehandshake_returns_error_without_retry_dispatch() {
+    let _guard = test_guard().await;
+
+    let server = spawn_reconnection_server_with_failed_rehandshake();
+
+    let mut manager = McpManager::new();
+    manager.set_reconnect_base_delay_ms(10);
+    manager
+        .connect(&server.url("/mcp"), None)
+        .await
+        .expect("connect should succeed");
+
+    let tools = list_tools_with_retry(&mut manager).await;
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "reconnect_tool");
+
+    let capability = capability_with_mcp_tools(&["mcp:*:*"]);
+    let err = manager
+        .call_tool("127.0.0.1", "reconnect_tool", json!({}), &capability)
+        .await
+        .expect_err("failed reconnection handshake should return an error");
+
+    assert!(
+        matches!(err, McpError::ConnectionFailed(ref msg) if msg.contains("127.0.0.1")),
+        "expected ConnectionFailed mentioning the server after failed reconnection, got {err:?}"
+    );
+    assert!(
+        server.initialize_count() >= 2,
+        "reconnection should attempt a re-handshake; got {} initializations",
+        server.initialize_count()
+    );
+    assert_eq!(
+        server.tool_call_attempts(),
+        1,
+        "failed reconnection handshake must not dispatch a retry tools/call without a transport"
+    );
 }
 
 /// S024 Assertion: Session expiry uses immediate re-handshake, not backoff.

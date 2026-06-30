@@ -1485,49 +1485,33 @@ fn spawn_ordering_json_rpc_server(
                 Ok((mut stream, _peer)) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
 
-                    loop {
-                        let mut buffer = [0_u8; 8192];
-                        match stream.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(bytes_read) => {
-                                let request =
-                                    String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
+                    if let Some(request) = read_http_request(&mut stream) {
+                        let body = if request.contains("\"method\":\"initialize\"") {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "result": {
+                                    "protocolVersion": "2024-11-05",
+                                    "serverInfo": { "name": "fake-mcp", "version": "1.0.0" },
+                                    "capabilities": {}
+                                }
+                            })
+                            .to_string()
+                        } else if request.contains("\"method\":\"tools/list\"") {
+                            tools_list_body.clone()
+                        } else if request.contains("\"method\":\"tools/call\"") {
+                            // Record the ordering counter when the server
+                            // receives the dispatch — this must be AFTER the
+                            // journal append.
+                            ordering_counter.fetch_add(1, Ordering::SeqCst);
+                            tool_call_body.clone()
+                        } else {
+                            json!({ "jsonrpc": "2.0", "result": {} }).to_string()
+                        };
 
-                                let body = if request.contains("\"method\":\"initialize\"") {
-                                    json!({
-                                        "jsonrpc": "2.0",
-                                        "result": {
-                                            "protocolVersion": "2024-11-05",
-                                            "serverInfo": { "name": "fake-mcp", "version": "1.0.0" },
-                                            "capabilities": {}
-                                        }
-                                    })
-                                    .to_string()
-                                } else if request.contains("\"method\":\"tools/list\"") {
-                                    tools_list_body.clone()
-                                } else if request.contains("\"method\":\"tools/call\"") {
-                                    // Record the ordering counter when the server
-                                    // receives the dispatch — this must be AFTER the
-                                    // journal append.
-                                    ordering_counter.fetch_add(1, Ordering::SeqCst);
-                                    tool_call_body.clone()
-                                } else {
-                                    json!({ "jsonrpc": "2.0", "result": {} }).to_string()
-                                };
-
-                                let response = json_http_response(&body);
-                                let _ = stream.write_all(response.as_bytes());
-                            }
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                                ) =>
-                            {
-                                break;
-                            }
-                            Err(_) => break,
-                        }
+                        let response = json_http_response(&body);
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

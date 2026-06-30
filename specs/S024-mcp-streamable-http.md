@@ -112,6 +112,12 @@ Existing S008 reconnection logic applies unchanged, but is transport-mode-aware:
 name = "github"
 url = "https://mcp.github.com/mcp"
 
+# Explicit auto-detect (equivalent to omitting transport):
+[[mcp.servers]]
+name = "github-auto"
+transport = "auto"
+url = "https://mcp.github.com/mcp"
+
 # Force legacy SSE:
 [[mcp.servers]]
 name = "legacy"
@@ -126,6 +132,7 @@ url = "https://new-server.example.com/mcp"
 ```
 
 - `transport` absent → auto-detect (try streamable HTTP, fall back to legacy SSE)
+- `transport = "auto"` → auto-detect (same behavior as absent)
 - `transport = "sse"` → legacy SSE only, skip auto-detect
 - `transport = "http"` → streamable HTTP only, no fallback
 
@@ -182,18 +189,19 @@ url = "https://new-server.example.com/mcp"
 ### Config
 
 28. `McpServerConfig.transport` is optional. Omitting it enables auto-detection.
-29. Existing configs with `transport = "sse"` continue to work without changes.
-30. `transport = "http"` forces streamable HTTP with no legacy fallback.
+29. `transport = "auto"` enables auto-detection with the same behavior as omitting the field.
+30. Existing configs with `transport = "sse"` continue to work without changes.
+31. `transport = "http"` forces streamable HTTP with no legacy fallback.
 
 ### What doesn't change
 
-31. `McpManager` public API (`connect`, `list_tools`, `call_tool`) is unchanged.
-32. Capability gating (S008 assertions 3-4) is unchanged.
-33. Journal entries (S008 assertion 14) are unchanged.
-34. Tool schema bridging (S008 assertion 2) is unchanged.
-35. Lazy connection semantics (S008 assertion 6) are unchanged.
-36. Typed error handling (S008 assertions 5-8) is unchanged.
-37. OTel counters and histograms for tool calls (S008 observability) are unchanged.
+32. `McpManager` public API (`connect`, `list_tools`, `call_tool`) is unchanged.
+33. Capability gating (S008 assertions 3-4) is unchanged.
+34. Journal entries (S008 assertion 14) are unchanged.
+35. Tool schema bridging (S008 assertion 2) is unchanged.
+36. Lazy connection semantics (S008 assertion 6) are unchanged.
+37. Typed error handling (S008 assertions 5-8) is unchanged.
+38. OTel counters and histograms for tool calls (S008 observability) are unchanged.
 
 ## Assertions
 
@@ -242,6 +250,7 @@ url = "https://new-server.example.com/mcp"
 
 - [x] `transport` field is optional in `McpServerConfig`.
 - [x] Omitting `transport` enables auto-detection.
+- [x] `transport = "auto"` enables auto-detection with the same behavior as omitting the field.
 - [x] `transport = "sse"` forces legacy SSE.
 - [x] `transport = "http"` forces streamable HTTP.
 - [x] Existing S008 configs with `transport = "sse"` work unchanged.

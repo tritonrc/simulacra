@@ -313,12 +313,13 @@ impl McpManager {
 
     /// Register an MCP server connection with auto-detect or explicit transport.
     ///
-    /// If `transport` is `None`, the transport mode will be auto-detected
-    /// during the first handshake. If `Some("sse")`, forces legacy SSE.
-    /// If `Some("http")`, forces streamable HTTP (falls back to legacy HTTP).
+    /// If `transport` is `None`, empty, or `Some("auto")`, the transport mode
+    /// will be auto-detected during the first handshake. If `Some("sse")`,
+    /// forces legacy SSE.
+    /// If `Some("http")`, forces streamable HTTP with no fallback.
     ///
-    /// WARNING 4: Only `None`, `Some("")`, `Some("sse")`, and `Some("http")`
-    /// are accepted. Any other transport string is rejected with a
+    /// WARNING 4: Only `None`, `Some("")`, `Some("auto")`, `Some("sse")`,
+    /// and `Some("http")` are accepted. Any other transport string is rejected with a
     /// ConnectionFailed error rather than silently falling through to
     /// auto-detect.
     pub async fn connect(&mut self, url: &str, transport: Option<&str>) -> Result<(), McpError> {
@@ -1052,8 +1053,8 @@ impl McpManager {
     /// Register an MCP server with an explicit name (used as the routing key
     /// for `call_tool`), rather than deriving the name from the URL hostname.
     ///
-    /// WARNING 4: Only `None`, `Some("")`, `Some("sse")`, and `Some("http")`
-    /// are accepted transport values. Any other value is rejected rather
+    /// WARNING 4: Only `None`, `Some("")`, `Some("auto")`, `Some("sse")`,
+    /// and `Some("http")` are accepted transport values. Any other value is rejected rather
     /// than silently falling through to auto-detect.
     pub async fn connect_named(
         &mut self,
@@ -1249,6 +1250,9 @@ impl McpManager {
 
         // Ensure the server has completed its MCP handshake before dispatching.
         self.ensure_server_connected(server).await;
+        if !self.connection_handshake_done(server) {
+            return Err(Self::handshake_failed_error(server));
+        }
 
         let source = format!("mcp:{server}");
 
@@ -1365,6 +1369,9 @@ impl McpManager {
                 conn.configured_transport = Some("http".to_string());
             }
             self.ensure_server_connected(server).await;
+            if !self.connection_handshake_done(server) {
+                return Err(Self::handshake_failed_error(server));
+            }
             // Retry once after successful re-handshake.
             return self.dispatch_tool_call(agent_id, server, tool, input).await;
         }
@@ -1420,6 +1427,17 @@ impl McpManager {
             }
 
             self.ensure_server_connected(server).await;
+            if !self.connection_handshake_done(server) {
+                let err = Self::handshake_failed_error(server);
+                tracing::warn!(
+                    server = %server,
+                    attempt = attempt + 1,
+                    error = %err,
+                    "MCP reconnection handshake failed"
+                );
+                last_err = err;
+                continue;
+            }
 
             match self.dispatch_tool_call(agent_id, server, tool, input).await {
                 Ok(output) => {
@@ -1443,6 +1461,17 @@ impl McpManager {
         }
 
         Err(last_err)
+    }
+
+    fn connection_handshake_done(&self, server: &str) -> bool {
+        self.connections
+            .get(server)
+            .map(|c| c.handshake_done)
+            .unwrap_or(false)
+    }
+
+    fn handshake_failed_error(server: &str) -> McpError {
+        McpError::ConnectionFailed(format!("MCP handshake failed for server {server}"))
     }
 
     /// Check whether an error is a transport-level failure that could be
@@ -1832,7 +1861,8 @@ impl McpManager {
                     "wasm transport reached HTTP dispatch path".to_string(),
                 ));
             }
-            Some(TransportMode::LegacyHttp) | None => (conn.url.clone(), None),
+            Some(TransportMode::LegacyHttp) => (conn.url.clone(), None),
+            None => return Err(Self::handshake_failed_error(server)),
         };
 
         let is_streamable = matches!(
@@ -3241,8 +3271,9 @@ fn parse_sse_endpoint(text: &str) -> Option<String> {
 
 /// Normalize a configured transport string.
 ///
-/// Accepts `None`, `Some("")`, `Some("sse")`, `Some("http")` and returns:
-/// - `None` for `None` or empty string (meaning: auto-detect)
+/// Accepts `None`, `Some("")`, `Some("auto")`, `Some("sse")`,
+/// `Some("http")` and returns:
+/// - `None` for `None`, empty string, or `"auto"` (meaning: auto-detect)
 /// - `Some("sse".into())` / `Some("http".into())` for explicit values
 ///
 /// Rejects any other transport string with a ConnectionFailed error so that
@@ -3253,13 +3284,13 @@ fn normalize_transport(transport: Option<&str>) -> Result<Option<String>, McpErr
         None => Ok(None),
         Some(s) => {
             let trimmed = s.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || trimmed == "auto" {
                 return Ok(None);
             }
             match trimmed {
                 "sse" | "http" => Ok(Some(trimmed.to_string())),
                 other => Err(McpError::ConnectionFailed(format!(
-                    "unknown MCP transport {other:?}: expected \"sse\" or \"http\""
+                    "unknown MCP transport {other:?}: expected \"auto\", \"sse\", or \"http\""
                 ))),
             }
         }

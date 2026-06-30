@@ -82,7 +82,7 @@ env = ["GITHUB_TOKEN"]
 The `network` and `wasi` fields are added to `McpServerConfig` as optional. `McpServerConfig` validation rules:
 
 - `transport = "wasm"` requires `module` to be set; `url` must be absent.
-- `transport ∈ {"http", "sse"}` or absent (auto-detect): `url` required; `module` must be absent.
+- `transport ∈ {"auto", "http", "sse"}` or absent (auto-detect): `url` required; `module` must be absent.
 
 ### Transport mode
 
