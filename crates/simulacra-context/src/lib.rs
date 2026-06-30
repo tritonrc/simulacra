@@ -16,6 +16,28 @@ fn adjust_tool_boundary(msgs: &[Message], start: usize) -> usize {
     idx
 }
 
+/// Pick the kept-window start index. Skips leading orphaned `Role::Tool`
+/// results (invalid without their parent tool_use), but never drops the entire
+/// tail: if skipping forward would leave nothing, anchor on the most recent
+/// user message so the compacted transcript is always non-empty and
+/// provider-valid. Mirrors the "always keep the system message" escape hatch —
+/// the provider must receive at least one coherent message block.
+fn kept_window_start(msgs: &[Message], start: usize) -> usize {
+    let adjusted = adjust_tool_boundary(msgs, start);
+    if adjusted < msgs.len() {
+        return adjusted;
+    }
+    // Nothing fit within budget (or only orphaned tool results remain). Anchor on
+    // the most recent user message so the kept window is non-empty AND begins
+    // with a user turn — providers require the first non-system message to be a
+    // user turn, so an assistant- or tool-first window is invalid. If there is no
+    // user message at all (a malformed transcript), fall back to `adjusted`
+    // rather than starting the window on an orphaned tool result.
+    msgs.iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(adjusted)
+}
+
 /// Sliding-window context strategy.
 ///
 /// Keeps the system message (first message if it has role System)
@@ -52,12 +74,11 @@ impl ContextStrategy for SlidingWindowStrategy {
         // Preserve the system message if present.
         let rest = if messages[0].role == Role::System {
             let cost = Self::estimate_tokens(&messages[0]);
-            if cost > remaining {
-                // System message alone exceeds budget; include it anyway
-                // so the agent always has its instructions.
-                return vec![messages[0].clone()];
-            }
-            remaining -= cost;
+            // System is always kept (its instructions matter even when it alone
+            // exceeds budget); saturate so we never underflow. We do NOT early
+            // return here — the kept-window fallback below still keeps the most
+            // recent user turn, so the result is never system-only / empty.
+            remaining = remaining.saturating_sub(cost);
             result.push(messages[0].clone());
             &messages[1..]
         } else {
@@ -76,7 +97,7 @@ impl ContextStrategy for SlidingWindowStrategy {
         }
 
         // Never start with orphaned tool results.
-        let start_idx = adjust_tool_boundary(rest, start_idx);
+        let start_idx = kept_window_start(rest, start_idx);
         result.extend_from_slice(&rest[start_idx..]);
 
         result
@@ -166,10 +187,9 @@ impl ContextStrategy for ObservationMaskingStrategy {
 
         let (system, rest) = if masked[0].role == Role::System {
             let cost = Self::estimate_tokens(&masked[0]);
-            if cost > remaining {
-                return vec![masked.remove(0)];
-            }
-            remaining -= cost;
+            // Always keep system; saturate; do not early-return system-only — the
+            // kept-window fallback below keeps the most recent user turn.
+            remaining = remaining.saturating_sub(cost);
             result.push(masked.remove(0));
             (true, masked)
         } else {
@@ -187,7 +207,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
             start_idx = i;
         }
 
-        let start_idx = adjust_tool_boundary(&rest, start_idx);
+        let start_idx = kept_window_start(&rest, start_idx);
         result.extend_from_slice(&rest[start_idx..]);
 
         result
@@ -197,7 +217,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use simulacra_types::Message;
+    use simulacra_types::{Message, ToolCallMessage};
 
     fn msg(role: Role, content: &str) -> Message {
         Message {
@@ -411,9 +431,17 @@ mod tests {
         let messages = vec![msg(Role::System, &long_system), msg(Role::User, "hello")];
         // Budget is 5 tokens — system alone is 50 tokens
         let result = strategy.compact(&messages, 5);
-        assert_eq!(result.len(), 1);
+        // System is still preserved even when it alone exceeds budget — AND the
+        // most-recent user turn is kept too, so we never emit a system-only
+        // (empty `messages`) transcript.
         assert_eq!(result[0].role, Role::System);
         assert_eq!(result[0].content, long_system);
+        assert!(
+            result
+                .iter()
+                .any(|m| m.role == Role::User && m.content == "hello"),
+            "the user turn must be kept alongside the over-budget system prompt"
+        );
     }
 
     // --- X6: Token boundary math (div_ceil(4)) at exact boundaries ---
@@ -426,9 +454,13 @@ mod tests {
         let result = strategy.compact(&messages, 1);
         assert_eq!(result.len(), 1);
 
-        // Budget 0 can't fit even 1 token
+        // Budget 0 can't fit even 1 token, but we never drop below the most-recent message
         let result = strategy.compact(&messages, 0);
-        assert_eq!(result.len(), 0);
+        assert_eq!(
+            result.len(),
+            1,
+            "never strip below the most-recent message — over budget is kept, not dropped to empty"
+        );
     }
 
     #[test]
@@ -437,7 +469,11 @@ mod tests {
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![msg(Role::User, "abcde")]; // 5 chars = 2 tokens
         let result = strategy.compact(&messages, 1);
-        assert_eq!(result.len(), 0); // 2 tokens > 1 budget
+        assert_eq!(
+            result.len(),
+            1,
+            "never strip below the most-recent message — over budget is kept, not dropped to empty"
+        ); // 2 tokens > 1 budget
 
         let result = strategy.compact(&messages, 2);
         assert_eq!(result.len(), 1);
@@ -493,11 +529,16 @@ mod tests {
         ];
         // After masking (no old tools to mask with keep=1 and only 1 tool),
         // total still exceeds budget of 5. Fallback: system alone > budget,
-        // so returns just the system message.
+        // but we must also keep the most-recent user turn.
         let result = strategy.compact(&messages, 5);
-        assert_eq!(result.len(), 1);
         assert_eq!(result[0].role, Role::System);
         assert_eq!(result[0].content, long_system);
+        assert!(
+            result
+                .iter()
+                .any(|m| m.role == Role::User && m.content == "hello"),
+            "the user turn must be kept alongside the over-budget system prompt"
+        );
     }
 
     // --- X8: Sliding window exact length and order assertions ---
@@ -581,5 +622,99 @@ mod tests {
         assert_eq!(result[0].content, "[output elided — 0 chars]");
         assert_eq!(result[1].content, "[output elided — 1 chars]");
         assert_eq!(result[2].content, "[output elided — 1000 chars]");
+    }
+
+    #[test]
+    fn sliding_window_keeps_a_coherent_block_when_recent_tools_exceed_budget() {
+        // Production repro (S043): the coordinator emits a tool_use, then large
+        // tool results. With a tiny remaining-budget token_limit the naive window
+        // walks back over the tool results, runs out before the anchoring
+        // assistant message, then skips FORWARD past all leading orphaned tool
+        // results — leaving only the system message. Anthropic puts `system` in
+        // its own field, so the messages array is EMPTY → 400 "messages: at least
+        // one message is required". The kept window must always retain >=1
+        // coherent (non-system, non-orphan-tool-leading) block.
+        let strategy = SlidingWindowStrategy::new();
+        let big = "x".repeat(4000); // ~1000 tokens each
+        let messages = vec![
+            msg(Role::System, "you are devforge"),
+            msg(Role::User, "where is the health endpoint?"),
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCallMessage {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "src/health.rs"}),
+                }],
+                tool_call_id: None,
+            }, // tool_use anchor
+            tool_msg(&big),
+            tool_msg(&big),
+            tool_msg(&big),
+            tool_msg(&big),
+        ];
+        // token_limit (= remaining cost budget late in a turn) far smaller than
+        // the tool results. Naive impl returns just [System].
+        let result = strategy.compact(&messages, 10);
+
+        let non_system: Vec<&Message> = result.iter().filter(|m| m.role != Role::System).collect();
+        assert!(
+            !non_system.is_empty(),
+            "compaction must never strip the transcript to system-only (empty provider messages)"
+        );
+        assert_eq!(
+            non_system[0].role,
+            Role::User,
+            "kept window must begin with a user turn, not {:?}",
+            non_system[0].role
+        );
+    }
+
+    #[test]
+    fn observation_masking_keeps_a_coherent_block_when_recent_tools_exceed_budget() {
+        // Same floor for the observation-masking strategy's sliding-window fallback.
+        let strategy = ObservationMaskingStrategy::new(10); // keep recent tools verbatim
+        let big = "x".repeat(4000);
+        let messages = vec![
+            msg(Role::System, "you are devforge"),
+            msg(Role::User, "where is the health endpoint?"),
+            msg(Role::Assistant, "let me read the relevant files"),
+            tool_msg(&big),
+            tool_msg(&big),
+            tool_msg(&big),
+            tool_msg(&big),
+        ];
+        let result = strategy.compact(&messages, 10);
+        let non_system: Vec<&Message> = result.iter().filter(|m| m.role != Role::System).collect();
+        assert!(!non_system.is_empty(), "must never strip to system-only");
+        assert_eq!(
+            non_system[0].role,
+            Role::User,
+            "kept window must begin with a user turn, not {:?}",
+            non_system[0].role
+        );
+    }
+
+    #[test]
+    fn sliding_window_keeps_user_turn_when_single_message_exceeds_budget() {
+        // No tool messages at all: just a system prompt and one large user
+        // message bigger than the (shrunken) budget. Compaction must still keep
+        // the user turn — never return a system-only transcript (which becomes an
+        // empty `messages` array for Anthropic → 400).
+        let strategy = SlidingWindowStrategy::new();
+        let big = "x".repeat(4000);
+        let messages = vec![msg(Role::System, "you are devforge"), msg(Role::User, &big)];
+        let result = strategy.compact(&messages, 10);
+        let non_system: Vec<&Message> = result.iter().filter(|m| m.role != Role::System).collect();
+        assert!(
+            !non_system.is_empty(),
+            "must keep the user turn even when it exceeds budget"
+        );
+        assert_eq!(
+            non_system[0].role,
+            Role::User,
+            "kept window must begin with the user turn"
+        );
     }
 }

@@ -21,6 +21,27 @@ use simulacra_types::{
 
 use crate::RuntimeError;
 
+/// The model context window the compactor targets, independent of the
+/// cumulative cost budget (`ResourceBudget`). Conflating the two makes the
+/// compaction window shrink as the cost budget is spent (stripping the
+/// transcript to nothing) and lets a generous cost budget overflow the model's
+/// real context window. A conservative fixed ceiling stays valid for any modern
+/// provider (Claude ~200k, GPT-4o 128k, …); per-model configurability is a
+/// follow-up.
+const CONTEXT_TOKEN_LIMIT: u64 = 128_000;
+
+/// Size the compaction window: the lesser of the remaining cost budget and the
+/// model context ceiling. `max_tokens == 0` means an unlimited cost budget — the
+/// window is still bounded by the context ceiling, never `u64::MAX`.
+fn compaction_token_limit(max_tokens: u64, used_tokens: u64) -> u64 {
+    let remaining = if max_tokens == 0 {
+        u64::MAX
+    } else {
+        max_tokens.saturating_sub(used_tokens)
+    };
+    remaining.min(CONTEXT_TOKEN_LIMIT)
+}
+
 // ── OTel meters ──────────────────────────────────────────────────
 
 /// Lazily-initialized OTel meter instruments for the agent runtime.
@@ -278,14 +299,10 @@ impl AgentLoop {
         self.journal_entry(JournalEntryKind::TurnStart)?;
         self.consume_replay_entry(&JournalEntryKind::TurnStart)?;
 
-        // 3. Compact context (0 = unlimited → use u64::MAX as sentinel)
-        let remaining_tokens = if self.budget.max_tokens == 0 {
-            u64::MAX
-        } else {
-            self.budget
-                .max_tokens
-                .saturating_sub(self.budget.used_tokens)
-        };
+        // 3. Compact context — window is bounded by model context, not just the
+        // remaining cost budget (see compaction_token_limit).
+        let remaining_tokens =
+            compaction_token_limit(self.budget.max_tokens, self.budget.used_tokens);
         let compacted = self.context_strategy.compact(messages, remaining_tokens);
 
         // 4. Journal LlmRequest — must succeed before invoking the provider.
@@ -639,14 +656,10 @@ impl AgentLoop {
             // Consume TurnStart from replay if before frontier
             self.consume_replay_entry(&JournalEntryKind::TurnStart)?;
 
-            // 3. Compact context (0 = unlimited → use u64::MAX as sentinel)
-            let remaining_tokens = if self.budget.max_tokens == 0 {
-                u64::MAX
-            } else {
-                self.budget
-                    .max_tokens
-                    .saturating_sub(self.budget.used_tokens)
-            };
+            // 3. Compact context — window is bounded by model context, not just the
+            // remaining cost budget (see compaction_token_limit).
+            let remaining_tokens =
+                compaction_token_limit(self.budget.max_tokens, self.budget.used_tokens);
             let compacted = self.context_strategy.compact(&messages, remaining_tokens);
 
             // 4. Journal LlmRequest — BEFORE invoking the provider.
@@ -3569,5 +3582,27 @@ mod tests {
                 span.name == "chat" && span.parent.as_deref() == Some("invoke_agent")
             }));
         }
+    }
+
+    #[test]
+    fn compaction_window_is_bounded_by_context_not_just_budget() {
+        // A generous cost budget must not size the compaction window past the
+        // model context window (else we send an over-length prompt); and as the
+        // cost budget is spent the window must not collapse to nothing. The
+        // window is the lesser of remaining cost budget and a model-context
+        // ceiling — decoupling context-fit from the cumulative cost budget.
+        let capped = compaction_token_limit(10_000_000, 0);
+        assert_eq!(
+            capped, CONTEXT_TOKEN_LIMIT,
+            "window must be capped to the context limit, got {capped}"
+        );
+        // When remaining budget is the binding constraint, it passes through.
+        assert_eq!(compaction_token_limit(64_000, 59_000), 5_000);
+        // Unlimited cost budget (max_tokens == 0) is still context-bounded.
+        let unlimited = compaction_token_limit(0, 0);
+        assert_eq!(
+            unlimited, CONTEXT_TOKEN_LIMIT,
+            "unlimited budget still bounded by the context limit, got {unlimited}"
+        );
     }
 }
