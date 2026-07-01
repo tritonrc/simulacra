@@ -1,0 +1,169 @@
+use super::*;
+
+/// A boxed future that resolves to an agent loop result.
+pub type BoxTaskFuture =
+    Pin<Box<dyn Future<Output = Result<AgentLoopOutput, RuntimeError>> + Send + 'static>>;
+
+/// Factory for creating agent tasks. Allows the supervisor to spawn child
+/// agents without knowing the concrete task implementation.
+pub trait TaskFactory: Send + Sync {
+    /// Create a task future for the given spawn configuration and cancellation token.
+    fn create_task(&self, config: SpawnConfig, cancellation: CancellationToken) -> BoxTaskFuture;
+}
+
+/// Restart strategy applied when a supervised agent fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartStrategy {
+    /// Retry the agent once, then propagate the failure.
+    RetryOnce,
+    /// Retry the agent twice, then propagate the failure.
+    RetryTwiceThenFail,
+    /// Snapshot journal state before propagating the failure.
+    SnapshotAndFail,
+    /// Do not restart — let the agent crash.
+    LetCrash,
+}
+
+/// Priority levels for supervisor messages.
+///
+/// Ordering: Signal (highest) > Supervision > Command > Work (lowest).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessagePriority {
+    /// Highest priority — cancellation signals, shutdown.
+    Signal = 3,
+    /// Supervision events — child failure notifications.
+    Supervision = 2,
+    /// Commands — spawn requests, config changes.
+    Command = 1,
+    /// Regular work — agent task results.
+    Work = 0,
+}
+
+impl Ord for MessagePriority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (*self as u8).cmp(&(*other as u8))
+    }
+}
+
+impl PartialOrd for MessagePriority {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A message destined for the supervisor actor.
+#[derive(Debug)]
+pub struct SupervisorMessage {
+    pub priority: MessagePriority,
+    pub agent_id: AgentId,
+    pub payload: SupervisorPayload,
+}
+
+/// Result sent back to the spawn_agent caller when a child completes.
+pub type SpawnResult = Result<AgentLoopOutput, RuntimeError>;
+
+/// Payload variants for supervisor messages.
+#[derive(Debug)]
+pub enum SupervisorPayload {
+    /// Agent completed successfully.
+    Completed,
+    /// Agent failed with the given reason.
+    Failed(String),
+    /// Spawn a new child agent. The oneshot sender receives the child result
+    /// so the parent can await it synchronously (S018: spawn_agent is blocking).
+    Spawn(Box<SpawnConfig>, tokio::sync::oneshot::Sender<SpawnResult>),
+    /// Cancel a running agent.
+    Cancel,
+}
+
+impl Eq for SupervisorMessage {}
+
+impl PartialEq for SupervisorMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority
+    }
+}
+
+impl Ord for SupervisorMessage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.priority.cmp(&other.priority)
+    }
+}
+
+impl PartialOrd for SupervisorMessage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Cooperative cancellation token.
+///
+/// When cancelled, the agent receives a signal and has a grace period
+/// to finish its current operation before being forcefully terminated.
+#[derive(Debug, Clone)]
+pub struct CancellationToken {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    grace_period: Duration,
+}
+
+impl CancellationToken {
+    /// Create a new cancellation token with the given grace period.
+    pub fn new(grace_period: Duration) -> Self {
+        Self {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            grace_period,
+        }
+    }
+
+    /// Signal cancellation.
+    pub fn signal(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check whether cancellation has been signalled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The grace period allowed after signal before forceful termination.
+    pub fn grace(&self) -> Duration {
+        self.grace_period
+    }
+}
+
+/// Configuration for spawning a child agent.
+///
+/// For interactive sub-agent delegation (S018), `agent_type` and `task` carry
+/// the configured child type name and the delegated task text passed to
+/// `AgentLoop::run(task)`. The child receives a fresh Provider instance
+/// selected from the `agent_type` configuration, with its own system_prompt,
+/// and its effective capabilities are the intersection of parent, child-type
+/// config, and any optional override.
+#[derive(Debug, Clone)]
+pub struct SpawnConfig {
+    pub agent_id: AgentId,
+    pub parent_id: AgentId,
+    pub capability: Option<CapabilityToken>,
+    pub budget: ResourceBudget,
+    pub restart_strategy: RestartStrategy,
+    /// The configured child agent type name from simulacra.toml.
+    /// `None` when the parent spawns a generic agent with an inline system_prompt.
+    #[allow(dead_code)]
+    pub agent_type: Option<String>,
+    /// The delegated task text passed to the child AgentLoop::run(task).
+    #[allow(dead_code)]
+    pub task: String,
+    /// Inline system prompt for generic sub-agents (max 8 KB).
+    /// Present only when `agent_type` is `None`.
+    #[allow(dead_code)]
+    pub system_prompt: Option<String>,
+    /// Model capability tier (e.g. "reasoning", "balanced", "fast").
+    /// Resolved to a concrete model via `[tiers]` in simulacra.toml.
+    #[allow(dead_code)]
+    pub tier: Option<String>,
+    /// Resolved tier label for observability. When `tier` is omitted for a
+    /// generic child, this records the parent's tier name without changing the
+    /// inherited model selection.
+    pub resolved_tier: Option<String>,
+}
