@@ -4589,6 +4589,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_yaml",
  "simulacra-hooks",
  "simulacra-http",
  "simulacra-memory",

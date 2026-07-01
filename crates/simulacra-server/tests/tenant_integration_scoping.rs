@@ -37,6 +37,8 @@ fn engine_config_with_tenants(tenants: HashMap<String, SimulacraTenantConfig>) -
                 paths_read: vec!["/**".to_string()],
                 paths_write: vec![],
 
+                skill_patterns: vec![],
+
                 memory: None,
             }),
         },

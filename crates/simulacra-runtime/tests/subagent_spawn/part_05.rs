@@ -84,6 +84,8 @@ fn agent_task_factory_performs_three_way_capability_intersection_parent_config_a
         paths_read: vec!["/workspace/**".into()],
         paths_write: vec!["/workspace/**".into()],
 
+        skill_patterns: vec![],
+
         memory: None,
     };
 

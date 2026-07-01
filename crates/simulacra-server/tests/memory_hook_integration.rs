@@ -481,6 +481,7 @@ fn engine_config() -> SimulacraConfig {
                 python: false,
                 paths_read: vec!["/**".to_string()],
                 paths_write: vec!["/workspace/**".to_string()],
+                skill_patterns: vec![],
                 memory: Some(MemoryCapabilityConfig {
                     enabled: true,
                     search_scopes: vec!["/var/memory/self".to_string()],

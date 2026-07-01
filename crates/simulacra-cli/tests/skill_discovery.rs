@@ -11,7 +11,9 @@ use simulacra_cli::interactive::{
 use simulacra_cli::{CliArgs, CliMode, bootstrap};
 use simulacra_runtime::{InMemoryJournalStorage, InMemorySessionStorage, SessionStorage};
 use simulacra_sandbox::AgentCell;
-use simulacra_tool::{SkillMeta, SkillTool, Tool, parse_skill_frontmatter};
+use simulacra_tool::{
+    SkillError, SkillMeta, SkillTool, Tool, discover_and_filter_skills, parse_skill_frontmatter,
+};
 use simulacra_types::{
     CapabilityToken, FinishReason, JournalStorage, Message, PathPattern, Provider, ProviderError,
     ProviderResponse, ResourceBudget, Role, TokenUsage, ToolDefinition, VirtualFs,
@@ -229,6 +231,7 @@ fn make_skill_meta(
         description: description.into(),
         vfs_path: vfs_path.into(),
         disable_model_invocation,
+        allow_implicit_invocation: true,
         user_invocable,
         allowed_tools: allowed_tools
             .iter()
@@ -353,6 +356,118 @@ fn parse_skill_frontmatter_uses_frontmatter_name_as_the_canonical_identifier() {
     assert_eq!(meta.vfs_path, "/skills/not-the-name/SKILL.md");
     assert!(!meta.user_invocable);
     assert_eq!(meta.allowed_tools, vec!["file_read", "shell_exec"]);
+}
+
+#[test]
+fn discovery_accepts_immediate_skill_children_under_skills() {
+    let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    vfs.write(
+        "/skills/rust-dev/SKILL.md",
+        skill_markdown(
+            "rust-dev",
+            "Use cargo safely.",
+            "",
+            "Run cargo test before returning.",
+        )
+        .as_bytes(),
+    )
+    .expect("skill fixture should be written");
+
+    let catalog = discover_and_filter_skills(
+        &vfs,
+        &["rust-dev".to_string()],
+        &CapabilityToken::default(),
+        "default",
+    )
+    .expect("immediate skill children should be discoverable");
+
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].name, "rust-dev");
+    assert_eq!(catalog[0].vfs_path, "/skills/rust-dev/SKILL.md");
+}
+
+#[test]
+fn discovery_accepts_nested_skill_directories_under_skills_root() {
+    let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    vfs.write(
+        "/skills/group/rust-dev/SKILL.md",
+        skill_markdown(
+            "rust-dev",
+            "Use cargo safely.",
+            "",
+            "Run cargo test before returning.",
+        )
+        .as_bytes(),
+    )
+    .expect("nested skill fixture should be written");
+
+    let catalog = discover_and_filter_skills(
+        &vfs,
+        &["rust-dev".to_string()],
+        &CapabilityToken::default(),
+        "default",
+    )
+    .expect("nested /skills/<group>/<dir>/SKILL.md should be discoverable");
+
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].name, "rust-dev");
+    assert_eq!(catalog[0].vfs_path, "/skills/group/rust-dev/SKILL.md");
+}
+
+#[test]
+fn discovery_does_not_walk_up_or_search_for_other_skills_directories() {
+    let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    vfs.write(
+        "/workspace/project/skills/rust-dev/SKILL.md",
+        skill_markdown(
+            "rust-dev",
+            "Use cargo safely.",
+            "",
+            "Run cargo test before returning.",
+        )
+        .as_bytes(),
+    )
+    .expect("non-root skill fixture should be written");
+
+    let error = discover_and_filter_skills(
+        &vfs,
+        &["rust-dev".to_string()],
+        &CapabilityToken::default(),
+        "default",
+    )
+    .expect_err("discovery must stay rooted at /skills");
+
+    assert!(
+        matches!(
+            &error,
+            SkillError::UndiscoverableSkill {
+                agent_type,
+                skill
+            } if agent_type == "default" && skill == "rust-dev"
+        ),
+        "skills outside the mounted /skills root should not be discovered, got: {error:?}"
+    );
+}
+
+#[test]
+fn skill_tool_definition_excludes_implicit_disabled_skills_from_catalog() {
+    let mut user_only = make_skill_meta(
+        "user-only",
+        "Users may load this explicitly.",
+        "/skills/user-only/SKILL.md",
+        false,
+        true,
+        &[],
+    );
+    user_only.allow_implicit_invocation = false;
+    let tool = make_skill_tool(&[], vec![user_only]);
+
+    let definition = tool.definition();
+
+    assert!(
+        !definition.description.contains("user-only"),
+        "allow_implicit_invocation=false skills should not be advertised to the model"
+    );
 }
 
 #[test]

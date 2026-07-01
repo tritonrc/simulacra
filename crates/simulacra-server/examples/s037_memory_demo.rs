@@ -258,6 +258,7 @@ async fn main() {
                 mcp: vec![],
                 paths_read: vec!["/**".into()],
                 paths_write: vec!["/workspace/**".into(), "/proc/mailbox/**".into()],
+                skill_patterns: vec![],
                 memory: Some(simulacra_config::MemoryCapabilityConfig {
                     enabled: true,
                     search_scopes: vec!["/mnt/hr".into(), "/var/memory/self".into()],

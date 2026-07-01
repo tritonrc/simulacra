@@ -18,6 +18,7 @@ Detailed instructions here.
     assert_eq!(meta.description, "Review code for quality");
     assert_eq!(meta.vfs_path, "/skills/cr/SKILL.md");
     assert!(!meta.disable_model_invocation);
+    assert!(meta.allow_implicit_invocation);
     assert!(meta.user_invocable);
     assert!(meta.allowed_tools.is_empty());
 }
@@ -105,6 +106,22 @@ Body text.
 }
 
 #[test]
+fn parse_skill_frontmatter_reads_allow_implicit_invocation_false() {
+    let content = "\
+---
+name: quiet
+description: User-triggered only
+allow_implicit_invocation: false
+---
+# Quiet Skill
+
+Body text.
+";
+    let meta = parse_skill_frontmatter(content, "/skills/quiet/SKILL.md").unwrap();
+    assert!(!meta.allow_implicit_invocation);
+}
+
+#[test]
 fn parse_skill_frontmatter_reads_allowed_tools_list() {
     let content = "\
 ---
@@ -120,6 +137,24 @@ Body text.
 ";
     let meta = parse_skill_frontmatter(content, "/skills/builder/SKILL.md").unwrap();
     assert_eq!(meta.allowed_tools, vec!["shell_exec", "file_write"]);
+}
+
+#[test]
+fn parse_skill_frontmatter_accepts_real_yaml_scalars_and_sequences() {
+    let content = "\
+---
+name: \"review:rust\"
+description: \"Use cargo: fmt, clippy, and test.\"
+allowed_tools: [\"shell_exec\", \"file_read\"]
+---
+# Rust Review
+
+Body text.
+";
+    let meta = parse_skill_frontmatter(content, "/skills/review/SKILL.md").unwrap();
+    assert_eq!(meta.name, "review:rust");
+    assert_eq!(meta.description, "Use cargo: fmt, clippy, and test.");
+    assert_eq!(meta.allowed_tools, vec!["shell_exec", "file_read"]);
 }
 
 #[test]
@@ -141,4 +176,3 @@ This is the body.
         "expected body to contain content, got: {body}"
     );
 }
-

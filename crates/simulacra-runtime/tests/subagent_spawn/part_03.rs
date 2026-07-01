@@ -94,6 +94,8 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_child_prompt_and_mod
             paths_read: vec!["/workspace/**".into()],
             paths_write: vec![],
 
+            skill_patterns: vec![],
+
             memory: None,
         }),
         provider_kind: ProviderKind::OpenAI,
@@ -196,6 +198,7 @@ fn agent_task_factory_applies_child_cell_and_tool_hooks_before_provider_call() {
             python: false,
             paths_read: vec!["/workspace/**".into()],
             paths_write: vec![],
+            skill_patterns: vec![],
             memory: None,
         }),
         provider_kind: ProviderKind::OpenAI,
@@ -288,6 +291,8 @@ fn agent_task_factory_intersects_child_type_capability_with_the_spawn_override()
             python: false,
             paths_read: vec!["/workspace/**".into()],
             paths_write: vec!["/workspace/**".into()],
+
+            skill_patterns: vec![],
 
             memory: None,
         }),
