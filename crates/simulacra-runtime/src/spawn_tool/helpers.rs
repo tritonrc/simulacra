@@ -140,3 +140,55 @@ pub(super) fn parent_tier_name(tiers_config: &TierMap, parent_model: &str) -> St
         })
         .unwrap_or_else(|| "balanced".to_string())
 }
+
+pub(super) fn run_spawn_before_hook(
+    pipeline: Option<&Arc<simulacra_hooks::pipeline::HookPipeline>>,
+    agent_type: &str,
+    system_prompt: &str,
+    budget: &ResourceBudget,
+) -> Result<(), RuntimeError> {
+    let Some(pipeline) = pipeline else {
+        return Ok(());
+    };
+
+    let before_ctx = serde_json::json!({
+        "agent_type": agent_type,
+        "system_prompt": system_prompt,
+        "budget": {
+            "max_tokens": budget.max_tokens,
+            "max_turns": budget.max_turns,
+        },
+    })
+    .to_string();
+
+    match pipeline.run_before(simulacra_hooks::verdict::Operation::Spawn, &before_ctx) {
+        Ok((simulacra_hooks::Verdict::Continue(_), _)) => Ok(()),
+        Ok((simulacra_hooks::Verdict::Deny(reason), _)) => Err(RuntimeError::HookDenial(reason)),
+        Ok((simulacra_hooks::Verdict::Kill(_), _)) => {
+            unreachable!("Kill is returned as Err from run_before")
+        }
+        Err(simulacra_hooks::HookError::Killed { hook, reason }) => {
+            Err(RuntimeError::HookKill { hook, reason })
+        }
+        Err(e) => Err(RuntimeError::HookError(e.to_string())),
+    }
+}
+
+pub(super) fn run_spawn_after_hook(
+    pipeline: Option<&Arc<simulacra_hooks::pipeline::HookPipeline>>,
+    agent_type: &str,
+    result: &Result<AgentLoopOutput, RuntimeError>,
+) {
+    let Some(pipeline) = pipeline else {
+        return;
+    };
+
+    let tokens_used = result.as_ref().map(|o| o.token_usage.total()).unwrap_or(0);
+    let after_ctx = serde_json::json!({
+        "agent_type": agent_type,
+        "result": result.as_ref().map(|o| format!("{:?}", o.exit_reason)).unwrap_or_else(|e| format!("{e}")),
+        "tokens_used": tokens_used,
+    })
+    .to_string();
+    let _ = pipeline.run_after(simulacra_hooks::verdict::Operation::Spawn, &after_ctx);
+}

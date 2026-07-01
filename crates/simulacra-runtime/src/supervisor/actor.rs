@@ -1,4 +1,4 @@
-use super::restart::spawn_retry_task;
+use super::restart::run_task_with_retries;
 use super::*;
 
 impl AgentSupervisor {
@@ -111,81 +111,21 @@ impl AgentSupervisor {
         task_set: &mut tokio::task::JoinSet<()>,
         config: SpawnConfig,
         result_tx: tokio::sync::oneshot::Sender<SpawnResult>,
+        factory: Arc<dyn TaskFactory>,
     ) {
-        if let Some(ref factory) = self.task_factory {
-            let agent_id = config.agent_id.clone();
-            let restart_strategy = config.restart_strategy.clone();
-            let retry_config = config.clone();
-            let token = CancellationToken::new(Duration::from_secs(5));
-            let task_future = factory.create_task(config, token.clone());
-            let parent_budget = Arc::clone(&self.parent_budget);
-            let factory_clone = Arc::clone(factory);
-            let retry_counts = Arc::clone(&self.retry_counts_shared);
+        let agent_id = config.agent_id.clone();
+        let token = CancellationToken::new(Duration::from_secs(5));
+        let task_future = factory.create_task(config.clone(), token.clone());
+        let result_context = self.child_result_context(&config, Instant::now());
+        let retry_counts = Arc::clone(&self.retry_counts_shared);
 
-            self.cancellation_tokens
-                .lock()
-                .unwrap()
-                .insert(agent_id.clone(), token);
+        lock_mutex(&self.cancellation_tokens, "cancellation_tokens").insert(agent_id, token);
 
-            task_set.spawn(async move {
-                match task_future.await {
-                    Ok(output) => {
-                        // Roll up child budget from actual AgentLoopOutput,
-                        // not the stale SpawnConfig clone (S018 fix).
-                        {
-                            let mut budget = parent_budget.lock().unwrap();
-                            budget.used_tokens +=
-                                output.token_usage.input_tokens + output.token_usage.output_tokens;
-                            budget.used_turns += output.used_turns;
-                            budget.used_cost += output.used_cost;
-                        }
-                        // Send result back to the spawn_agent caller.
-                        let _ = result_tx.send(Ok(output));
-                    }
-                    Err(err) => {
-                        // Check restart strategy
-                        let should_restart = match restart_strategy {
-                            RestartStrategy::RetryOnce => {
-                                let mut counts = retry_counts.lock().unwrap();
-                                let count = counts.entry(agent_id.clone()).or_insert(0);
-                                if *count < 1 {
-                                    *count += 1;
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                            RestartStrategy::RetryTwiceThenFail => {
-                                let mut counts = retry_counts.lock().unwrap();
-                                let count = counts.entry(agent_id.clone()).or_insert(0);
-                                if *count < 2 {
-                                    *count += 1;
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                            _ => false,
-                        };
-                        if should_restart {
-                            spawn_retry_task(
-                                factory_clone,
-                                retry_config,
-                                parent_budget,
-                                retry_counts,
-                            );
-                        }
-                        // Send error back to the spawn_agent caller.
-                        let _ = result_tx.send(Err(err));
-                    }
-                }
-            });
-        } else {
-            // No factory — send error back immediately.
-            let _ = result_tx.send(Err(RuntimeError::Session(
-                "supervisor has no task factory configured".into(),
-            )));
-        }
+        task_set.spawn(async move {
+            let result = run_task_with_retries(factory, config, task_future, retry_counts).await;
+            let result = AgentSupervisor::process_child_result(result, &result_context);
+            let _ = result_tx.send(result);
+        });
     }
 }
 
@@ -202,14 +142,24 @@ impl AgentSupervisor {
     ) {
         match msg.payload {
             SupervisorPayload::Spawn(config, result_tx) => {
-                if let Err(err) = self.validate_and_prepare_spawn(&config) {
+                if let Err(err) = self.validate_spawn_request(&config) {
                     let _ = result_tx.send(Err(err));
                     return;
                 }
-                self.spawn_task_into(task_set, *config, result_tx);
+                let Some(factory) = self.task_factory.clone() else {
+                    let _ = result_tx.send(Err(RuntimeError::SpawnMissingTask));
+                    return;
+                };
+                if let Err(err) = self.prepare_spawn(&config) {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                self.spawn_task_into(task_set, *config, result_tx, factory);
             }
             SupervisorPayload::Cancel => {
-                if let Some(token) = self.cancellation_tokens.lock().unwrap().get(&msg.agent_id) {
+                if let Some(token) =
+                    lock_mutex(&self.cancellation_tokens, "cancellation_tokens").get(&msg.agent_id)
+                {
                     token.signal();
                 }
             }
@@ -232,7 +182,7 @@ impl AgentSupervisor {
         token.signal();
         let grace_duration = token.grace();
 
-        let handle = self.children.lock().unwrap().remove(agent_id);
+        let handle = lock_mutex(&self.children, "children").remove(agent_id);
         if let Some(handle) = handle {
             // Grab an AbortHandle before passing the JoinHandle to the timeout
             // future. If the timeout expires, the JoinHandle is dropped (which
@@ -255,7 +205,7 @@ impl AgentSupervisor {
     /// Abort a child task forcefully (used after grace period expiry).
     #[allow(dead_code)]
     fn abort_child(&self, agent_id: &AgentId) {
-        if let Some(handle) = self.children.lock().unwrap().remove(agent_id) {
+        if let Some(handle) = lock_mutex(&self.children, "children").remove(agent_id) {
             handle.abort();
         }
     }

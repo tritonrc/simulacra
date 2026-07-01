@@ -1,14 +1,5 @@
 use super::*;
 
-// ---------------------------------------------------------------------------
-// AgentTaskFactory
-// ---------------------------------------------------------------------------
-
-pub type ChildCellConfigurator = Arc<dyn Fn(&mut simulacra_sandbox::AgentCell) + Send + Sync>;
-
-pub type ChildToolRegistrar =
-    Arc<dyn Fn(&mut simulacra_tool::ToolRegistry, Arc<simulacra_sandbox::AgentCell>) + Send + Sync>;
-
 /// Factory that creates child AgentLoop instances for the supervisor.
 pub struct AgentTaskFactory {
     pub config: SimulacraConfig,
@@ -108,123 +99,42 @@ impl crate::TaskFactory for AgentTaskFactory {
                     capability: effective_capability,
                 };
 
-                let provider: Box<dyn Provider> = match provider_kind {
-                    ProviderKind::Anthropic => {
-                        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-                            RuntimeError::Session("ANTHROPIC_API_KEY not set".into())
-                        })?;
-                        Box::new(AnthropicProvider::new(api_key, &model))
-                    }
-                    ProviderKind::OpenAI => {
-                        let api_key = std::env::var("OPENAI_API_KEY")
-                            .map_err(|_| RuntimeError::Session("OPENAI_API_KEY not set".into()))?;
-                        Box::new(OpenAiProvider::new(api_key, &model))
-                    }
-                    ProviderKind::Ollama => Box::new(OpenAiProvider::new("ollama", &model)),
-                };
-
-                let child_proc = child_proc_runtime(
-                    Arc::clone(&vfs),
-                    Arc::clone(&journal),
-                    ChildProcSpec {
-                        agent_id: spawn_config.agent_id.clone(),
-                        agent_name: "generic".to_string(),
-                        model: model.clone(),
-                        parent_id: spawn_config.parent_id.clone(),
-                        capability: child_config.capability.clone(),
-                        budget: spawn_config.budget.clone(),
-                        pipeline: pipeline.clone(),
-                    },
-                );
-                let http_client: Arc<dyn simulacra_http::HttpClient> =
-                    Arc::new(simulacra_http::UreqHttpClient::default());
-                let mut cell = simulacra_sandbox::AgentCell::new(
-                    Arc::clone(&child_proc.vfs),
-                    child_config.capability.clone(),
-                    Arc::clone(&child_proc.budget),
-                    Arc::clone(&child_proc.journal),
-                    http_client,
-                );
-                if let Some(ref executor) = script_executor {
-                    cell.set_script_executor(executor.clone());
-                }
-                if let Some(ref configure_cell) = child_cell_configurator {
-                    configure_cell(&mut cell);
-                }
-                let cell = Arc::new(cell);
-
-                let mut child_registry = simulacra_tool::ToolRegistry::new();
-                simulacra_tool::register_builtins(&mut child_registry, Arc::clone(&cell));
-                if let Some(ref register_extra_tools) = child_tool_registrar {
-                    register_extra_tools(&mut child_registry, Arc::clone(&cell));
-                }
-                // NO SpawnAgentTool registration — generic agents are leaf workers
-                // and cannot spawn children.
-                child_proc.tools.set(child_registry.definitions());
-
-                let activity_type = "generic".to_string();
-                let child_sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
-                    spawn_config.agent_id.0.clone(),
-                    activity_type,
+                let provider = build_provider(&provider_kind, &child_config.model)?;
+                let child_env = build_child_environment(ChildEnvironmentSpec {
+                    inherited_vfs: Arc::clone(&vfs),
+                    inherited_journal: Arc::clone(&journal),
+                    spawn_config: &spawn_config,
+                    child_config: &child_config,
+                    agent_type_name: "generic",
+                    pipeline: pipeline.clone(),
+                    script_executor: script_executor.clone(),
+                    cell_configurator: child_cell_configurator.clone(),
+                    tool_registrar: child_tool_registrar.clone(),
+                    spawn_tool: None,
                     parent_sink,
-                ));
+                });
 
-                // BEFORE spawn hook
-                if let Some(ref pipeline) = pipeline {
-                    let before_ctx = serde_json::json!({
-                        "agent_type": "generic",
-                        "system_prompt": &child_config.system_prompt,
-                        "budget": {
-                            "max_tokens": spawn_config.budget.max_tokens,
-                            "max_turns": spawn_config.budget.max_turns,
-                        },
-                    })
-                    .to_string();
-                    match pipeline
-                        .run_before(simulacra_hooks::verdict::Operation::Spawn, &before_ctx)
-                    {
-                        Ok((simulacra_hooks::Verdict::Continue(_), _)) => {}
-                        Ok((simulacra_hooks::Verdict::Deny(reason), _)) => {
-                            return Err(RuntimeError::HookDenial(reason));
-                        }
-                        Ok((simulacra_hooks::Verdict::Kill(_), _)) => {
-                            unreachable!("Kill is returned as Err from run_before")
-                        }
-                        Err(simulacra_hooks::HookError::Killed { hook, reason }) => {
-                            return Err(RuntimeError::HookKill { hook, reason });
-                        }
-                        Err(e) => {
-                            return Err(RuntimeError::HookError(e.to_string()));
-                        }
-                    }
-                }
+                run_spawn_before_hook(
+                    pipeline.as_ref(),
+                    "generic",
+                    &child_config.system_prompt,
+                    &spawn_config.budget,
+                )?;
 
                 let mut child_loop = AgentLoop::new(
                     child_config,
                     provider,
-                    child_registry,
+                    child_env.registry,
                     Box::new(simulacra_context::ObservationMaskingStrategy::new(5)),
-                    child_proc.journal,
+                    child_env.proc.journal,
                     spawn_config.budget,
-                    Some(child_sink),
+                    Some(child_env.sink),
                     pipeline.clone(),
                 );
-                child_loop.set_proc_budget_mirror(child_proc.budget, child_proc.turn);
+                child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
 
                 let result = child_loop.run(&task).await;
-
-                // AFTER spawn hook
-                if let Some(ref pipeline) = pipeline {
-                    let tokens_used = result.as_ref().map(|o| o.token_usage.total()).unwrap_or(0);
-                    let after_ctx = serde_json::json!({
-                        "agent_type": "generic",
-                        "result": result.as_ref().map(|o| format!("{:?}", o.exit_reason)).unwrap_or_else(|e| format!("{e}")),
-                        "tokens_used": tokens_used,
-                    })
-                    .to_string();
-                    let _ =
-                        pipeline.run_after(simulacra_hooks::verdict::Operation::Spawn, &after_ctx);
-                }
+                run_spawn_after_hook(pipeline.as_ref(), "generic", &result);
 
                 return result;
             }
@@ -242,20 +152,6 @@ impl crate::TaskFactory for AgentTaskFactory {
                 .system_prompt
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-
-            let provider: Box<dyn Provider> = match provider_kind {
-                ProviderKind::Anthropic => {
-                    let api_key = std::env::var("ANTHROPIC_API_KEY")
-                        .map_err(|_| RuntimeError::Session("ANTHROPIC_API_KEY not set".into()))?;
-                    Box::new(AnthropicProvider::new(api_key, &model))
-                }
-                ProviderKind::OpenAI => {
-                    let api_key = std::env::var("OPENAI_API_KEY")
-                        .map_err(|_| RuntimeError::Session("OPENAI_API_KEY not set".into()))?;
-                    Box::new(OpenAiProvider::new(api_key, &model))
-                }
-                ProviderKind::Ollama => Box::new(OpenAiProvider::new("ollama", &model)),
-            };
 
             let capability = build_capability_token(&agent_type_config);
 
@@ -294,120 +190,52 @@ impl crate::TaskFactory for AgentTaskFactory {
                 .agent_type
                 .clone()
                 .unwrap_or_else(|| "generic".to_string());
-            let child_proc = child_proc_runtime(
-                Arc::clone(&vfs),
-                Arc::clone(&journal),
-                ChildProcSpec {
-                    agent_id: spawn_config.agent_id.clone(),
-                    agent_name: agent_type_name.clone(),
-                    model: child_config.model.clone(),
-                    parent_id: spawn_config.parent_id.clone(),
-                    capability: child_config.capability.clone(),
-                    budget: spawn_config.budget.clone(),
-                    pipeline: pipeline.clone(),
-                },
-            );
-            let http_client: Arc<dyn simulacra_http::HttpClient> =
-                Arc::new(simulacra_http::UreqHttpClient::default());
-            let mut cell = simulacra_sandbox::AgentCell::new(
-                Arc::clone(&child_proc.vfs),
-                child_config.capability.clone(),
-                Arc::clone(&child_proc.budget),
-                Arc::clone(&child_proc.journal),
-                http_client,
-            );
-            if let Some(ref executor) = script_executor {
-                cell.set_script_executor(executor.clone());
-            }
-            if let Some(ref configure_cell) = child_cell_configurator {
-                configure_cell(&mut cell);
-            }
-            let cell = Arc::new(cell);
-
-            let mut child_registry = simulacra_tool::ToolRegistry::new();
-            simulacra_tool::register_builtins(&mut child_registry, Arc::clone(&cell));
-            if let Some(ref register_extra_tools) = child_tool_registrar {
-                register_extra_tools(&mut child_registry, Arc::clone(&cell));
-            }
-
-            // S018 §173: Register spawn_agent for child when it is allowed to spawn.
-            if child_can_spawn && let Some(ref sender) = supervisor_sender {
-                child_registry.register(Box::new(SpawnAgentTool {
-                    sender: sender.clone(),
+            let provider = build_provider(&provider_kind, &child_config.model)?;
+            let spawn_tool = if child_can_spawn {
+                supervisor_sender.clone().map(|sender| ChildSpawnToolSpec {
+                    sender,
                     can_spawn: agent_type_config.can_spawn.clone(),
-                    activity_sink: Arc::clone(&parent_sink),
-                    parent_id: spawn_config.agent_id.clone(),
                     tiers: tiers_config.clone(),
-                    // Child's SpawnAgentTool sees the child's own budget so that
-                    // grandchildren inherit from the child's remaining budget.
-                    parent_budget: Arc::clone(&child_proc.budget),
                     parent_model: child_config.model.clone(),
-                }));
-            }
-            child_proc.tools.set(child_registry.definitions());
-
-            // S019: Create a ForwardingActivitySink that wraps child events in
-            // ChildActivity and forwards to the parent's sink for real-time visibility.
-            let child_sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
-                spawn_config.agent_id.0.clone(),
-                agent_type_name.clone(),
-                parent_sink,
-            ));
-
-            // BEFORE spawn hook
-            let agent_type_str = agent_type_name;
-            if let Some(ref pipeline) = pipeline {
-                let before_ctx = serde_json::json!({
-                    "agent_type": &agent_type_str,
-                    "system_prompt": &child_config.system_prompt,
-                    "budget": {
-                        "max_tokens": spawn_config.budget.max_tokens,
-                        "max_turns": spawn_config.budget.max_turns,
-                    },
                 })
-                .to_string();
-                match pipeline.run_before(simulacra_hooks::verdict::Operation::Spawn, &before_ctx) {
-                    Ok((simulacra_hooks::Verdict::Continue(_), _)) => {}
-                    Ok((simulacra_hooks::Verdict::Deny(reason), _)) => {
-                        return Err(RuntimeError::HookDenial(reason));
-                    }
-                    Ok((simulacra_hooks::Verdict::Kill(_), _)) => {
-                        unreachable!("Kill is returned as Err from run_before")
-                    }
-                    Err(simulacra_hooks::HookError::Killed { hook, reason }) => {
-                        return Err(RuntimeError::HookKill { hook, reason });
-                    }
-                    Err(e) => {
-                        return Err(RuntimeError::HookError(e.to_string()));
-                    }
-                }
-            }
+            } else {
+                None
+            };
+            let child_env = build_child_environment(ChildEnvironmentSpec {
+                inherited_vfs: Arc::clone(&vfs),
+                inherited_journal: Arc::clone(&journal),
+                spawn_config: &spawn_config,
+                child_config: &child_config,
+                agent_type_name: &agent_type_name,
+                pipeline: pipeline.clone(),
+                script_executor: script_executor.clone(),
+                cell_configurator: child_cell_configurator.clone(),
+                tool_registrar: child_tool_registrar.clone(),
+                spawn_tool,
+                parent_sink,
+            });
+
+            run_spawn_before_hook(
+                pipeline.as_ref(),
+                &agent_type_name,
+                &child_config.system_prompt,
+                &spawn_config.budget,
+            )?;
 
             let mut child_loop = AgentLoop::new(
                 child_config,
                 provider,
-                child_registry,
+                child_env.registry,
                 Box::new(simulacra_context::ObservationMaskingStrategy::new(5)),
-                child_proc.journal,
+                child_env.proc.journal,
                 spawn_config.budget,
-                Some(child_sink),
+                Some(child_env.sink),
                 pipeline.clone(),
             );
-            child_loop.set_proc_budget_mirror(child_proc.budget, child_proc.turn);
+            child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
 
             let result = child_loop.run(&task).await;
-
-            // AFTER spawn hook
-            if let Some(ref pipeline) = pipeline {
-                let tokens_used = result.as_ref().map(|o| o.token_usage.total()).unwrap_or(0);
-                let after_ctx = serde_json::json!({
-                    "agent_type": &agent_type_str,
-                    "result": result.as_ref().map(|o| format!("{:?}", o.exit_reason)).unwrap_or_else(|e| format!("{e}")),
-                    "tokens_used": tokens_used,
-                })
-                .to_string();
-                let _ = pipeline.run_after(simulacra_hooks::verdict::Operation::Spawn, &after_ctx);
-            }
+            run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);
 
             result
         })

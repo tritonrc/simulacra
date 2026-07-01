@@ -17,7 +17,7 @@ impl AgentSupervisor {
     /// must be rolled up into the parent so the parent's remaining budget
     /// accurately reflects total work performed.
     pub fn deduct_child_usage(&self, config: &SpawnConfig) {
-        let mut budget = self.parent_budget.lock().unwrap();
+        let mut budget = lock_mutex(&self.parent_budget, "parent_budget");
         budget.used_tokens += config.budget.used_tokens;
         budget.used_turns += config.budget.used_turns;
         budget.used_cost += config.budget.used_cost;
@@ -25,7 +25,7 @@ impl AgentSupervisor {
 
     /// Returns a snapshot of the parent budget.
     pub fn parent_budget(&self) -> ResourceBudget {
-        self.parent_budget.lock().unwrap().clone()
+        lock_mutex(&self.parent_budget, "parent_budget").clone()
     }
 
     /// Handle a child agent's successful completion.

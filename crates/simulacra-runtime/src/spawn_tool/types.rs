@@ -1,5 +1,10 @@
 use super::*;
 
+pub type ChildCellConfigurator = Arc<dyn Fn(&mut simulacra_sandbox::AgentCell) + Send + Sync>;
+
+pub type ChildToolRegistrar =
+    Arc<dyn Fn(&mut simulacra_tool::ToolRegistry, Arc<simulacra_sandbox::AgentCell>) + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // ProviderKind
 // ---------------------------------------------------------------------------

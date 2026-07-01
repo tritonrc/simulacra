@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) struct TurnExecution {
+    pub(super) result: TurnResult,
+    pub(super) token_usage: TokenUsage,
+    pub(super) budget_exhausted: Option<simulacra_types::BudgetExhausted>,
+}
+
 impl AgentLoop {
     /// Run exactly one LLM turn: call provider, process response, dispatch tool calls, return.
     ///
@@ -9,6 +15,14 @@ impl AgentLoop {
         &mut self,
         messages: &mut Vec<Message>,
     ) -> Result<TurnResult, RuntimeError> {
+        Ok(self.execute_turn(messages, true).await?.result)
+    }
+
+    pub(super) async fn execute_turn(
+        &mut self,
+        messages: &mut Vec<Message>,
+        emit_turn_complete: bool,
+    ) -> Result<TurnExecution, RuntimeError> {
         // 1. Check budget BEFORE the operation
         if let Err(exhausted) = self.budget.check_budget() {
             RuntimeMeters::get().budget_exhaustions.add(
@@ -18,7 +32,11 @@ impl AgentLoop {
                     KeyValue::new("simulacra.agent.id", self.config.agent_id.0.clone()),
                 ],
             );
-            return Ok(TurnResult::BudgetExhausted);
+            return Ok(TurnExecution {
+                result: TurnResult::BudgetExhausted,
+                token_usage: TokenUsage::default(),
+                budget_exhausted: Some(exhausted),
+            });
         }
 
         let tool_defs = self.tools.definitions();
@@ -181,8 +199,14 @@ impl AgentLoop {
         // 9. If no tool calls, return Complete
         if response.message.tool_calls.is_empty() {
             // S019: Emit TurnComplete on every return path
-            self.sink.emit(ActivityEvent::TurnComplete);
-            return Ok(TurnResult::Complete(response.message));
+            if emit_turn_complete {
+                self.sink.emit(ActivityEvent::TurnComplete);
+            }
+            return Ok(TurnExecution {
+                result: TurnResult::Complete(response.message),
+                token_usage: response.token_usage,
+                budget_exhausted: None,
+            });
         }
 
         // 10. Dispatch tool calls
@@ -266,11 +290,17 @@ impl AgentLoop {
         }
 
         // S019: Emit TurnComplete on every return path
-        self.sink.emit(ActivityEvent::TurnComplete);
+        if emit_turn_complete {
+            self.sink.emit(ActivityEvent::TurnComplete);
+        }
 
-        Ok(TurnResult::ToolCallsProcessed {
-            assistant_message: response.message,
-            tool_results,
+        Ok(TurnExecution {
+            result: TurnResult::ToolCallsProcessed {
+                assistant_message: response.message,
+                tool_results,
+            },
+            token_usage: response.token_usage,
+            budget_exhausted: None,
         })
     }
 }

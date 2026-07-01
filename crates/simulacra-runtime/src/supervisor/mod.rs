@@ -15,12 +15,22 @@ use std::sync::{Arc, Mutex};
 use std::collections::BinaryHeap;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::exit_reason::exit_reason_to_snake_case;
 use crate::{ActivitySink, AgentLoopOutput, NoopActivitySink, RuntimeError};
 use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ResourceBudget};
 use tokio::task::JoinHandle;
+
+fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(mutex = name, "recovering poisoned supervisor mutex");
+            poisoned.into_inner()
+        }
+    }
+}
 
 /// Supervises agent lifecycle — spawn, cancel, restart.
 ///

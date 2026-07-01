@@ -15,49 +15,23 @@ fn default_generic_agent_system_prompt() -> String {
     }
 }
 
+pub(super) struct ChildResultContext {
+    pub(super) agent_id: AgentId,
+    pub(super) parent_id: AgentId,
+    pub(super) agent_type: String,
+    pub(super) parent_budget: Arc<Mutex<ResourceBudget>>,
+    pub(super) journal: Option<Arc<dyn simulacra_types::JournalStorage>>,
+    pub(super) activity_sink: Arc<dyn ActivitySink>,
+    pub(super) spawn_start: Instant,
+}
+
 impl AgentSupervisor {
-    /// Validate a spawn request and perform all pre-spawn side effects:
-    /// budget checks, capability checks, spawn_types check, budget increment,
-    /// journal write, tracing span + info log, and activity event emission.
-    ///
-    /// This is the single source of truth for spawn validation. Both
-    /// `spawn_agent()` and `dispatch_message_into()` call this method to
-    /// ensure the actor loop path runs the same checks as the direct path.
-    pub(super) fn validate_and_prepare_spawn(
-        &self,
-        config: &SpawnConfig,
-    ) -> Result<(), RuntimeError> {
-        let agent_name = config.agent_id.0.as_str();
-        let parent = config.parent_id.0.as_str();
-        let capabilities = format!("{:?}", config.capability.as_ref());
-
-        let child_agent_type = config.agent_type.as_deref().unwrap_or("generic");
-        let spawn_mode = if config.agent_type.is_some() {
-            "configured"
-        } else {
-            "generic"
-        };
-        let tier_label = config
-            .resolved_tier
-            .as_deref()
-            .or(config.tier.as_deref())
-            .unwrap_or("balanced");
-        let _span = tracing::info_span!(
-            "create_agent",
-            "gen_ai.operation.name" = "create_agent",
-            "gen_ai.agent.name" = agent_name,
-            "simulacra.parent.agent_id" = parent,
-            "simulacra.child.agent_type" = child_agent_type,
-            "simulacra.agent.spawn_mode" = spawn_mode,
-            "simulacra.agent.tier" = tier_label,
-        )
-        .entered();
-
+    pub(super) fn validate_spawn_request(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
         // Budget checks first: reject early if the child's budget request
         // exceeds the parent's remaining headroom. This ensures budget
         // enforcement even when spawn_types or capabilities would also reject.
         {
-            let budget = self.parent_budget.lock().unwrap();
+            let budget = lock_mutex(&self.parent_budget, "parent_budget");
             // max_sub_agents == 0 means unlimited (S006/S018). Only check
             // when the parent has a finite sub-agent limit.
             if budget.max_sub_agents > 0 && budget.used_sub_agents >= budget.max_sub_agents {
@@ -143,6 +117,36 @@ impl AgentSupervisor {
             ));
         }
 
+        Ok(())
+    }
+
+    pub(super) fn prepare_spawn(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        let agent_name = config.agent_id.0.as_str();
+        let parent = config.parent_id.0.as_str();
+        let capabilities = format!("{:?}", config.capability.as_ref());
+
+        let child_agent_type = config.agent_type.as_deref().unwrap_or("generic");
+        let spawn_mode = if config.agent_type.is_some() {
+            "configured"
+        } else {
+            "generic"
+        };
+        let tier_label = config
+            .resolved_tier
+            .as_deref()
+            .or(config.tier.as_deref())
+            .unwrap_or("balanced");
+        let _span = tracing::info_span!(
+            "create_agent",
+            "gen_ai.operation.name" = "create_agent",
+            "gen_ai.agent.name" = agent_name,
+            "simulacra.parent.agent_id" = parent,
+            "simulacra.child.agent_type" = child_agent_type,
+            "simulacra.agent.spawn_mode" = spawn_mode,
+            "simulacra.agent.tier" = tier_label,
+        )
+        .entered();
+
         // S018: Journal SubAgentSpawned before child execution begins.
         // The child_id links the parent journal to the child's own journal
         // stream in JournalStorage.
@@ -181,7 +185,7 @@ impl AgentSupervisor {
                 })?;
         }
 
-        self.parent_budget.lock().unwrap().used_sub_agents += 1;
+        lock_mutex(&self.parent_budget, "parent_budget").used_sub_agents += 1;
 
         tracing::info!(
             "gen_ai.agent.name" = agent_name,
@@ -211,28 +215,25 @@ impl AgentSupervisor {
     /// - Emits a `create_agent` span with `gen_ai.operation.name` and `gen_ai.agent.name`.
     /// - Logs spawn at INFO with agent name, parent, and capabilities.
     pub fn spawn_agent(&mut self, config: SpawnConfig) -> Result<CancellationToken, RuntimeError> {
-        self.validate_and_prepare_spawn(&config)?;
-
-        let token = CancellationToken::new(Duration::from_secs(5));
+        self.validate_spawn_request(&config)?;
 
         // WARNING 1 fix: spawn_agent must have a task factory. Returning Ok(token)
         // without running any task was misleading — callers have no way to know
         // the spawn silently did nothing. This is a programmer error at wiring
         // time; fail fast instead of pretending success.
-        let Some(ref factory) = self.task_factory else {
+        let Some(factory) = self.task_factory.clone() else {
             return Err(RuntimeError::SpawnMissingTask);
         };
 
+        self.prepare_spawn(&config)?;
+
+        let token = CancellationToken::new(Duration::from_secs(5));
         let agent_id = config.agent_id.clone();
         let agent_id_for_map = agent_id.clone();
-        let parent_id_str = config.parent_id.0.clone();
-        let child_agent_type = config
-            .agent_type
-            .clone()
-            .unwrap_or_else(|| "generic".to_string());
+        let spawn_start = Instant::now();
+        let result_context = self.child_result_context(&config, spawn_start);
+        let retry_config = config.clone();
         let mut task_future = factory.create_task(config, token.clone());
-        let parent_budget = Arc::clone(&self.parent_budget);
-        let journal = self.journal_storage.clone();
 
         // Try polling the future once synchronously. If the task factory
         // resolves immediately (as in tests or simple delegation), we
@@ -243,9 +244,6 @@ impl AgentSupervisor {
             let mut cx = std::task::Context::from_waker(&waker);
             Pin::as_mut(&mut task_future).poll(&mut cx)
         };
-
-        let spawn_start = std::time::Instant::now();
-        let sink = Arc::clone(&self.activity_sink);
 
         if let std::task::Poll::Ready(result) = immediate {
             // WARNING 1 fix: if the child immediately errored, propagate that
@@ -258,103 +256,111 @@ impl AgentSupervisor {
                 Ok(_) => None,
                 Err(e) => Some(RuntimeError::Session(format!(
                     "child {} (agent_type={}) failed immediately: {e}",
-                    agent_id.0, child_agent_type
+                    agent_id.0, result_context.agent_type
                 ))),
             };
-            Self::process_child_result(
-                result,
-                &agent_id,
-                &parent_id_str,
-                &child_agent_type,
-                &parent_budget,
-                &journal,
-                &sink,
-                spawn_start,
-            );
+            let finalized = Self::process_child_result(result, &result_context);
             let handle: JoinHandle<()> = tokio::spawn(async {});
-            self.children
-                .lock()
-                .unwrap()
-                .insert(agent_id_for_map, handle);
-            if was_err {
-                return Err(err_for_return.expect("err_for_return set when was_err"));
+            lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
+            if let Err(err) = finalized {
+                match err {
+                    RuntimeError::JournalAppendFailed { .. } => return Err(err),
+                    other if !was_err => return Err(other),
+                    _ => {}
+                }
+            }
+            if was_err && let Some(err) = err_for_return {
+                return Err(err);
             }
             return Ok(token);
         }
 
         // Future is pending — spawn it as a background task.
         let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+        let retry_counts = Arc::clone(&self.retry_counts_shared);
         let handle: JoinHandle<()> = tokio::spawn(async move {
             let _guard = tracing::dispatcher::set_default(&dispatch);
-            let result = task_future.await;
-            Self::process_child_result(
-                result,
-                &agent_id,
-                &parent_id_str,
-                &child_agent_type,
-                &parent_budget,
-                &journal,
-                &sink,
-                spawn_start,
-            );
+            let result = super::restart::run_task_with_retries(
+                factory,
+                retry_config,
+                task_future,
+                retry_counts,
+            )
+            .await;
+            let _ = Self::process_child_result(result, &result_context);
         });
-        self.children
-            .lock()
-            .unwrap()
-            .insert(agent_id_for_map, handle);
+        lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
 
         Ok(token)
     }
 
+    pub(super) fn child_result_context(
+        &self,
+        config: &SpawnConfig,
+        spawn_start: Instant,
+    ) -> ChildResultContext {
+        ChildResultContext {
+            agent_id: config.agent_id.clone(),
+            parent_id: config.parent_id.clone(),
+            agent_type: config
+                .agent_type
+                .clone()
+                .unwrap_or_else(|| "generic".to_string()),
+            parent_budget: Arc::clone(&self.parent_budget),
+            journal: self.journal_storage.clone(),
+            activity_sink: Arc::clone(&self.activity_sink),
+            spawn_start,
+        }
+    }
+
     /// Process a child task result: roll up budget, journal, emit tracing and
     /// S019 ActivityEvent::ChildFinished with aggregated stats (tool_uses, token_count, duration_ms).
-    #[allow(clippy::too_many_arguments)]
-    fn process_child_result(
+    pub(super) fn process_child_result(
         result: Result<AgentLoopOutput, RuntimeError>,
-        agent_id: &AgentId,
-        parent_id_str: &str,
-        child_agent_type: &str,
-        parent_budget: &Arc<Mutex<ResourceBudget>>,
-        journal: &Option<Arc<dyn simulacra_types::JournalStorage>>,
-        sink: &Arc<dyn ActivitySink>,
-        spawn_start: std::time::Instant,
-    ) {
+        context: &ChildResultContext,
+    ) -> SpawnResult {
         match result {
             Ok(output) => {
                 let token_total = output.token_usage.total();
                 let tool_uses = output.used_turns;
                 let token_count = token_total;
-                let duration_ms = spawn_start.elapsed().as_millis() as u64;
+                let duration_ms = context.spawn_start.elapsed().as_millis() as u64;
 
-                let mut budget = parent_budget.lock().unwrap();
+                let mut budget = lock_mutex(&context.parent_budget, "parent_budget");
                 budget.used_tokens +=
                     output.token_usage.input_tokens + output.token_usage.output_tokens;
                 budget.used_turns += output.used_turns;
                 budget.used_cost += output.used_cost;
+                drop(budget);
 
                 // S018: Journal SubAgentCompleted { success: true }
-                if let Some(j) = journal {
+                if let Some(j) = &context.journal {
                     let completed_entry = simulacra_types::JournalEntry {
                         schema_version: simulacra_types::JOURNAL_SCHEMA_VERSION,
-                        agent_id: AgentId(parent_id_str.to_string()),
+                        agent_id: context.parent_id.clone(),
                         timestamp_ms: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0),
                         entry: simulacra_types::JournalEntryKind::SubAgentCompleted {
-                            child_id: AgentId(agent_id.0.clone()),
+                            child_id: context.agent_id.clone(),
                             success: true,
                         },
                     };
-                    let _ = j.append(completed_entry);
+                    j.append(completed_entry).map_err(|source| {
+                        RuntimeError::JournalAppendFailed {
+                            entry_kind: "SubAgentCompleted",
+                            source,
+                        }
+                    })?;
                 }
 
                 let exit_reason_str = exit_reason_to_snake_case(&output.exit_reason);
 
                 // S019: Emit ActivityEvent::ChildFinished with aggregated stats
-                sink.emit(ActivityEvent::ChildFinished {
-                    child_id: agent_id.0.clone(),
-                    agent_type: child_agent_type.to_string(),
+                context.activity_sink.emit(ActivityEvent::ChildFinished {
+                    child_id: context.agent_id.0.clone(),
+                    agent_type: context.agent_type.clone(),
                     exit_reason: exit_reason_str.clone(),
                     duration_ms,
                     tool_uses,
@@ -362,37 +368,42 @@ impl AgentSupervisor {
                 });
 
                 tracing::info!(
-                    child_id = agent_id.0.as_str(),
-                    parent_id = parent_id_str,
+                    child_id = context.agent_id.0.as_str(),
+                    parent_id = context.parent_id.0.as_str(),
                     exit_reason = exit_reason_str.as_str(),
                     token_total = token_total,
                     "child agent completed"
                 );
+                Ok(output)
             }
             Err(err) => {
-                let duration_ms = spawn_start.elapsed().as_millis() as u64;
+                let duration_ms = context.spawn_start.elapsed().as_millis() as u64;
 
                 // S018: Journal SubAgentCompleted { success: false }
-                if let Some(j) = journal {
+                if let Some(j) = &context.journal {
                     let failed_entry = simulacra_types::JournalEntry {
                         schema_version: simulacra_types::JOURNAL_SCHEMA_VERSION,
-                        agent_id: AgentId(parent_id_str.to_string()),
+                        agent_id: context.parent_id.clone(),
                         timestamp_ms: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0),
                         entry: simulacra_types::JournalEntryKind::SubAgentCompleted {
-                            child_id: AgentId(agent_id.0.clone()),
+                            child_id: context.agent_id.clone(),
                             success: false,
                         },
                     };
-                    let _ = j.append(failed_entry);
+                    j.append(failed_entry)
+                        .map_err(|source| RuntimeError::JournalAppendFailed {
+                            entry_kind: "SubAgentCompleted",
+                            source,
+                        })?;
                 }
 
                 // S019: Emit ChildFinished on failure too
-                sink.emit(ActivityEvent::ChildFinished {
-                    child_id: agent_id.0.clone(),
-                    agent_type: child_agent_type.to_string(),
+                context.activity_sink.emit(ActivityEvent::ChildFinished {
+                    child_id: context.agent_id.0.clone(),
+                    agent_type: context.agent_type.clone(),
                     exit_reason: format!("Error: {err}"),
                     duration_ms,
                     tool_uses: 0,
@@ -400,12 +411,13 @@ impl AgentSupervisor {
                 });
 
                 tracing::warn!(
-                    child_id = agent_id.0.as_str(),
-                    parent_id = parent_id_str,
-                    agent_type = child_agent_type,
+                    child_id = context.agent_id.0.as_str(),
+                    parent_id = context.parent_id.0.as_str(),
+                    agent_type = context.agent_type.as_str(),
                     failure_reason = %err,
                     "child agent failed"
                 );
+                Err(err)
             }
         }
     }

@@ -17,51 +17,16 @@ impl AgentSupervisor {
         strategy: &RestartStrategy,
         failure_reason: &str,
     ) -> bool {
-        let strategy_name = match strategy {
-            RestartStrategy::RetryOnce => "retry_once",
-            RestartStrategy::RetryTwiceThenFail => "retry_twice_then_fail",
-            RestartStrategy::SnapshotAndFail => "snapshot_and_fail",
-            RestartStrategy::LetCrash => "let_crash",
-        };
-
-        let should_restart = match strategy {
-            RestartStrategy::RetryOnce => {
-                let mut counts = self.retry_counts.lock().unwrap();
-                let count = counts.entry(agent_id.clone()).or_insert(0);
-                if *count < 1 {
-                    *count += 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            RestartStrategy::RetryTwiceThenFail => {
-                let mut counts = self.retry_counts.lock().unwrap();
-                let count = counts.entry(agent_id.clone()).or_insert(0);
-                if *count < 2 {
-                    *count += 1;
-                    true
-                } else {
-                    false
-                }
+        match strategy {
+            RestartStrategy::RetryOnce | RestartStrategy::RetryTwiceThenFail => {
+                should_retry(agent_id, strategy, failure_reason, &self.retry_counts)
             }
             RestartStrategy::SnapshotAndFail => {
                 self.snapshot_before_fail(agent_id, failure_reason);
                 false
             }
             RestartStrategy::LetCrash => false,
-        };
-
-        if should_restart {
-            tracing::warn!(
-                "gen_ai.agent.name" = agent_id.0.as_str(),
-                strategy = strategy_name,
-                failure_reason = failure_reason,
-                "agent restart triggered"
-            );
         }
-
-        should_restart
     }
 
     /// Save a journal Checkpoint before propagating a SnapshotAndFail failure.
@@ -74,7 +39,7 @@ impl AgentSupervisor {
     fn snapshot_before_fail(&self, agent_id: &AgentId, failure_reason: &str) {
         let checkpoint_data = simulacra_types::CheckpointData {
             messages: vec![],
-            budget_snapshot: self.parent_budget.lock().unwrap().clone(),
+            budget_snapshot: lock_mutex(&self.parent_budget, "parent_budget").clone(),
             vfs_snapshot: None,
         };
 
@@ -123,60 +88,66 @@ impl AgentSupervisor {
     }
 }
 
-/// Spawn a retry task that handles its own failures recursively.
-///
-/// This is extracted as a free function so it can recurse from inside
-/// a tokio::spawn (where we can't add to the parent JoinSet).
-pub(super) fn spawn_retry_task(
+pub(super) async fn run_task_with_retries(
     factory: Arc<dyn TaskFactory>,
     config: SpawnConfig,
-    parent_budget: Arc<Mutex<ResourceBudget>>,
+    first_future: BoxTaskFuture,
     retry_counts: Arc<Mutex<HashMap<AgentId, usize>>>,
-) {
+) -> SpawnResult {
     let agent_id = config.agent_id.clone();
     let restart_strategy = config.restart_strategy.clone();
-    let new_token = CancellationToken::new(Duration::from_secs(5));
-    let retry_config = config.clone();
-    let new_future = factory.create_task(config, new_token);
+    let mut result = first_future.await;
 
-    tokio::spawn(async move {
-        match new_future.await {
-            Ok(output) => {
-                let mut budget = parent_budget.lock().unwrap();
-                budget.used_tokens +=
-                    output.token_usage.input_tokens + output.token_usage.output_tokens;
-                budget.used_turns += output.used_turns;
-                budget.used_cost += output.used_cost;
-            }
-            Err(_err) => {
-                // Check if we should retry again
-                let should_retry = match restart_strategy {
-                    RestartStrategy::RetryOnce => {
-                        let mut counts = retry_counts.lock().unwrap();
-                        let count = counts.entry(agent_id.clone()).or_insert(0);
-                        if *count < 1 {
-                            *count += 1;
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    RestartStrategy::RetryTwiceThenFail => {
-                        let mut counts = retry_counts.lock().unwrap();
-                        let count = counts.entry(agent_id.clone()).or_insert(0);
-                        if *count < 2 {
-                            *count += 1;
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    _ => false,
-                };
-                if should_retry {
-                    spawn_retry_task(factory, retry_config, parent_budget, retry_counts);
-                }
-            }
+    while let Err(err) = &result {
+        if !should_retry(
+            &agent_id,
+            &restart_strategy,
+            &err.to_string(),
+            &retry_counts,
+        ) {
+            break;
         }
-    });
+        let token = CancellationToken::new(Duration::from_secs(5));
+        result = factory.create_task(config.clone(), token).await;
+    }
+
+    result
+}
+
+fn should_retry(
+    agent_id: &AgentId,
+    strategy: &RestartStrategy,
+    failure_reason: &str,
+    retry_counts: &Mutex<HashMap<AgentId, usize>>,
+) -> bool {
+    let limit = match strategy {
+        RestartStrategy::RetryOnce => 1,
+        RestartStrategy::RetryTwiceThenFail => 2,
+        RestartStrategy::SnapshotAndFail | RestartStrategy::LetCrash => return false,
+    };
+
+    let mut counts = lock_mutex(retry_counts, "retry_counts");
+    let count = counts.entry(agent_id.clone()).or_insert(0);
+    if *count < limit {
+        *count += 1;
+        tracing::warn!(
+            "gen_ai.agent.name" = agent_id.0.as_str(),
+            strategy = strategy_name(strategy),
+            failure_reason = failure_reason,
+            retry_count = *count,
+            "agent restart triggered"
+        );
+        true
+    } else {
+        false
+    }
+}
+
+fn strategy_name(strategy: &RestartStrategy) -> &'static str {
+    match strategy {
+        RestartStrategy::RetryOnce => "retry_once",
+        RestartStrategy::RetryTwiceThenFail => "retry_twice_then_fail",
+        RestartStrategy::SnapshotAndFail => "snapshot_and_fail",
+        RestartStrategy::LetCrash => "let_crash",
+    }
 }
