@@ -45,14 +45,10 @@ impl AgentLoop {
         self.journal_entry(JournalEntryKind::TurnStart)?;
         self.consume_replay_entry(&JournalEntryKind::TurnStart)?;
 
-        // 3. Compact context (0 = unlimited → use u64::MAX as sentinel)
-        let remaining_tokens = if self.budget.max_tokens == 0 {
-            u64::MAX
-        } else {
-            self.budget
-                .max_tokens
-                .saturating_sub(self.budget.used_tokens)
-        };
+        // 3. Compact context. The compaction window is bounded by model
+        // context, not only the cumulative cost budget.
+        let remaining_tokens =
+            compaction_token_limit(self.budget.max_tokens, self.budget.used_tokens);
         let compacted = self.context_strategy.compact(messages, remaining_tokens);
 
         // 4. Journal LlmRequest — must succeed before invoking the provider.

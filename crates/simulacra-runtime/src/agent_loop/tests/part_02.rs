@@ -68,6 +68,17 @@ async fn context_strategy_compacts_messages() {
     assert_eq!(output.messages.len(), 5);
 }
 
+#[test]
+fn compaction_window_is_bounded_by_context_not_just_budget() {
+    let capped = compaction_token_limit(10_000_000, 0);
+    assert_eq!(capped, CONTEXT_TOKEN_LIMIT);
+
+    assert_eq!(compaction_token_limit(64_000, 59_000), 5_000);
+
+    let unlimited = compaction_token_limit(0, 0);
+    assert_eq!(unlimited, CONTEXT_TOKEN_LIMIT);
+}
+
 // -----------------------------------------------------------------------
 // Test 7: Token usage accumulates across turns
 // -----------------------------------------------------------------------
@@ -313,4 +324,3 @@ async fn replay_with_recorded_llm_response_skips_provider() {
     assert_eq!(output.token_usage.input_tokens, 10);
     assert_eq!(output.token_usage.output_tokens, 5);
 }
-

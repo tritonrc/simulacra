@@ -45,6 +45,21 @@ use replay_helpers::{
 };
 use tool_execution::execute_tool_live;
 
+/// The model context window the compactor targets, independent of the
+/// cumulative cost budget (`ResourceBudget`).
+const CONTEXT_TOKEN_LIMIT: u64 = 128_000;
+
+/// Size the compaction window: the lesser of the remaining cost budget and the
+/// model context ceiling. `max_tokens == 0` means an unlimited cost budget.
+fn compaction_token_limit(max_tokens: u64, used_tokens: u64) -> u64 {
+    let remaining = if max_tokens == 0 {
+        u64::MAX
+    } else {
+        max_tokens.saturating_sub(used_tokens)
+    };
+    remaining.min(CONTEXT_TOKEN_LIMIT)
+}
+
 /// The core ReAct agent loop.
 ///
 /// Runs: receive task -> [LLM -> tool calls -> journal -> repeat] -> exit.
