@@ -193,7 +193,14 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
 
     while header_end.is_none() {
         let mut chunk = [0_u8; 1024];
-        let read = stream.read(&mut chunk)?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if read == 0 {
             break;
         }
@@ -238,7 +245,14 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<CapturedRequest>
     let mut body = buffer[body_start..].to_vec();
     while body.len() < content_length {
         let mut chunk = vec![0_u8; content_length - body.len()];
-        let read = stream.read(&mut chunk)?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if read == 0 {
             break;
         }

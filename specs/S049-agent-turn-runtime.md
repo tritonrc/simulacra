@@ -43,9 +43,9 @@ deterministic.
 8. Cancellation during tool dispatch returns an error tool result with
    `"cancelled by user"` content. The tool result is journaled before the tool
    message is appended.
-9. `Provider::chat` remains unchanged. Streaming provider events, tool-call
-   input deltas, `WaitingApproval` resume, and `input.response` consumption are
-   deferred to later specs.
+9. `Provider::chat` remains unchanged. Streaming provider events are handled by
+   S050. Tool-call input deltas, `WaitingApproval` resume, and `input.response`
+   consumption are deferred to later specs.
 
 ## Assertions
 
@@ -79,7 +79,8 @@ deterministic.
 
 ## Out of Scope
 
-- Provider streaming trait redesign.
+- Provider streaming trait redesign beyond the S050 companion streaming
+  contract.
 - Incremental token, reasoning, or tool-argument deltas from providers.
 - Server-side `input.response` / `approval.respond` resume behavior.
 - Hosted tools, host process execution, approval escalation, or Codex

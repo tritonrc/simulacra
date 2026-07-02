@@ -10,6 +10,7 @@
 - **S012** — Built-in tools (tool registry, tool execution)
 - **S015** — Interactive mode (REPL rendering, status line)
 - **S018** — Interactive sub-agents (spawn_agent tool, synchronous delegation)
+- **S050** — Agent streaming runtime (provider stream events to activity events)
 
 ## Context
 
@@ -275,7 +276,7 @@ pub trait ActivitySink: Send + Sync + 'static {
 ### AgentLoop integration
 
 - [x] `AgentLoop::new()` accepts an optional `Arc<dyn ActivitySink>`. **`activity_sink: Option<Arc<dyn ActivitySink>>` parameter; defaults to `NoopActivitySink` when `None`.**
-- [x] Provider streaming tokens emit `Token` events via the sink. **`self.sink.emit(ActivityEvent::Token { text: response.message.content.clone() })` after provider response in `run_single_turn()`.**
+- [x] Provider streaming tokens emit `Token` events via the sink. **S050 test `streaming_provider_tokens_emit_in_order_and_final_response_is_journaled_once` verifies provider-delta emission.**
 - [x] Extended thinking emits `ThinkStart`, `ThinkDelta` (streaming), and `ThinkEnd` with duration and token count.
 - [x] Tool call start emits `ToolStart` with name, call ID, and arguments. **`self.sink.emit(ActivityEvent::ToolStart { tool_call_id, name, arguments })` before tool execution in `run_single_turn()`.**
 - [x] Tool call completion emits `ToolFinish` with name, call ID, error status, duration, and optional exit code. **`self.sink.emit(ActivityEvent::ToolFinish { tool_call_id, name, is_error, duration_ms, exit_code: None })` after tool execution.**
