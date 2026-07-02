@@ -100,7 +100,7 @@ The card drawer is local UI state (a `selectedAgentId` ref), not a route. The "R
 
 Each composable is a module-scoped Vue 3 setup function returning `{ data, loading, error, refresh, ...mutators }`. Composables own all I/O; components import composables, never `api/*` directly. Mutations refresh the relevant composable's cache on success. No global store; module-scoped reactive state suffices for v1.
 
-`useTaskStream(taskId)` is the only long-lived stateful composable. It opens an `EventSource`, parses each SSE message into a typed event variant (Token / ThinkStart / ThinkDelta / ToolStart / ToolEnd / ChildActivity / TaskComplete / Error), pushes onto a reactive `events[]`, and tears down on `onUnmounted`. One reconnect attempt on transport drop, then surfaces "stream interrupted."
+`useTaskStream(taskId)` is the only long-lived stateful composable. It opens an `EventSource`, parses each SSE message into a typed event variant (Token / ThinkStart / ThinkDelta / ToolCallDelta / ToolStart / ToolEnd / ChildActivity / TaskComplete / Error), pushes onto a reactive `events[]`, and tears down on `onUnmounted`. One reconnect attempt on transport drop, then surfaces "stream interrupted."
 
 ## Error handling
 

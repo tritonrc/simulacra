@@ -209,6 +209,19 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "tool_name": name,
             "arguments": arguments,
         }),
+        ActivityEvent::ToolCallDelta {
+            index,
+            tool_call_id,
+            name,
+            arguments_delta,
+        } => json!({
+            "event": "tool.call_delta",
+            "task_id": task_id,
+            "index": index,
+            "tool_call_id": tool_call_id,
+            "tool_name": name,
+            "arguments_delta": arguments_delta,
+        }),
         ActivityEvent::ToolOutput { tool_call_id, line } => json!({
             "event": "tool.output",
             "task_id": task_id,

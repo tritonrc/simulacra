@@ -464,6 +464,19 @@ impl simulacra_types::ProviderStreamSink for ProviderActivityStreamSink {
             simulacra_types::ProviderStreamEvent::TextDelta { text } => {
                 self.sink.emit(ActivityEvent::Token { text });
             }
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index,
+                tool_call_id,
+                name,
+                arguments_delta,
+            } => {
+                self.sink.emit(ActivityEvent::ToolCallDelta {
+                    index,
+                    tool_call_id,
+                    name,
+                    arguments_delta,
+                });
+            }
             simulacra_types::ProviderStreamEvent::ThinkingStart => {
                 if let Ok(mut thinking) = self.thinking.lock() {
                     *thinking = Some(ThinkingState {

@@ -355,6 +355,16 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 self.pending_tool_blocks
                     .insert(index, (id, name, String::new()));
                 self.tool_block_indices.insert(index);
+                if let Some((id, name, _)) = self.pending_tool_blocks.get(&index)
+                    && let Some(provider_sink) = self.provider_sink
+                {
+                    provider_sink.emit(ProviderStreamEvent::ToolCallDelta {
+                        index,
+                        tool_call_id: (!id.is_empty()).then(|| id.clone()),
+                        name: (!name.is_empty()).then(|| name.clone()),
+                        arguments_delta: String::new(),
+                    });
+                }
             }
             "thinking" => {
                 self.thinking_indices.insert(index);
@@ -382,6 +392,14 @@ impl<'a> AnthropicSseAccumulator<'a> {
                     && let Some(entry) = self.pending_tool_blocks.get_mut(&index)
                 {
                     entry.2.push_str(partial);
+                    if let Some(provider_sink) = self.provider_sink {
+                        provider_sink.emit(ProviderStreamEvent::ToolCallDelta {
+                            index,
+                            tool_call_id: (!entry.0.is_empty()).then(|| entry.0.clone()),
+                            name: (!entry.1.is_empty()).then(|| entry.1.clone()),
+                            arguments_delta: partial.to_owned(),
+                        });
+                    }
                 }
             }
             "thinking_delta" if self.thinking_indices.contains(&index) => {
@@ -987,12 +1005,24 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingProviderStreamSink {
-        texts: Mutex<Vec<String>>,
+        events: Mutex<Vec<simulacra_types::ProviderStreamEvent>>,
     }
 
     impl RecordingProviderStreamSink {
         fn texts(&self) -> Vec<String> {
-            self.texts
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter_map(|event| match event {
+                    simulacra_types::ProviderStreamEvent::TextDelta { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn events(&self) -> Vec<simulacra_types::ProviderStreamEvent> {
+            self.events
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
@@ -1001,12 +1031,10 @@ mod tests {
 
     impl simulacra_types::ProviderStreamSink for RecordingProviderStreamSink {
         fn emit(&self, event: simulacra_types::ProviderStreamEvent) {
-            if let simulacra_types::ProviderStreamEvent::TextDelta { text } = event {
-                self.texts
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(text);
-            }
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event);
         }
     }
 
@@ -1601,6 +1629,100 @@ mod tests {
         assert_eq!(resp.token_usage.output_tokens, 7);
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.provider_response_id, Some("msg_stream789".to_string()));
+    }
+
+    fn streaming_tool_use_body() -> Vec<u8> {
+        concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tool_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_abc\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\":\\\"SF\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":8}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn streaming_provider_emits_anthropic_tool_call_deltas_and_assembles_final_response() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake =
+            FakeHttpClient::with_response_and_headers(200, &streaming_tool_use_body(), headers);
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "weather".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let response = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("Anthropic streaming should assemble a tool call response");
+
+        let tool_deltas: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    simulacra_types::ProviderStreamEvent::ToolCallDelta { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            tool_deltas,
+            vec![
+                simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                    index: 0,
+                    tool_call_id: Some("toolu_abc".into()),
+                    name: Some("get_weather".into()),
+                    arguments_delta: String::new(),
+                },
+                simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                    index: 0,
+                    tool_call_id: Some("toolu_abc".into()),
+                    name: Some("get_weather".into()),
+                    arguments_delta: "{\"location".into(),
+                },
+                simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                    index: 0,
+                    tool_call_id: Some("toolu_abc".into()),
+                    name: Some("get_weather".into()),
+                    arguments_delta: "\":\"SF\"}".into(),
+                },
+            ]
+        );
+        assert_eq!(response.message.tool_calls.len(), 1);
+        assert_eq!(response.message.tool_calls[0].id, "toolu_abc");
+        assert_eq!(response.message.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            response.message.tool_calls[0].arguments,
+            serde_json::json!({"location": "SF"})
+        );
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
     }
 
     /// S007: Multiple provider backends can be selected by configuration.
