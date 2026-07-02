@@ -10,13 +10,16 @@ mod meters;
 mod replay_helpers;
 mod run;
 mod tool_execution;
+mod tool_runtime;
 mod turn;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub use types::{AgentLoopConfig, AgentLoopOutput, TurnResult};
+pub use types::{
+    ActiveTurn, AgentLoopConfig, AgentLoopOutput, StepContext, TurnContext, TurnResult, TurnState,
+};
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
@@ -44,6 +47,7 @@ use replay_helpers::{
     replay_tool_result,
 };
 use tool_execution::execute_tool_live;
+use tool_runtime::{ToolCallRuntime, ToolExecutionResult};
 
 /// The model context window the compactor targets, independent of the
 /// cumulative cost budget (`ResourceBudget`).
@@ -68,7 +72,7 @@ fn compaction_token_limit(max_tokens: u64, used_tokens: u64) -> u64 {
 pub struct AgentLoop {
     config: AgentLoopConfig,
     provider: Box<dyn Provider>,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     context_strategy: Box<dyn ContextStrategy>,
     journal: Arc<dyn JournalStorage>,
     budget: ResourceBudget,
@@ -88,4 +92,7 @@ pub struct AgentLoop {
     /// during replay-from-checkpoint. When `None`, VFS state is not restored
     /// (tests and some in-process callers may legitimately skip this).
     vfs: Option<Arc<dyn VirtualFs>>,
+    /// Runtime-owned cancellation token shared with supervisors or interactive
+    /// sessions.
+    cancellation: Option<crate::CancellationToken>,
 }

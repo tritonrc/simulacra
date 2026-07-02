@@ -27,7 +27,10 @@ mod vfs_hook;
 pub use activity_sink::{
     ActivitySink, ChannelActivitySink, ForwardingActivitySink, NoopActivitySink,
 };
-pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopOutput, TurnResult};
+pub use agent_loop::{
+    ActiveTurn, AgentLoop, AgentLoopConfig, AgentLoopOutput, StepContext, TurnContext, TurnResult,
+    TurnState,
+};
 pub use error::RuntimeError;
 pub use guardrail::{GuardrailDecision, InputGuardrail, OutputGuardrail};
 pub use journal::{CountingJournalStorage, InMemoryJournalStorage};

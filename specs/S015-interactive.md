@@ -12,6 +12,7 @@
 - **S011** — Sandbox composition (tool calls flow through AgentCell proxy)
 - **S012** — Built-in tools (tool registry, tool definitions shown to the user)
 - **S013** — CLI (argument parsing, bootstrap, config loading — S015 extends S013)
+- **S049** — Agent Turn Runtime Foundation (runtime-owned turn state and cancellation checks)
 
 ## Context
 
@@ -20,6 +21,10 @@ S013 defined headless mode as Phase 1. Interactive mode is Phase 2: a terminal R
 Interactive mode is built on the same runtime primitives as headless mode — same agent loop, same provider, same tool registry, same journal. The difference is the I/O layer: instead of a single task string piped to stdout, interactive mode reads from stdin, renders streaming output to the terminal via ratatui, and gates tool calls on user approval.
 
 This spec does NOT cover a full TUI layout (panels, split views, etc.). It covers the core interactive loop: prompt input, streaming output, tool approval, cancellation, budget display, and session persistence. The ratatui rendering details are implementation concerns, not behavioral spec.
+
+S049 provides the shared runtime turn structure and cooperative cancellation
+checks used by interactive mode. S015 continues to own terminal rendering,
+streaming display semantics, approval prompts, and session persistence.
 
 ## Design
 

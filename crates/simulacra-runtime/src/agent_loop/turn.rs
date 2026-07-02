@@ -23,6 +23,11 @@ impl AgentLoop {
         messages: &mut Vec<Message>,
         emit_turn_complete: bool,
     ) -> Result<TurnExecution, RuntimeError> {
+        if self.is_cancelled() {
+            return Ok(Self::cancelled_execution());
+        }
+        let active_turn = self.active_turn();
+
         // 1. Check budget BEFORE the operation
         if let Err(exhausted) = self.budget.check_budget() {
             RuntimeMeters::get().budget_exhaustions.add(
@@ -50,11 +55,12 @@ impl AgentLoop {
         let remaining_tokens =
             compaction_token_limit(self.budget.max_tokens, self.budget.used_tokens);
         let compacted = self.context_strategy.compact(messages, remaining_tokens);
+        let step = StepContext::new(compacted, tool_defs);
 
         // 4. Journal LlmRequest — must succeed before invoking the provider.
         let llm_request = JournalEntryKind::LlmRequest {
             model: self.config.model.clone(),
-            message_count: compacted.len(),
+            message_count: step.messages().len(),
         };
         self.journal_entry(llm_request.clone())?;
         self.consume_replay_entry(&llm_request)?;
@@ -64,7 +70,7 @@ impl AgentLoop {
         if let Some(ref pipeline) = self.pipeline {
             let before_ctx = serde_json::json!({
                 "model": &self.config.model,
-                "message_count": compacted.len(),
+                "message_count": step.messages().len(),
             })
             .to_string();
             match pipeline.run_before(simulacra_hooks::verdict::Operation::Llm, &before_ctx) {
@@ -98,8 +104,12 @@ impl AgentLoop {
             let kind = self.take_replay_entry()?;
             replay_llm_response(&kind)?
         } else {
+            if self.is_cancelled() {
+                active_turn.mark_cancelled();
+                return Ok(Self::cancelled_execution());
+            }
             self.provider
-                .chat(&compacted, &tool_defs, &mut self.budget)
+                .chat(step.messages(), step.tool_definitions(), &mut self.budget)
                 .await
                 .map_err(RuntimeError::from)?
         };
@@ -206,84 +216,10 @@ impl AgentLoop {
         }
 
         // 10. Dispatch tool calls
-        let mut tool_results = Vec::new();
-        for tc in &response.message.tool_calls {
-            tracing::info!(
-                "gen_ai.tool.message" = format!("tool_call: {}", tc.name),
-                tool_name = tc.name.as_str(),
-                tool_call_id = tc.id.as_str(),
-            );
-
-            // S019: Emit ToolStart before execution
-            self.sink.emit(ActivityEvent::ToolStart {
-                tool_call_id: tc.id.clone(),
-                name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            });
-
-            self.journal_entry(JournalEntryKind::ToolCall {
-                tool_call_id: Some(tc.id.clone()),
-                tool_name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            })?;
-            self.consume_replay_entry(&JournalEntryKind::ToolCall {
-                tool_call_id: Some(tc.id.clone()),
-                tool_name: tc.name.clone(),
-                arguments: tc.arguments.clone(),
-            })?;
-
-            let tool_start = Instant::now();
-            let replayed_result = self.take_replay_tool_result(&tc.id, &tc.name)?;
-            let (content, is_error) = match replayed_result {
-                Some(result) => result,
-                None => {
-                    execute_tool_live(
-                        &self.tools,
-                        tc,
-                        &self.config.capability,
-                        &self.config.agent_id.0,
-                    )
-                    .await
-                }
-            };
-            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
-
-            // S019: Emit ToolOutput for each line of tool result content.
-            // The agent loop owns the sink — tools return output through existing
-            // channels, and the loop emits ToolOutput events per line.
-            for line in content.lines() {
-                self.sink.emit(ActivityEvent::ToolOutput {
-                    tool_call_id: tc.id.clone(),
-                    line: line.to_string(),
-                });
-            }
-
-            // S019: Emit ToolFinish after execution
-            self.sink.emit(ActivityEvent::ToolFinish {
-                tool_call_id: tc.id.clone(),
-                name: tc.name.clone(),
-                is_error,
-                duration_ms: tool_duration_ms,
-                exit_code: None,
-            });
-
-            self.journal_entry(JournalEntryKind::ToolResult {
-                tool_call_id: Some(tc.id.clone()),
-                tool_name: tc.name.clone(),
-                content: content.clone(),
-                is_error,
-            })?;
-
-            let error_prefix = if is_error { "ERROR: " } else { "" };
-            let tool_msg = Message {
-                role: Role::Tool,
-                content: format!("{error_prefix}{content}"),
-                tool_calls: vec![],
-                tool_call_id: Some(tc.id.clone()),
-            };
-            messages.push(tool_msg.clone());
-            tool_results.push(tool_msg);
-        }
+        let tool_results = self
+            .dispatch_tool_calls(&response.message.tool_calls, &active_turn)
+            .await?;
+        messages.extend(tool_results.iter().cloned());
 
         // S019: Emit TurnComplete on every return path
         if emit_turn_complete {
@@ -297,6 +233,152 @@ impl AgentLoop {
             },
             token_usage: response.token_usage,
             budget_exhausted: None,
+        })
+    }
+
+    fn active_turn(&self) -> ActiveTurn {
+        ActiveTurn::new(TurnContext::new(
+            self.config.agent_id.clone(),
+            self.config.model.clone(),
+            self.config.capability.clone(),
+            self.cancellation.clone(),
+        ))
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(crate::CancellationToken::is_cancelled)
+    }
+
+    fn cancelled_execution() -> TurnExecution {
+        TurnExecution {
+            result: TurnResult::Cancelled,
+            token_usage: TokenUsage::default(),
+            budget_exhausted: None,
+        }
+    }
+
+    fn tool_call_runtime(&self) -> ToolCallRuntime {
+        ToolCallRuntime::new(
+            Arc::clone(&self.tools),
+            self.config.capability.clone(),
+            self.config.agent_id.0.clone(),
+            self.cancellation.clone(),
+        )
+    }
+
+    async fn dispatch_tool_calls(
+        &mut self,
+        tool_calls: &[simulacra_types::ToolCallMessage],
+        active_turn: &ActiveTurn,
+    ) -> Result<Vec<Message>, RuntimeError> {
+        let runtime = self.tool_call_runtime();
+        if !self.has_replay_entry() && runtime.supports_parallel_batch(tool_calls) {
+            let mut starts = Vec::with_capacity(tool_calls.len());
+            for tc in tool_calls {
+                active_turn.record_tool_call();
+                self.start_tool_call(tc)?;
+                starts.push(Instant::now());
+            }
+            let results = runtime.execute_parallel_batch(tool_calls).await;
+            let mut messages = Vec::with_capacity(results.len());
+            for ((tc, result), started) in tool_calls.iter().zip(results).zip(starts) {
+                messages.push(self.finish_tool_call(tc, result, started, active_turn)?);
+            }
+            return Ok(messages);
+        }
+
+        let mut messages = Vec::with_capacity(tool_calls.len());
+        for tc in tool_calls {
+            active_turn.record_tool_call();
+            self.start_tool_call(tc)?;
+            let started = Instant::now();
+            let replayed_result = self.take_replay_tool_result(&tc.id, &tc.name)?;
+            let result = match replayed_result {
+                Some((content, is_error)) => ToolExecutionResult {
+                    content,
+                    is_error,
+                    cancelled: false,
+                },
+                None => runtime.execute_one(tc).await,
+            };
+            messages.push(self.finish_tool_call(tc, result, started, active_turn)?);
+        }
+        Ok(messages)
+    }
+
+    fn start_tool_call(
+        &mut self,
+        tc: &simulacra_types::ToolCallMessage,
+    ) -> Result<(), RuntimeError> {
+        tracing::info!(
+            "gen_ai.tool.message" = format!("tool_call: {}", tc.name),
+            tool_name = tc.name.as_str(),
+            tool_call_id = tc.id.as_str(),
+        );
+
+        // S019: Emit ToolStart before execution
+        self.sink.emit(ActivityEvent::ToolStart {
+            tool_call_id: tc.id.clone(),
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+        });
+
+        let tool_call = JournalEntryKind::ToolCall {
+            tool_call_id: Some(tc.id.clone()),
+            tool_name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+        };
+        self.journal_entry(tool_call.clone())?;
+        self.consume_replay_entry(&tool_call)
+    }
+
+    fn finish_tool_call(
+        &mut self,
+        tc: &simulacra_types::ToolCallMessage,
+        result: ToolExecutionResult,
+        started: Instant,
+        active_turn: &ActiveTurn,
+    ) -> Result<Message, RuntimeError> {
+        if result.cancelled {
+            active_turn.mark_cancelled();
+        }
+
+        let tool_duration_ms = started.elapsed().as_millis() as u64;
+
+        // S019: Emit ToolOutput for each line of tool result content.
+        // The agent loop owns the sink — tools return output through existing
+        // channels, and the loop emits ToolOutput events per line.
+        for line in result.content.lines() {
+            self.sink.emit(ActivityEvent::ToolOutput {
+                tool_call_id: tc.id.clone(),
+                line: line.to_string(),
+            });
+        }
+
+        // S019: Emit ToolFinish after execution
+        self.sink.emit(ActivityEvent::ToolFinish {
+            tool_call_id: tc.id.clone(),
+            name: tc.name.clone(),
+            is_error: result.is_error,
+            duration_ms: tool_duration_ms,
+            exit_code: None,
+        });
+
+        self.journal_entry(JournalEntryKind::ToolResult {
+            tool_call_id: Some(tc.id.clone()),
+            tool_name: tc.name.clone(),
+            content: result.content.clone(),
+            is_error: result.is_error,
+        })?;
+
+        let error_prefix = if result.is_error { "ERROR: " } else { "" };
+        Ok(Message {
+            role: Role::Tool,
+            content: format!("{error_prefix}{}", result.content),
+            tool_calls: vec![],
+            tool_call_id: Some(tc.id.clone()),
         })
     }
 }
