@@ -61,6 +61,28 @@ async fn tool_start_events_translate_to_tool_called_with_arguments_and_seq() {
 }
 
 #[tokio::test]
+async fn tool_call_delta_events_translate_to_tool_call_delta_with_optional_metadata_and_seq() {
+    let (tx, mut rx) = make_channel(16);
+    let sink = EngineActivitySink::new("task-delta".to_string(), tx);
+
+    sink.emit(ActivityEvent::ToolCallDelta {
+        index: 2,
+        tool_call_id: Some("tool-delta-1".to_string()),
+        name: Some("file_read".to_string()),
+        arguments_delta: "{\"path\"".to_string(),
+    });
+
+    let event = recv_event(&mut rx).await;
+    assert_eq!(event["event"], "tool.call_delta");
+    assert_eq!(event["task_id"], "task-delta");
+    assert_eq!(event["index"], 2);
+    assert_eq!(event["tool_call_id"], "tool-delta-1");
+    assert_eq!(event["tool_name"], "file_read");
+    assert_eq!(event["arguments_delta"], "{\"path\"");
+    assert!(event["seq"].is_number());
+}
+
+#[tokio::test]
 async fn tool_output_events_translate_to_tool_output_with_seq() {
     let (tx, mut rx) = make_channel(16);
     let sink = EngineActivitySink::new("task-3".to_string(), tx);

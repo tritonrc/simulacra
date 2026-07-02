@@ -29,6 +29,7 @@ export default defineComponent({
     const summary = computed(() => {
       const a = props.node.arguments;
       if (!a) return '';
+      if (typeof a === 'string') return a.slice(0, 80);
       if (typeof a.command === 'string') return a.command.slice(0, 80);
       if (typeof a.path === 'string') return a.path;
       if (typeof a.code === 'string') return '(' + a.code.length + ' chars)';

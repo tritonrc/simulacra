@@ -128,6 +128,16 @@ pub enum ActivityEvent {
         arguments: serde_json::Value,
     },
 
+    /// A provider streamed part of a tool-call argument payload.
+    ///
+    /// This is observational only. It does not mean the tool has started.
+    ToolCallDelta {
+        index: u64,
+        tool_call_id: Option<String>,
+        name: Option<String>,
+        arguments_delta: String,
+    },
+
     /// A line of output from a running tool (e.g. shell stdout/stderr).
     ToolOutput {
         tool_call_id: String,
@@ -199,10 +209,11 @@ pub trait ActivitySink: Send + Sync + 'static {
 12. When the provider's streaming response includes an extended thinking block (as defined by the provider's content block types), the agent loop MUST emit `ThinkStart` at the start of the thinking content block.
 13. Thinking content chunks from the provider stream MUST be emitted as `ThinkDelta { text }` as they arrive.
 14. When the thinking content block ends in the provider stream, the agent loop MUST emit `ThinkEnd`. The `think_duration_ms` is measured by the agent loop from `ThinkStart` to `ThinkEnd`. The `think_tokens` is the approximate character-to-token count of accumulated `ThinkDelta` text (divide character count by 4).
-15. Before executing a tool call, the agent loop MUST emit `ToolStart` with the tool's name, call ID, and arguments.
-16. After a tool call completes, the agent loop MUST emit `ToolFinish` with the tool name, call ID, error status, duration, and optional exit code.
-17. The agent loop MUST emit `ToolOutput` for each line of streaming output from a tool (e.g. shell stdout/stderr). The agent loop — not the tool implementation — owns the sink. Tools return output through existing channels (e.g. streaming stdout); the agent loop captures it and emits `ToolOutput` events.
-18. The agent loop MUST emit `TurnComplete` when `run_single_turn()` returns.
+15. When the provider streams tool-call argument chunks, each chunk MUST be emitted as `ToolCallDelta { index, tool_call_id, name, arguments_delta }`. The event is display-only and MUST NOT be journaled.
+16. Before executing a tool call, the agent loop MUST emit `ToolStart` with the tool's name, call ID, and full parsed arguments.
+17. After a tool call completes, the agent loop MUST emit `ToolFinish` with the tool name, call ID, error status, duration, and optional exit code.
+18. The agent loop MUST emit `ToolOutput` for each line of streaming output from a tool (e.g. shell stdout/stderr). The agent loop — not the tool implementation — owns the sink. Tools return output through existing channels (e.g. streaming stdout); the agent loop captures it and emits `ToolOutput` events.
+19. The agent loop MUST emit `TurnComplete` when `run_single_turn()` returns.
 
 ### Boundary with S015 (approval, retry, cancellation)
 
@@ -259,7 +270,7 @@ pub trait ActivitySink: Send + Sync + 'static {
 
 ### ActivityEvent type
 
-- [x] `ActivityEvent` defines all variants: `Token`, `ThinkStart`, `ThinkDelta`, `ThinkEnd`, `ToolStart`, `ToolOutput`, `ToolFinish`, `ChildSpawned`, `ChildActivity`, `ChildFinished`, `TurnComplete`. **All 11 variants defined in `simulacra-types/src/activity.rs`.**
+- [x] `ActivityEvent` defines all variants: `Token`, `ThinkStart`, `ThinkDelta`, `ThinkEnd`, `ToolStart`, `ToolCallDelta`, `ToolOutput`, `ToolFinish`, `ChildSpawned`, `ChildActivity`, `ChildFinished`, `TurnComplete`. **All variants defined in `simulacra-types/src/activity.rs`.**
 - [x] `ActivityEvent` implements `Clone + Send + 'static`. **`#[derive(Debug, Clone, Serialize, Deserialize)]` on the enum; all fields are owned types (`String`, `Box`, `serde_json::Value`).**
 - [x] `ActivityEvent` implements `Serialize + Deserialize`. **`#[derive(Serialize, Deserialize)]` with `#[serde(tag = "type")]` for tagged JSON.**
 - [x] All string fields are owned `String`, not borrowed. **Every string field in every variant is `String`, not `&str`.**
@@ -279,6 +290,7 @@ pub trait ActivitySink: Send + Sync + 'static {
 - [x] Provider streaming tokens emit `Token` events via the sink. **S050 test `streaming_provider_tokens_emit_in_order_and_final_response_is_journaled_once` verifies provider-delta emission.**
 - [x] Extended thinking emits `ThinkStart`, `ThinkDelta` (streaming), and `ThinkEnd` with duration and token count.
 - [x] Tool call start emits `ToolStart` with name, call ID, and arguments. **`self.sink.emit(ActivityEvent::ToolStart { tool_call_id, name, arguments })` before tool execution in `run_single_turn()`.**
+- [x] Tool-call input streaming emits `ToolCallDelta` before `ToolStart`. **S050 test `provider_tool_call_deltas_map_to_activity_events_without_partial_journal_entries` verifies provider delta emission before any tool execution event.**
 - [x] Tool call completion emits `ToolFinish` with name, call ID, error status, duration, and optional exit code. **`self.sink.emit(ActivityEvent::ToolFinish { tool_call_id, name, is_error, duration_ms, exit_code: None })` after tool execution.**
 - [x] `run_single_turn()` emits `TurnComplete` on return. **`self.sink.emit(ActivityEvent::TurnComplete)` on both the Complete and ToolCallsProcessed return paths.**
 

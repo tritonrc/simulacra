@@ -7,60 +7,20 @@ import EventThinking from '/components/activity/event-thinking.js';
 import EventToolCall from '/components/activity/event-tool-call.js';
 import EventChild from '/components/activity/event-child.js';
 import ArtifactSidebar from '/components/activity/artifact-sidebar.js';
+import { buildRenderable } from '/components/activity/build-renderable.js';
 
 // Real SSE event shapes (S031 §events):
 //   { event: "agent.message", content, role }
 //   { event: "agent.thinking", content }
+//   { event: "tool.call_delta", index, tool_call_id?, tool_name?, arguments_delta }
 //   { event: "tool.called", tool_call_id, tool_name, arguments }
 //   { event: "tool.output", tool_call_id, line }
 //   { event: "tool.result", tool_call_id, tool_name, duration_ms, is_error }
 //   { event: "agent.child_spawned" / "child_finished", task_id, agent_type }
 //   { event: "task.state_changed", from, to }
 //
-// The render layer collapses tool.{called,output,result} into a single
-// virtual "tool" node keyed by tool_call_id so the user sees one block
-// per invocation, not three.
-
-function buildRenderable(events) {
-  const toolBuckets = new Map(); // tool_call_id -> aggregated tool node
-  const out = [];
-
-  for (const ev of events) {
-    const type = ev.event ?? ev.type;
-    if (type === 'tool.called') {
-      const node = {
-        kind: 'tool',
-        toolCallId: ev.tool_call_id,
-        toolName: ev.tool_name,
-        arguments: ev.arguments,
-        outputLines: [],
-        durationMs: null,
-        isError: false,
-        finished: false,
-      };
-      toolBuckets.set(ev.tool_call_id, node);
-      out.push({ kind: 'tool', node, key: 'tool:' + ev.tool_call_id });
-    } else if (type === 'tool.output') {
-      const node = toolBuckets.get(ev.tool_call_id);
-      if (node) node.outputLines.push(ev.line);
-    } else if (type === 'tool.result') {
-      const node = toolBuckets.get(ev.tool_call_id);
-      if (node) {
-        node.durationMs = ev.duration_ms;
-        node.isError = !!ev.is_error;
-        node.finished = true;
-      }
-    } else if (type === 'agent.message') {
-      out.push({ kind: 'message', payload: ev, key: 'msg:' + ev.seq });
-    } else if (type === 'agent.thinking') {
-      out.push({ kind: 'thinking', payload: ev, key: 'think:' + ev.seq });
-    } else if (type === 'agent.child_spawned' || type === 'agent.child_finished') {
-      out.push({ kind: 'child', payload: ev, key: 'child:' + ev.seq });
-    }
-    // task.state_changed handled by status; not rendered as a feed entry
-  }
-  return out;
-}
+// The render layer collapses tool.{call_delta,called,output,result} into a
+// single virtual "tool" node so the user sees one block per invocation.
 
 export default defineComponent({
   name: 'AgentRun',

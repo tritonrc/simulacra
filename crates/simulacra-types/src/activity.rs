@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Consumers (CLI renderer, SSE server) subscribe to these events to display
 /// activity blocks showing what the agent is doing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ActivityEvent {
     /// LLM token arrived (streaming response text).
@@ -35,6 +35,16 @@ pub enum ActivityEvent {
         name: String,
         /// Full arguments. Display layer truncates for rendering.
         arguments: serde_json::Value,
+    },
+
+    /// A provider streamed part of a tool-call argument payload.
+    ///
+    /// Display-only; the actual tool execution starts at `ToolStart`.
+    ToolCallDelta {
+        index: u64,
+        tool_call_id: Option<String>,
+        name: Option<String>,
+        arguments_delta: String,
     },
 
     /// A line of output from a running tool (e.g. shell stdout/stderr).

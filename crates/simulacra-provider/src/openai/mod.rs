@@ -528,17 +528,31 @@ impl<'a> OpenAiSseAccumulator<'a> {
                                 .pending_tool_calls
                                 .entry(idx)
                                 .or_insert_with(|| (String::new(), String::new(), String::new()));
+                            let mut saw_delta = false;
+                            let mut arguments_delta = String::new();
 
                             if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                                 entry.0 = id.to_string();
+                                saw_delta = true;
                             }
                             if let Some(func) = tc.get("function") {
                                 if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
                                     entry.1 = name.to_string();
+                                    saw_delta = true;
                                 }
                                 if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
                                     entry.2.push_str(args);
+                                    arguments_delta = args.to_string();
+                                    saw_delta = true;
                                 }
+                            }
+                            if saw_delta && let Some(provider_sink) = self.provider_sink {
+                                provider_sink.emit(ProviderStreamEvent::ToolCallDelta {
+                                    index: idx,
+                                    tool_call_id: (!entry.0.is_empty()).then(|| entry.0.clone()),
+                                    name: (!entry.1.is_empty()).then(|| entry.1.clone()),
+                                    arguments_delta,
+                                });
                             }
                         }
                     }
@@ -1072,12 +1086,24 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingProviderStreamSink {
-        texts: Mutex<Vec<String>>,
+        events: Mutex<Vec<simulacra_types::ProviderStreamEvent>>,
     }
 
     impl RecordingProviderStreamSink {
         fn texts(&self) -> Vec<String> {
-            self.texts
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter_map(|event| match event {
+                    simulacra_types::ProviderStreamEvent::TextDelta { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn events(&self) -> Vec<simulacra_types::ProviderStreamEvent> {
+            self.events
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
@@ -1086,12 +1112,10 @@ mod tests {
 
     impl simulacra_types::ProviderStreamSink for RecordingProviderStreamSink {
         fn emit(&self, event: simulacra_types::ProviderStreamEvent) {
-            if let simulacra_types::ProviderStreamEvent::TextDelta { text } = event {
-                self.texts
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(text);
-            }
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event);
         }
     }
 
@@ -1150,5 +1174,94 @@ mod tests {
         assert_eq!(response.token_usage.input_tokens, 3);
         assert_eq!(response.token_usage.output_tokens, 2);
         assert_eq!(response.finish_reason, FinishReason::EndTurn);
+    }
+
+    fn streaming_tool_call_response_body() -> Vec<u8> {
+        concat!(
+            "data: {\"id\":\"chatcmpl-stream-tool\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_tc1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-stream-tool\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"loc\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-stream-tool\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ation\\\":\\\"SF\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-stream-tool\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-stream-tool\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":15,\"total_tokens\":35}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn streaming_provider_emits_openai_tool_call_deltas_and_assembles_final_response() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let provider = OpenAiProvider {
+            api_key: "test-key".into(),
+            model: "gpt-4o-mini".into(),
+            base_url: "https://example.invalid".into(),
+            http: Box::new(FakeHttpClient::with_response_and_headers(
+                200,
+                &streaming_tool_call_response_body(),
+                headers,
+            )),
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: "weather".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let mut budget = ResourceBudget::new(100_000, 100, Decimal::new(100, 0), 10);
+        let sink = RecordingProviderStreamSink::default();
+
+        let response = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("OpenAI streaming should assemble a tool call response");
+
+        let tool_deltas: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    simulacra_types::ProviderStreamEvent::ToolCallDelta { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            tool_deltas,
+            vec![
+                simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                    index: 0,
+                    tool_call_id: Some("call_tc1".into()),
+                    name: Some("get_weather".into()),
+                    arguments_delta: String::new(),
+                },
+                simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                    index: 0,
+                    tool_call_id: Some("call_tc1".into()),
+                    name: Some("get_weather".into()),
+                    arguments_delta: "{\"loc".into(),
+                },
+                simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                    index: 0,
+                    tool_call_id: Some("call_tc1".into()),
+                    name: Some("get_weather".into()),
+                    arguments_delta: "ation\":\"SF\"}".into(),
+                },
+            ]
+        );
+        assert_eq!(response.message.tool_calls.len(), 1);
+        assert_eq!(response.message.tool_calls[0].id, "call_tc1");
+        assert_eq!(response.message.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            response.message.tool_calls[0].arguments,
+            serde_json::json!({"location": "SF"})
+        );
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
     }
 }

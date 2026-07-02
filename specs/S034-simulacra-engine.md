@@ -210,6 +210,7 @@ All events from children appear in the parent's event stream with `child_id` and
 | `ThinkDelta { text }` | `{ event: "agent.thinking", task_id, content: text, seq }` |
 | `ThinkEnd { think_duration_ms, think_tokens }` | `{ event: "agent.thinking", task_id, state: "ended", duration_ms, tokens, seq }` |
 | `ToolStart { tool_call_id, name, arguments }` | `{ event: "tool.called", task_id, tool_call_id, tool_name, arguments, seq }` |
+| `ToolCallDelta { index, tool_call_id, name, arguments_delta }` | `{ event: "tool.call_delta", task_id, index, tool_call_id, tool_name, arguments_delta, seq }` |
 | `ToolOutput { tool_call_id, line }` | `{ event: "tool.output", task_id, tool_call_id, line, seq }` |
 | `ToolFinish { tool_call_id, name, is_error, duration_ms, .. }` | `{ event: "tool.result", task_id, tool_call_id, tool_name, is_error, duration_ms, seq }` |
 | `ChildSpawned { child_id, agent_type, task }` | `{ event: "agent.child_spawned", task_id, child_id, agent_type, child_task: task, seq }` |
@@ -547,56 +548,57 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 37. `ThinkDelta` → `agent.thinking` with `content`.
 38. `ThinkEnd` → `agent.thinking` with `state: "ended"`, `duration_ms`, `tokens`.
 39. `ToolStart` → `tool.called` with `tool_call_id`, `tool_name`, `arguments`.
-40. `ToolOutput` → `tool.output` with `tool_call_id`, `line`.
-41. `ToolFinish` → `tool.result` with `tool_call_id`, `tool_name`, `is_error`, `duration_ms`.
-42. `ChildSpawned` → `agent.child_spawned` with `child_id`, `agent_type`, `child_task`.
-43. `ChildFinished` → `agent.child_finished` with `child_id`, `agent_type`, `exit_reason`, `duration_ms`.
-44. `TurnComplete` → `agent.turn_complete`.
+40. `ToolCallDelta` → `tool.call_delta` with `index`, optional `tool_call_id`, optional `tool_name`, and `arguments_delta`.
+41. `ToolOutput` → `tool.output` with `tool_call_id`, `line`.
+42. `ToolFinish` → `tool.result` with `tool_call_id`, `tool_name`, `is_error`, `duration_ms`.
+43. `ChildSpawned` → `agent.child_spawned` with `child_id`, `agent_type`, `child_task`.
+44. `ChildFinished` → `agent.child_finished` with `child_id`, `agent_type`, `exit_reason`, `duration_ms`.
+45. `TurnComplete` → `agent.turn_complete`.
 
 ### TaskManager emit_event
-45. Acquires lock, looks up task, increments seq, calls `event_tx.send(event)` with seq embedded.
-46. Returns `NotFound` for nonexistent task.
-47. Silently drops if no subscribers.
-48. Every event (including activity events, not just state transitions) carries a monotonic seq.
+46. Acquires lock, looks up task, increments seq, calls `event_tx.send(event)` with seq embedded.
+47. Returns `NotFound` for nonexistent task.
+48. Silently drops if no subscribers.
+49. Every event (including activity events, not just state transitions) carries a monotonic seq.
 
 ### Cancellation
-49. `task.cancel` command triggers `CancellationToken::signal()` on the task's token.
-50. The agent loop checks `cancellation.is_cancelled()` each turn and exits with `ExitReason::Cancelled`.
-51. The background task then calls `complete_task(task_id, Cancelled, None)`.
-52. If no cancellation token is stored (shouldn't happen), cancel_task falls back to existing behavior (immediate state transition).
+50. `task.cancel` command triggers `CancellationToken::signal()` on the task's token.
+51. The agent loop checks `cancellation.is_cancelled()` each turn and exits with `ExitReason::Cancelled`.
+52. The background task then calls `complete_task(task_id, Cancelled, None)`.
+53. If no cancellation token is stored (shouldn't happen), cancel_task falls back to existing behavior (immediate state transition).
 
 ### Input and approval (interface defined, integration follow-up)
-53. `input.response` sends on the task's `input_tx` channel (if present).
-54. `approval.respond` sends on the task's `approval_tx` channel (if present).
-55. The AgentLoop does not yet consume these channels. Full integration requires AgentLoop changes.
-56. For `AwaitingApproval`: the agent loop exits, the task transitions to `WaitingApproval`. On approval, a new agent loop run would need to be spawned (future work).
+54. `input.response` sends on the task's `input_tx` channel (if present).
+55. `approval.respond` sends on the task's `approval_tx` channel (if present).
+56. The AgentLoop does not yet consume these channels. Full integration requires AgentLoop changes.
+57. For `AwaitingApproval`: the agent loop exits, the task transitions to `WaitingApproval`. On approval, a new agent loop run would need to be spawned (future work).
 
 ### Budget warnings
-57. Budget warning events emitted at 80% and 95% token/cost thresholds.
-58. Emitted as `budget.warning` events on the task's broadcast channel.
+58. Budget warning events emitted at 80% and 95% token/cost thresholds.
+59. Emitted as `budget.warning` events on the task's broadcast channel.
 
 ### Isolation
-59. Each task: own VFS instance (fresh MemoryFs).
-60. Each task: own AgentCell.
-61. Each task: own ResourceBudget.
-62. Each task: own Journal (InMemoryJournalStorage).
-63. Each task: own ToolRegistry.
-64. Each task: own CancellationToken.
-65. `SimulacraConfig` and `IntegrationRegistry` shared read-only across all tasks.
+60. Each task: own VFS instance (fresh MemoryFs).
+61. Each task: own AgentCell.
+62. Each task: own ResourceBudget.
+63. Each task: own Journal (InMemoryJournalStorage).
+64. Each task: own ToolRegistry.
+65. Each task: own CancellationToken.
+66. `SimulacraConfig` and `IntegrationRegistry` shared read-only across all tasks.
 
 ### Server startup
-66. `start_server` accepts `ServerConfig`, `SimulacraConfig`, `AuthProvider`, `TenantResolver`.
-67. `IntegrationRegistry` constructed from `SimulacraConfig`.
-68. `SimulacraEngine::new(simulacra_config, integration_registry)` called — returns error on validation failure.
-69. `AppState` stores `Arc<SimulacraEngine>` (real engine, not empty stub).
-70. REST/WS `task.create` handlers call `engine.spawn_task(...)`.
+67. `start_server` accepts `ServerConfig`, `SimulacraConfig`, `AuthProvider`, `TenantResolver`.
+68. `IntegrationRegistry` constructed from `SimulacraConfig`.
+69. `SimulacraEngine::new(simulacra_config, integration_registry)` called — returns error on validation failure.
+70. `AppState` stores `Arc<SimulacraEngine>` (real engine, not empty stub).
+71. REST/WS `task.create` handlers call `engine.spawn_task(...)`.
 
 ### Error handling
-71. `SimulacraEngine::new` returns `Err` on config validation failures.
-72. `spawn_task` agent construction failures: task transitions to `Failed`, error returned to caller.
-73. Background execution errors → `Failed` with error message.
-74. Background panics → `Failed` with "agent task panicked".
-75. Provider env var missing → `EngineError::MissingEnvVar`.
+72. `SimulacraEngine::new` returns `Err` on config validation failures.
+73. `spawn_task` agent construction failures: task transitions to `Failed`, error returned to caller.
+74. Background execution errors → `Failed` with error message.
+75. Background panics → `Failed` with "agent task panicked".
+76. Provider env var missing → `EngineError::MissingEnvVar`.
 
 ## Assertions
 
@@ -629,6 +631,7 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 ### Event bridging
 - [x] `Token` → `agent.message` with correct `task_id` and `seq`.
 - [x] `ToolStart` → `tool.called` with `tool_call_id`, `tool_name`, `arguments`, `seq`.
+- [x] `ToolCallDelta` → `tool.call_delta` with `index`, optional `tool_call_id`, optional `tool_name`, `arguments_delta`, and `seq`. **Tested by `tool_call_delta_events_translate_to_tool_call_delta_with_optional_metadata_and_seq`.**
 - [x] `ToolOutput` → `tool.output` with `tool_call_id`, `line`, `seq`.
 - [x] `ToolFinish` → `tool.result` with `duration_ms`, `is_error`, `seq`.
 - [x] `ThinkStart`/`ThinkDelta`/`ThinkEnd` → `agent.thinking` events with `seq`.
