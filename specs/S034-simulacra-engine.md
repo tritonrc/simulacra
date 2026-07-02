@@ -23,6 +23,7 @@ SimulacraEngine is the composition root that bridges the API server to the Simul
 **In scope:**
 - `SimulacraEngine` struct replacing the empty stub in `simulacra-server/src/server.rs`
 - Per-task agent construction: VFS (MemoryFs + host mounts + ServiceFs + ProcFs), AgentCell, ToolRegistry, HookPipeline, ResourceBudget, Journal
+- Catalog-backed skill snapshots: server tasks expose catalog skills through read-only canonical `/skills/<name>/SKILL.md` files for S017 discovery, plus read-only `/var/skills/<name>.md` compatibility files
 - `EngineActivitySink` — translates `ActivityEvent` to server event JSON, sends through per-task `broadcast::Sender<Value>` (no lock acquisition)
 - Background tokio task spawning for agent execution with panic safety
 - Agent completion/failure/budget exhaustion mapped to terminal TaskState transitions
@@ -406,12 +407,12 @@ Budget checking happens in `EngineActivitySink::emit()` on `TurnComplete` events
 3. Extract `broadcast::Sender<Value>` via `TaskManager::get_event_sender(&task_id)`
 4. Build `CapabilityToken` from agent type's `CapabilitiesConfig`
 5. Build `ResourceBudget` from tenant's `BudgetPoolConfig`
-6. Create `MemoryFs`, seed `/workspace/task.md` with description
+6. Create `MemoryFs`, seed `/workspace/task.md` with description, validate catalog skill names as single VFS path segments, and snapshot catalog-authored skills into read-only `/skills/<name>/SKILL.md` and `/var/skills/<name>.md`
 7. Process VFS host mounts from tenant's `vfs_root`
 8. Wrap VFS: `MemoryFs` → `ServiceFs` (scoped to tenant integrations) → `ProcFs`
 9. Create `HookPipeline` from `SimulacraConfig.hooks` (global, not per-tenant)
 10. Create `AgentCell` with VFS, capabilities, budget, journal, HTTP client, integration registry
-11. Create `ToolRegistry`, register builtins + skills + MCP tools + WASM tools (feature-gated) + Python tools (feature-gated)
+11. Create `ToolRegistry`, register builtins + the single S017 `Skill` tool when model-visible catalog skills remain + MCP tools + WASM tools (feature-gated) + Python tools (feature-gated)
 12. Create `EngineActivitySink` with cloned broadcast sender and AtomicU64 seq counter
 13. Build `AgentLoopConfig` { agent_id, system_prompt, model, max_turns, capability }
 14. Call `build_provider(model)` to construct the LLM provider
@@ -523,14 +524,14 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 7. Calls `TaskManager::create_task(...)` which creates the task and transitions to Running.
 8. Extracts `broadcast::Sender<Value>` from TaskManager via `get_event_sender`.
 9. `ResourceBudget` created from tenant's `BudgetPoolConfig`.
-10. Fresh `MemoryFs` per task, `/workspace/task.md` seeded with description.
+10. Fresh `MemoryFs` per task, `/workspace/task.md` seeded with description, catalog skills snapshotted into read-only `/skills/<name>/SKILL.md` and `/var/skills/<name>.md`.
 11. VFS host mounts processed from tenant's `vfs_root`.
 12. `ServiceFs` scoped to tenant's integration grants (using the `IntegrationRegistry`).
 13. `ProcFs` wraps with task_id as agent_id.
 14. `HookPipeline` built from `SimulacraConfig.hooks` (global hooks).
 15. `AgentCell` constructed with full composition.
 16. Integration registry wired for credential injection, scoped to tenant.
-17. `ToolRegistry` populated: builtins, skills, MCP, WASM (feature-gated), Python (feature-gated).
+17. `ToolRegistry` populated: builtins, the single S017 `Skill` tool when model-visible catalog skills remain, MCP, WASM (feature-gated), Python (feature-gated).
 18. `EngineActivitySink` created with cloned broadcast sender. No TaskManager reference.
 19. `AgentLoopConfig` built from agent type's system prompt, model, max_turns, capabilities.
 20. Provider constructed via shared `build_provider(model)`.
@@ -624,13 +625,14 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 - [x] Task is in `Running` state in the returned TaskHandle.
 - [x] Constructs fresh `MemoryFs` per task.
 - [x] Seeds `/workspace/task.md` with description.
+- [x] Validates catalog skill names as single VFS path segments, then snapshots catalog-backed skills into read-only canonical `/skills/<name>/SKILL.md` files for S017 discovery.
 - [x] Constructs `ServiceFs` scoped to tenant integrations.
 - [x] Constructs `ProcFs` with task_id as agent_id.
 - [x] Constructs `AgentCell` with correct capabilities from `AgentTypeConfig`.
 - [x] Creates `ResourceBudget` from tenant config's `BudgetPoolConfig`.
 - [x] Builds `HookPipeline` from `SimulacraConfig.hooks` (global hooks, not per-tenant).
 - [x] Registers builtins in `ToolRegistry`.
-- [x] Discovers and filters skills.
+- [x] Discovers and filters skills, then registers exactly one model-visible `Skill` tool when any catalog skill remains model-invocable.
 - [x] Registers WASM tools when feature-gated.
 - [x] Registers Python tools when feature-gated.
 - [x] Constructs provider via shared `build_provider`.
