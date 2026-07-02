@@ -7,7 +7,8 @@ use std::pin::Pin;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Histogram;
 use simulacra_types::{
-    Message, Provider, ProviderError, ProviderResponse, ResourceBudget, ToolDefinition,
+    FinishReason, Message, Provider, ProviderError, ProviderResponse, ProviderStreamEvent,
+    ProviderStreamSink, ResourceBudget, Role, StreamingProvider, TokenUsage, ToolDefinition,
 };
 use tracing::Instrument;
 
@@ -55,6 +56,35 @@ pub(crate) trait HttpClient: Send + Sync {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + '_>>;
+
+    fn post_stream<'a>(
+        &'a self,
+        url: &'a str,
+        headers: &'a [(String, String)],
+        body: &'a [u8],
+        sink: &'a mut dyn HttpStreamSink,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self.post(url, headers, body).await?;
+            sink.begin(response.status, &response.headers)?;
+            sink.chunk(&response.body)?;
+            Ok(response)
+        })
+    }
+}
+
+pub(crate) trait HttpStreamSink: Send {
+    fn begin(
+        &mut self,
+        _status: u16,
+        _headers: &HashMap<String, String>,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn chunk(&mut self, _chunk: &[u8]) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 /// Raw HTTP response.
@@ -121,6 +151,57 @@ impl HttpClient for ReqwestClient {
             })
         })
     }
+
+    fn post_stream<'a>(
+        &'a self,
+        url: &'a str,
+        headers: &'a [(String, String)],
+        body: &'a [u8],
+        sink: &'a mut dyn HttpStreamSink,
+    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + 'a>> {
+        let url = url.to_owned();
+        let headers = headers.to_vec();
+        let body = body.to_vec();
+        Box::pin(async move {
+            let mut builder = self.client.post(&url);
+            for (key, value) in &headers {
+                builder = builder.header(key.as_str(), value.as_str());
+            }
+            let mut resp = builder
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| ProviderError::Other(format!("HTTP request failed: {e:?}")))?;
+
+            let status = resp.status().as_u16();
+            let resp_headers: HashMap<String, String> = resp
+                .headers()
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.to_str()
+                        .ok()
+                        .map(|val| (k.as_str().to_lowercase(), val.to_owned()))
+                })
+                .collect();
+            sink.begin(status, &resp_headers)?;
+
+            let mut resp_body = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|e| ProviderError::Other(format!("failed to read response chunk: {e}")))?
+            {
+                resp_body.extend_from_slice(&chunk);
+                sink.chunk(&chunk)?;
+            }
+
+            Ok(HttpResponse {
+                status,
+                headers: resp_headers,
+                body: resp_body,
+            })
+        })
+    }
 }
 
 // ── AnthropicProvider ──────────────────────────────────────────────
@@ -181,167 +262,297 @@ fn parse_sse_to_provider_response(
     body: &[u8],
     model: &str,
 ) -> Result<ProviderResponse, ProviderError> {
-    use simulacra_types::{
-        FinishReason, Message, ProviderResponse, Role, TokenUsage, ToolCallMessage,
-    };
-
     let text = std::str::from_utf8(body)
         .map_err(|e| ProviderError::Other(format!("SSE body is not valid UTF-8: {e}")))?;
 
-    let mut response_id: Option<String> = None;
-    let mut input_tokens: u64 = 0;
-    let mut output_tokens: u64 = 0;
-    let mut content = String::new();
-    let mut stop_reason: Option<String> = None;
-
-    // In-flight tool_use content blocks keyed by SSE block index.
-    // Holds (id, name, partial_json_accumulator).
-    let mut pending_tool_blocks: std::collections::BTreeMap<u64, (String, String, String)> =
-        std::collections::BTreeMap::new();
-    // Track which block indices are tool_use so content_block_stop can finalize them.
-    let mut tool_block_indices: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-    // Completed tool calls, in the order their content_block_stop events arrived.
-    let mut tool_calls: Vec<ToolCallMessage> = Vec::new();
-
+    let mut accumulator = AnthropicSseAccumulator::new(model, None);
     for line in text.lines() {
-        let line = line.trim();
+        accumulator.process_line(line.trim())?;
+    }
+    Ok(accumulator.finish())
+}
+
+struct AnthropicSseAccumulator<'a> {
+    model: String,
+    provider_sink: Option<&'a dyn ProviderStreamSink>,
+    response_id: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    content: String,
+    stop_reason: Option<String>,
+    pending_tool_blocks: std::collections::BTreeMap<u64, (String, String, String)>,
+    tool_block_indices: std::collections::BTreeSet<u64>,
+    thinking_indices: std::collections::BTreeSet<u64>,
+    tool_calls: Vec<simulacra_types::ToolCallMessage>,
+}
+
+impl<'a> AnthropicSseAccumulator<'a> {
+    fn new(model: &str, provider_sink: Option<&'a dyn ProviderStreamSink>) -> Self {
+        Self {
+            model: model.to_owned(),
+            provider_sink,
+            response_id: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            content: String::new(),
+            stop_reason: None,
+            pending_tool_blocks: std::collections::BTreeMap::new(),
+            tool_block_indices: std::collections::BTreeSet::new(),
+            thinking_indices: std::collections::BTreeSet::new(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    fn process_line(&mut self, line: &str) -> Result<(), ProviderError> {
         if !line.starts_with("data: ") {
-            continue;
+            return Ok(());
         }
         let json_str = &line["data: ".len()..];
         let event: serde_json::Value = serde_json::from_str(json_str)
             .map_err(|e| ProviderError::Other(format!("failed to parse SSE event JSON: {e}")))?;
 
         match event.get("type").and_then(|t| t.as_str()) {
-            Some("message_start") => {
-                if let Some(msg) = event.get("message") {
-                    response_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
-                    if let Some(usage) = msg.get("usage") {
-                        input_tokens = usage
-                            .get("input_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                    }
-                }
-            }
-            Some("content_block_start") => {
-                // Track tool_use blocks so we can accumulate their JSON input
-                // across content_block_delta events and finalize on stop.
-                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                if let Some(block) = event.get("content_block") {
-                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if block_type == "tool_use" {
-                        let id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        pending_tool_blocks.insert(index, (id, name, String::new()));
-                        tool_block_indices.insert(index);
-                    }
-                }
-            }
-            Some("content_block_delta") => {
-                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                if let Some(delta) = event.get("delta") {
-                    let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    match delta_type {
-                        "text_delta" => {
-                            if let Some(text_delta) = delta.get("text").and_then(|v| v.as_str()) {
-                                content.push_str(text_delta);
-                            }
-                        }
-                        "input_json_delta" => {
-                            if let Some(partial) =
-                                delta.get("partial_json").and_then(|v| v.as_str())
-                                && let Some(entry) = pending_tool_blocks.get_mut(&index)
-                            {
-                                entry.2.push_str(partial);
-                            }
-                        }
-                        _ => {
-                            // Unknown delta type — fall back to legacy shape where
-                            // a `text` field may appear at the top of delta.
-                            if let Some(text_delta) = delta.get("text").and_then(|v| v.as_str()) {
-                                content.push_str(text_delta);
-                            }
-                        }
-                    }
-                }
-            }
-            Some("content_block_stop") => {
-                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                if tool_block_indices.remove(&index)
-                    && let Some((id, name, args_str)) = pending_tool_blocks.remove(&index)
-                {
-                    // Anthropic sends an empty partial_json stream for tools with
-                    // no arguments — treat that as an empty object.
-                    let arguments: serde_json::Value = if args_str.trim().is_empty() {
-                        serde_json::Value::Object(serde_json::Map::new())
-                    } else {
-                        serde_json::from_str(&args_str).unwrap_or_else(|e| {
-                            tracing::warn!(
-                                tool_name = name.as_str(),
-                                raw_args = args_str.as_str(),
-                                error = %e,
-                                "tool_use input_json failed to parse, falling back to empty object"
-                            );
-                            serde_json::Value::Object(serde_json::Map::new())
-                        })
-                    };
-                    tool_calls.push(ToolCallMessage {
-                        id,
-                        name,
-                        arguments,
-                    });
-                }
-            }
-            Some("message_delta") => {
-                if let Some(delta) = event.get("delta") {
-                    stop_reason = delta
-                        .get("stop_reason")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                }
-                if let Some(usage) = event.get("usage") {
-                    output_tokens = usage
-                        .get("output_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                }
-            }
+            Some("message_start") => self.process_message_start(&event),
+            Some("content_block_start") => self.process_content_block_start(&event),
+            Some("content_block_delta") => self.process_content_block_delta(&event),
+            Some("content_block_stop") => self.process_content_block_stop(&event),
+            Some("message_delta") => self.process_message_delta(&event),
             Some("message_stop") => {}
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn process_message_start(&mut self, event: &serde_json::Value) {
+        if let Some(msg) = event.get("message") {
+            self.response_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
+            if let Some(usage) = msg.get("usage") {
+                self.input_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    fn process_content_block_start(&mut self, event: &serde_json::Value) {
+        let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(block) = event.get("content_block") else {
+            return;
+        };
+        match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "tool_use" => {
+                let id = block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.pending_tool_blocks
+                    .insert(index, (id, name, String::new()));
+                self.tool_block_indices.insert(index);
+            }
+            "thinking" => {
+                self.thinking_indices.insert(index);
+                if let Some(provider_sink) = self.provider_sink {
+                    provider_sink.emit(ProviderStreamEvent::ThinkingStart);
+                }
+            }
             _ => {}
         }
     }
 
-    let finish_reason = match stop_reason.as_deref() {
-        Some("tool_use") => FinishReason::ToolUse,
-        Some("max_tokens") => FinishReason::MaxTokens,
-        Some("stop_sequence") => FinishReason::StopSequence,
-        _ => FinishReason::EndTurn,
-    };
+    fn process_content_block_delta(&mut self, event: &serde_json::Value) {
+        let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(delta) = event.get("delta") else {
+            return;
+        };
+        match delta.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "text_delta" => {
+                if let Some(text_delta) = delta.get("text").and_then(|v| v.as_str()) {
+                    self.push_text_delta(text_delta);
+                }
+            }
+            "input_json_delta" => {
+                if let Some(partial) = delta.get("partial_json").and_then(|v| v.as_str())
+                    && let Some(entry) = self.pending_tool_blocks.get_mut(&index)
+                {
+                    entry.2.push_str(partial);
+                }
+            }
+            "thinking_delta" if self.thinking_indices.contains(&index) => {
+                if let Some(text) = delta
+                    .get("thinking")
+                    .or_else(|| delta.get("text"))
+                    .and_then(|v| v.as_str())
+                    && !text.is_empty()
+                    && let Some(provider_sink) = self.provider_sink
+                {
+                    provider_sink.emit(ProviderStreamEvent::ThinkingDelta {
+                        text: text.to_owned(),
+                    });
+                }
+            }
+            _ => {
+                if let Some(text_delta) = delta.get("text").and_then(|v| v.as_str()) {
+                    self.push_text_delta(text_delta);
+                }
+            }
+        }
+    }
 
-    Ok(ProviderResponse {
-        message: Message {
-            role: Role::Assistant,
-            content,
-            tool_calls,
-            tool_call_id: None,
-        },
-        token_usage: TokenUsage {
-            input_tokens,
-            output_tokens,
-        },
-        finish_reason,
-        provider_response_id: response_id,
-        model: model.to_owned(),
-    })
+    fn push_text_delta(&mut self, text_delta: &str) {
+        self.content.push_str(text_delta);
+        if let Some(provider_sink) = self.provider_sink
+            && !text_delta.is_empty()
+        {
+            provider_sink.emit(ProviderStreamEvent::TextDelta {
+                text: text_delta.to_owned(),
+            });
+        }
+    }
+
+    fn process_content_block_stop(&mut self, event: &serde_json::Value) {
+        let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+        if self.tool_block_indices.remove(&index)
+            && let Some((id, name, args_str)) = self.pending_tool_blocks.remove(&index)
+        {
+            let arguments: serde_json::Value = if args_str.trim().is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&args_str).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        tool_name = name.as_str(),
+                        raw_args = args_str.as_str(),
+                        error = %e,
+                        "tool_use input_json failed to parse, falling back to empty object"
+                    );
+                    serde_json::Value::Object(serde_json::Map::new())
+                })
+            };
+            self.tool_calls.push(simulacra_types::ToolCallMessage {
+                id,
+                name,
+                arguments,
+            });
+        }
+        if self.thinking_indices.remove(&index)
+            && let Some(provider_sink) = self.provider_sink
+        {
+            provider_sink.emit(ProviderStreamEvent::ThinkingEnd);
+        }
+    }
+
+    fn process_message_delta(&mut self, event: &serde_json::Value) {
+        if let Some(delta) = event.get("delta") {
+            self.stop_reason = delta
+                .get("stop_reason")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+        }
+        if let Some(usage) = event.get("usage") {
+            self.output_tokens = usage
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+        }
+    }
+
+    fn finish(self) -> ProviderResponse {
+        let finish_reason = match self.stop_reason.as_deref() {
+            Some("tool_use") => FinishReason::ToolUse,
+            Some("max_tokens") => FinishReason::MaxTokens,
+            Some("stop_sequence") => FinishReason::StopSequence,
+            _ => FinishReason::EndTurn,
+        };
+
+        ProviderResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: self.content,
+                tool_calls: self.tool_calls,
+                tool_call_id: None,
+            },
+            token_usage: TokenUsage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+            },
+            finish_reason,
+            provider_response_id: self.response_id,
+            model: self.model,
+        }
+    }
+}
+
+struct AnthropicStreamEmitter<'a> {
+    accumulator: AnthropicSseAccumulator<'a>,
+    active: bool,
+    pending: Vec<u8>,
+}
+
+impl<'a> AnthropicStreamEmitter<'a> {
+    fn new(model: &str, provider_sink: &'a dyn ProviderStreamSink) -> Self {
+        Self {
+            accumulator: AnthropicSseAccumulator::new(model, Some(provider_sink)),
+            active: false,
+            pending: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> Result<ProviderResponse, ProviderError> {
+        if self.active && !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.process_line_bytes(line)?;
+        }
+        Ok(self.accumulator.finish())
+    }
+
+    fn push_bytes(&mut self, chunk: &[u8]) -> Result<(), ProviderError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.pending.extend_from_slice(chunk);
+        while let Some(pos) = self.pending.iter().position(|b| *b == b'\n') {
+            let line = self.pending.drain(..=pos).collect::<Vec<_>>();
+            self.process_line_bytes(line)?;
+        }
+        Ok(())
+    }
+
+    fn process_line_bytes(&mut self, mut line: Vec<u8>) -> Result<(), ProviderError> {
+        while matches!(line.last(), Some(b'\n' | b'\r')) {
+            line.pop();
+        }
+        let line = std::str::from_utf8(&line)
+            .map_err(|e| ProviderError::Other(format!("SSE line is not valid UTF-8: {e}")))?;
+        self.process_line(line.trim())
+    }
+
+    fn process_line(&mut self, line: &str) -> Result<(), ProviderError> {
+        self.accumulator.process_line(line)
+    }
+}
+
+impl HttpStreamSink for AnthropicStreamEmitter<'_> {
+    fn begin(
+        &mut self,
+        status: u16,
+        headers: &HashMap<String, String>,
+    ) -> Result<(), ProviderError> {
+        self.active = status == 200
+            && headers
+                .get("content-type")
+                .is_some_and(|ct| ct.contains("text/event-stream"));
+        Ok(())
+    }
+
+    fn chunk(&mut self, chunk: &[u8]) -> Result<(), ProviderError> {
+        self.push_bytes(chunk)
+    }
 }
 
 impl Provider for AnthropicProvider {
@@ -560,6 +771,204 @@ impl Provider for AnthropicProvider {
         };
         Box::pin(fut.instrument(span))
     }
+
+    fn as_streaming(&self) -> Option<&dyn StreamingProvider> {
+        Some(self)
+    }
+}
+
+impl StreamingProvider for AnthropicProvider {
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        budget: &'a mut ResourceBudget,
+        stream_sink: &'a dyn ProviderStreamSink,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>> {
+        let budget_check = budget.check_budget();
+        if let Err(e) = budget_check {
+            return Box::pin(async move { Err(ProviderError::BudgetExhausted(e)) });
+        }
+
+        let max_tokens = if budget.max_tokens == 0 {
+            8192u32
+        } else {
+            let remaining = budget.max_tokens.saturating_sub(budget.used_tokens);
+            (remaining.min(8192) as u32).max(1)
+        };
+        let api_req = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
+        let body = match serde_json::to_vec(&api_req) {
+            Ok(b) => b,
+            Err(e) => {
+                return Box::pin(async move {
+                    Err(ProviderError::Other(format!(
+                        "request serialization failed: {e}"
+                    )))
+                });
+            }
+        };
+
+        let headers = vec![
+            ("x-api-key".to_owned(), self.api_key.clone()),
+            ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
+            ("content-type".to_owned(), "application/json".to_owned()),
+        ];
+
+        let http = &*self.http;
+        let model = self.model.clone();
+        let otel_name = format!("chat {model}");
+        let span = tracing::info_span!(
+            "chat",
+            "otel.name" = otel_name.as_str(),
+            "gen_ai.operation.name" = "chat",
+            "gen_ai.request.model" = model.as_str(),
+            "gen_ai.provider.name" = "anthropic",
+            "gen_ai.request.max_tokens" = max_tokens as u64,
+            "server.address" = "api.anthropic.com",
+            "server.port" = 443u64,
+            "gen_ai.usage.input_tokens" = tracing::field::Empty,
+            "gen_ai.usage.output_tokens" = tracing::field::Empty,
+            "gen_ai.response.id" = tracing::field::Empty,
+            "gen_ai.response.finish_reasons" = tracing::field::Empty,
+        );
+
+        let fut = async move {
+            let call_start = std::time::Instant::now();
+            let mut emitter = AnthropicStreamEmitter::new(&model, stream_sink);
+            let http_resp = http
+                .post_stream(ANTHROPIC_API_URL, &headers, &body, &mut emitter)
+                .await?;
+
+            if http_resp.status != 200 {
+                let error_message =
+                    serde_json::from_slice::<api_types::ApiErrorResponse>(&http_resp.body)
+                        .map(|e| e.error.message)
+                        .unwrap_or_else(|_| String::from_utf8_lossy(&http_resp.body).into_owned());
+
+                if http_resp.status == 429 {
+                    let retry_after_ms = http_resp
+                        .headers
+                        .get("retry-after")
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(|secs| secs * 1000);
+                    tracing::warn!(
+                        error_type = "rate_limit",
+                        message = error_message.as_str(),
+                        "provider error: rate limited"
+                    );
+                    return Err(ProviderError::RateLimit { retry_after_ms });
+                }
+
+                let err = ProviderError::classify(http_resp.status, error_message.clone());
+                if err.is_retryable() {
+                    tracing::warn!(
+                        error_type = "server_error",
+                        message = error_message.as_str(),
+                        "provider error: retryable"
+                    );
+                } else {
+                    tracing::error!(
+                        error_type = "client_error",
+                        message = error_message.as_str(),
+                        "provider error: non-retryable"
+                    );
+                }
+                return Err(err);
+            }
+
+            let is_sse = http_resp
+                .headers
+                .get("content-type")
+                .map(|ct| ct.contains("text/event-stream"))
+                .unwrap_or(false);
+            let provider_resp = if is_sse {
+                emitter.finish()?
+            } else {
+                let api_resp: api_types::ApiResponse = serde_json::from_slice(&http_resp.body)
+                    .map_err(|e| {
+                        ProviderError::Other(format!("failed to parse Anthropic response: {e}"))
+                    })?;
+                api_types::into_provider_response(api_resp)
+            };
+
+            let current_span = tracing::Span::current();
+            current_span.record(
+                "gen_ai.usage.input_tokens",
+                provider_resp.token_usage.input_tokens,
+            );
+            current_span.record(
+                "gen_ai.usage.output_tokens",
+                provider_resp.token_usage.output_tokens,
+            );
+            if let Some(ref id) = provider_resp.provider_response_id {
+                current_span.record("gen_ai.response.id", id.as_str());
+            }
+            let finish_reason_str = serde_json::to_string(&provider_resp.finish_reason)
+                .unwrap_or_else(|_| format!("{:?}", provider_resp.finish_reason));
+            let finish_reasons = format!("[{finish_reason_str}]");
+            current_span.record("gen_ai.response.finish_reasons", finish_reasons.as_str());
+
+            let total_tokens = provider_resp.token_usage.total();
+            tracing::info!(
+                gen_ai.client.token.usage = total_tokens,
+                gen_ai.usage.input_tokens = provider_resp.token_usage.input_tokens,
+                gen_ai.usage.output_tokens = provider_resp.token_usage.output_tokens,
+                gen_ai.operation.name = "chat",
+                gen_ai.request.model = model.as_str(),
+                operation = "chat",
+                model = model.as_str(),
+                "token usage"
+            );
+            let duration_secs = call_start.elapsed().as_secs_f64();
+            tracing::info!(
+                gen_ai.client.operation.duration = duration_secs,
+                gen_ai.operation.name = "chat",
+                gen_ai.request.model = model.as_str(),
+                operation = "chat",
+                model = model.as_str(),
+                "operation duration"
+            );
+            for tc in &provider_resp.message.tool_calls {
+                tracing::info!(
+                    simulacra.tool.calls = 1u64,
+                    tool_name = tc.name.as_str(),
+                    source = "builtin",
+                    "tool call"
+                );
+            }
+
+            let meters = ProviderMeters::get();
+            let attrs = &[
+                KeyValue::new("gen_ai.operation.name", "chat"),
+                KeyValue::new("gen_ai.request.model", model.clone()),
+                KeyValue::new("gen_ai.provider.name", "anthropic"),
+            ];
+            meters
+                .duration_histogram
+                .record(call_start.elapsed().as_secs_f64() * 1000.0, attrs);
+            meters.token_usage_histogram.record(
+                provider_resp.token_usage.input_tokens,
+                &[
+                    KeyValue::new("gen_ai.operation.name", "chat"),
+                    KeyValue::new("gen_ai.request.model", model.clone()),
+                    KeyValue::new("gen_ai.provider.name", "anthropic"),
+                    KeyValue::new("gen_ai.token.type", "input"),
+                ],
+            );
+            meters.token_usage_histogram.record(
+                provider_resp.token_usage.output_tokens,
+                &[
+                    KeyValue::new("gen_ai.operation.name", "chat"),
+                    KeyValue::new("gen_ai.request.model", model.clone()),
+                    KeyValue::new("gen_ai.provider.name", "anthropic"),
+                    KeyValue::new("gen_ai.token.type", "output"),
+                ],
+            );
+
+            Ok(provider_resp)
+        };
+        Box::pin(fut.instrument(span))
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -569,11 +978,36 @@ mod tests {
     use super::*;
     use rust_decimal::Decimal;
     use simulacra_types::{FinishReason, ToolDefinition};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// A fake HTTP client that returns a pre-configured response.
     struct FakeHttpClient {
         response: Arc<dyn Fn() -> Result<HttpResponse, ProviderError> + Send + Sync>,
+    }
+
+    #[derive(Default)]
+    struct RecordingProviderStreamSink {
+        texts: Mutex<Vec<String>>,
+    }
+
+    impl RecordingProviderStreamSink {
+        fn texts(&self) -> Vec<String> {
+            self.texts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    impl simulacra_types::ProviderStreamSink for RecordingProviderStreamSink {
+        fn emit(&self, event: simulacra_types::ProviderStreamEvent) {
+            if let simulacra_types::ProviderStreamEvent::TextDelta { text } = event {
+                self.texts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(text);
+            }
+        }
     }
 
     impl FakeHttpClient {
@@ -618,6 +1052,27 @@ mod tests {
         {
             let resp_fn = Arc::clone(&self.response);
             Box::pin(async move { resp_fn() })
+        }
+
+        fn post_stream<'a>(
+            &'a self,
+            _url: &'a str,
+            _headers: &'a [(String, String)],
+            _body: &'a [u8],
+            sink: &'a mut dyn HttpStreamSink,
+        ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + 'a>>
+        {
+            let resp_fn = Arc::clone(&self.response);
+            Box::pin(async move {
+                let response = resp_fn()?;
+                sink.begin(response.status, &response.headers)?;
+                sink.chunk(&response.body)?;
+                Ok(HttpResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: Vec::new(),
+                })
+            })
         }
     }
 
@@ -1105,6 +1560,47 @@ mod tests {
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.provider_response_id, Some("msg_stream789".to_string()));
         assert_eq!(resp.model, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn streaming_provider_emits_anthropic_text_deltas_and_assembles_final_response() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake =
+            FakeHttpClient::with_response_and_headers(200, &streaming_response_body(), headers);
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Say hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let resp = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("Anthropic streaming should assemble a final response");
+
+        assert_eq!(sink.texts(), vec!["Hello", ", stream!"]);
+        assert_eq!(resp.message.role, simulacra_types::Role::Assistant);
+        assert_eq!(resp.message.content, "Hello, stream!");
+        assert!(resp.message.tool_calls.is_empty());
+        assert_eq!(resp.token_usage.input_tokens, 11);
+        assert_eq!(resp.token_usage.output_tokens, 7);
+        assert_eq!(resp.finish_reason, FinishReason::EndTurn);
+        assert_eq!(resp.provider_response_id, Some("msg_stream789".to_string()));
     }
 
     /// S007: Multiple provider backends can be selected by configuration.

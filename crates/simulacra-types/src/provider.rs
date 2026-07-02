@@ -21,6 +21,25 @@ pub enum FinishReason {
     StopSequence,
 }
 
+/// Incremental provider events emitted while a streaming response is assembled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderStreamEvent {
+    /// Assistant-visible text delta.
+    TextDelta { text: String },
+    /// Provider started an extended thinking block.
+    ThinkingStart,
+    /// Provider emitted an extended thinking delta.
+    ThinkingDelta { text: String },
+    /// Provider ended the current extended thinking block.
+    ThinkingEnd,
+}
+
+/// Non-blocking sink for provider streaming events.
+pub trait ProviderStreamSink: Send + Sync + 'static {
+    fn emit(&self, event: ProviderStreamEvent);
+}
+
 /// Errors from provider operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -96,4 +115,100 @@ pub trait Provider: Send + Sync + 'static {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
     >;
+
+    fn as_streaming(&self) -> Option<&dyn StreamingProvider> {
+        None
+    }
+}
+
+/// Optional streaming companion contract for providers that can emit deltas.
+///
+/// Implementations must still return one final assembled `ProviderResponse`.
+pub trait StreamingProvider: Provider {
+    fn chat_stream<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        budget: &'a mut ResourceBudget,
+        sink: &'a dyn ProviderStreamSink,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+    >;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NonStreamingDummyProvider;
+
+    impl Provider for NonStreamingDummyProvider {
+        fn chat<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [ToolDefinition],
+            _budget: &'a mut ResourceBudget,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(ProviderError::Other("not called".into())) })
+        }
+    }
+
+    struct StreamingDummyProvider;
+
+    impl Provider for StreamingDummyProvider {
+        fn chat<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [ToolDefinition],
+            _budget: &'a mut ResourceBudget,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(ProviderError::Other("not called".into())) })
+        }
+
+        fn as_streaming(&self) -> Option<&dyn StreamingProvider> {
+            Some(self)
+        }
+    }
+
+    impl StreamingProvider for StreamingDummyProvider {
+        fn chat_stream<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [ToolDefinition],
+            _budget: &'a mut ResourceBudget,
+            _sink: &'a dyn ProviderStreamSink,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err(ProviderError::Other("not called".into())) })
+        }
+    }
+
+    #[test]
+    fn streaming_provider_contract_is_object_safe_and_optional() {
+        let provider: Box<dyn Provider> = Box::new(NonStreamingDummyProvider);
+        assert!(provider.as_streaming().is_none());
+
+        let streaming_provider: Box<dyn Provider> = Box::new(StreamingDummyProvider);
+        let streaming: &dyn StreamingProvider = streaming_provider
+            .as_streaming()
+            .expect("streaming providers expose the companion trait");
+        let _object_safe: &dyn Provider = streaming;
+    }
 }

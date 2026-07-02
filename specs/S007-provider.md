@@ -9,7 +9,7 @@
 2. Provider implementations handle HTTP, auth, serialization, and retry internally.
 3. Budget is checked before making the API call. If budget is exhausted, return error without calling the API.
 4. `ProviderResponse` includes `message`, `token_usage`, `finish_reason`, and `provider_response_id`.
-5. Streaming responses are delivered via a channel; final `ProviderResponse` is assembled from the stream.
+5. Streaming responses are delivered through the S050 provider streaming contract; final `ProviderResponse` is assembled from the stream.
 6. Provider errors are typed: `RateLimit`, `AuthError`, `BadRequest`, `ServerError`, `BudgetExhausted`.
 
 ## Assertions
@@ -19,6 +19,7 @@
 - [x] Rate limit error is retryable. **Tested in `rate_limit_429_is_retryable_with_retry_after`.**
 - [x] Auth error is not retryable. **Tested in `auth_error_401_is_not_retryable`.**
 - [x] Streaming responses are assembled into final ProviderResponse. **Tested in `streaming_event_stream_is_assembled_into_final_provider_response`. SSE events parsed and assembled into ProviderResponse.**
+- [x] Streaming-capable providers emit text deltas while assembling the final response. **Covered by S050 tests `streaming_provider_emits_openai_text_deltas_and_assembles_final_response` and `streaming_provider_emits_anthropic_text_deltas_and_assembles_final_response`.**
 - [x] Provider trait is object-safe (`Box<dyn Provider>`). **Tested in `provider_trait_is_object_safe` but not listed as spec assertion — adding.**
 - [x] `ServerError` is retryable. **Tested via `Overloaded` (529) but no explicit 500 test.**
 - [x] `BadRequest` is not retryable. **Tested in `bad_request_400_is_not_retryable`.**
