@@ -177,6 +177,7 @@ pub fn api_schema() -> Value {
                 {"name": "agent.child_spawned"},
                 {"name": "agent.child_finished"},
                 {"name": "tool.called"},
+                {"name": "tool.call_delta"},
                 {"name": "tool.output"},
                 {"name": "tool.result"},
                 {"name": "tool.approval_required"},

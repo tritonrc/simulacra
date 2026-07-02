@@ -129,6 +129,7 @@ Terminal states (`completed`, `failed`, `killed`, `cancelled`) are final. No tra
 | `agent.thinking` | `{ task_id, content? }` | Agent reasoning (streaming) |
 | `agent.message` | `{ task_id, content, role }` | Agent text output |
 | `tool.called` | `{ task_id, tool_call_id, tool_name, arguments }` | Tool invocation started |
+| `tool.call_delta` | `{ task_id, index, tool_call_id?, tool_name?, arguments_delta }` | Tool-call input streamed before invocation starts |
 | `tool.result` | `{ task_id, tool_call_id, result, duration_ms }` | Tool invocation completed |
 | `tool.approval_required` | `{ task_id, tool_call_id, tool_name, arguments, reason }` | Tool needs human approval |
 | `input.required` | `{ task_id, prompt, schema? }` | Agent needs user input |

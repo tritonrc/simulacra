@@ -32,6 +32,7 @@ impl AgentLoop {
             journal_write_failures: AtomicU32::new(0),
             vfs: None,
             cancellation: None,
+            hitl: None,
         }
     }
 
@@ -63,6 +64,7 @@ impl AgentLoop {
             journal_write_failures: AtomicU32::new(0),
             vfs: None,
             cancellation: None,
+            hitl: None,
         }
     }
 
@@ -105,6 +107,11 @@ impl AgentLoop {
     /// Attach the runtime cancellation token observed by provider/tool dispatch.
     pub fn set_cancellation_token(&mut self, cancellation: crate::CancellationToken) {
         self.cancellation = Some(cancellation);
+    }
+
+    /// Attach human-in-the-loop channels used by server-launched resumable waits.
+    pub fn set_hitl_runtime(&mut self, hitl: AgentHitlRuntime) {
+        self.hitl = Some(hitl);
     }
 
     /// Read-only access to the current budget state.

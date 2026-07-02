@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Consumers (CLI renderer, SSE server) subscribe to these events to display
 /// activity blocks showing what the agent is doing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ActivityEvent {
     /// LLM token arrived (streaming response text).
@@ -37,8 +37,32 @@ pub enum ActivityEvent {
         arguments: serde_json::Value,
     },
 
+    /// A tool call is waiting for human approval before execution starts.
+    ToolApprovalRequired {
+        tool_call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+        reason: Option<String>,
+    },
+
+    /// A provider streamed part of a tool-call argument payload.
+    ///
+    /// Display-only; the actual tool execution starts at `ToolStart`.
+    ToolCallDelta {
+        index: u64,
+        tool_call_id: Option<String>,
+        name: Option<String>,
+        arguments_delta: String,
+    },
+
     /// A line of output from a running tool (e.g. shell stdout/stderr).
     ToolOutput { tool_call_id: String, line: String },
+
+    /// The agent is waiting for user-provided input.
+    InputRequired {
+        prompt: String,
+        schema: Option<serde_json::Value>,
+    },
 
     /// A tool call has finished.
     ToolFinish {

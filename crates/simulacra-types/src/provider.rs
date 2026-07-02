@@ -27,6 +27,13 @@ pub enum FinishReason {
 pub enum ProviderStreamEvent {
     /// Assistant-visible text delta.
     TextDelta { text: String },
+    /// Provider streamed part of a tool-call argument payload.
+    ToolCallDelta {
+        index: u64,
+        tool_call_id: Option<String>,
+        name: Option<String>,
+        arguments_delta: String,
+    },
     /// Provider started an extended thinking block.
     ThinkingStart,
     /// Provider emitted an extended thinking delta.

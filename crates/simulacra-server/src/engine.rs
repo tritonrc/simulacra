@@ -19,8 +19,9 @@ use simulacra_context::ObservationMaskingStrategy;
 use simulacra_memory::{Embedder, HitIdCache, MemoryStore, VectorIndex};
 use simulacra_provider::{AnthropicProvider, OpenAiProvider};
 use simulacra_runtime::{
-    ActivitySink, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, AgentTaskFactory,
-    CountingJournalStorage, InMemoryJournalStorage, SpawnAgentTool,
+    ActivitySink, AgentHitlRuntime, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor,
+    AgentTaskFactory, CountingJournalStorage, InMemoryJournalStorage, RequestInputTool,
+    SpawnAgentTool,
 };
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
 use simulacra_tool::{MemoryToolHandles, ToolRegistry, register_memory_tools};
@@ -209,11 +210,43 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "tool_name": name,
             "arguments": arguments,
         }),
+        ActivityEvent::ToolApprovalRequired {
+            tool_call_id,
+            name,
+            arguments,
+            reason,
+        } => json!({
+            "event": "tool.approval_required",
+            "task_id": task_id,
+            "tool_call_id": tool_call_id,
+            "tool_name": name,
+            "arguments": arguments,
+            "reason": reason,
+        }),
+        ActivityEvent::ToolCallDelta {
+            index,
+            tool_call_id,
+            name,
+            arguments_delta,
+        } => json!({
+            "event": "tool.call_delta",
+            "task_id": task_id,
+            "index": index,
+            "tool_call_id": tool_call_id,
+            "tool_name": name,
+            "arguments_delta": arguments_delta,
+        }),
         ActivityEvent::ToolOutput { tool_call_id, line } => json!({
             "event": "tool.output",
             "task_id": task_id,
             "tool_call_id": tool_call_id,
             "line": line,
+        }),
+        ActivityEvent::InputRequired { prompt, schema } => json!({
+            "event": "input.required",
+            "task_id": task_id,
+            "prompt": prompt,
+            "schema": schema,
         }),
         ActivityEvent::ToolFinish {
             tool_call_id,
@@ -311,6 +344,8 @@ pub struct EngineActivitySink {
     sender: crate::task::TaskEventChannel,
     /// Monotonic sequence counter for this task's events.
     seq: AtomicU64,
+    /// Optional task manager used to transition HITL activity into waiting states.
+    task_manager: Option<TaskManager>,
 }
 
 impl EngineActivitySink {
@@ -320,12 +355,52 @@ impl EngineActivitySink {
             task_id,
             sender,
             seq: AtomicU64::new(0),
+            task_manager: None,
+        }
+    }
+
+    /// Create a sink that also mirrors HITL events into TaskManager state.
+    pub fn with_task_manager(
+        task_id: String,
+        sender: crate::task::TaskEventChannel,
+        task_manager: TaskManager,
+    ) -> Self {
+        Self {
+            task_id,
+            sender,
+            seq: AtomicU64::new(0),
+            task_manager: Some(task_manager),
+        }
+    }
+
+    fn transition_for_hitl_event(&self, event: &ActivityEvent) {
+        let Some(task_manager) = &self.task_manager else {
+            return;
+        };
+        let result = match event {
+            ActivityEvent::InputRequired { .. } => task_manager.request_input(&self.task_id),
+            ActivityEvent::ToolApprovalRequired { tool_call_id, .. } => {
+                task_manager.request_approval_for(&self.task_id, Some(tool_call_id.clone()))
+            }
+            _ => return,
+        };
+        if let Err(err) = result {
+            tracing::warn!(
+                task_id = %self.task_id,
+                error = %err,
+                "failed to transition task for HITL activity event"
+            );
         }
     }
 }
 
 impl simulacra_runtime::ActivitySink for EngineActivitySink {
     fn emit(&self, event: ActivityEvent) {
+        // Move HITL tasks into their waiting state before broadcasting the
+        // actionable event. Otherwise a fast client can receive the event and
+        // send input/approval before TaskManager accepts the response.
+        self.transition_for_hitl_event(&event);
+
         let events = flatten_activity_event(&self.task_id, &event);
         for mut server_event in events {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
@@ -871,6 +946,15 @@ impl SimulacraEngine {
         let agent_type_name = agent_type_override
             .map(str::to_owned)
             .unwrap_or_else(|| tenant.agent_type.clone());
+        let enable_human_input = metadata
+            .get("enable_human_input")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let require_tool_approval = metadata
+            .get("require_tool_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let hitl_enabled = enable_human_input || require_tool_approval;
 
         // Resolve tenant from catalog.
         let tenant_row = self
@@ -954,10 +1038,22 @@ impl SimulacraEngine {
             return Err(e);
         }
 
-        let sink = Arc::new(EngineActivitySink::new(task_id.clone(), sender));
+        let sink = Arc::new(EngineActivitySink::with_task_manager(
+            task_id.clone(),
+            sender,
+            task_manager.clone(),
+        ));
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let _ = task_manager.set_cancellation_token(&task_id, cancel_token.clone());
+
+        let hitl_runtime = if hitl_enabled {
+            let (senders, runtime) = AgentHitlRuntime::channel_pair(require_tool_approval);
+            task_manager.set_hitl_senders(&task_id, senders.input_tx, senders.approval_tx)?;
+            Some(runtime)
+        } else {
+            None
+        };
 
         let system_prompt = resolved.system_prompt.clone();
 
@@ -1174,6 +1270,7 @@ impl SimulacraEngine {
         let embedder_opt = self.embedder.as_ref().map(Arc::clone);
         let hit_cache = Arc::clone(&self.hit_cache);
         let hook_pipeline = Arc::clone(&self.hook_pipeline);
+        let hitl_runtime_for_worker = hitl_runtime.clone();
         // S043 — clone the optional provider factory into the worker closure.
         // `None` in production; `Some(...)` only when a test installed an
         // override via `with_provider_factory`.
@@ -1348,6 +1445,17 @@ impl SimulacraEngine {
                 let mut registry = ToolRegistry::new();
                 simulacra_tool::register_builtins(&mut registry, Arc::clone(&cell))
                     .map_err(|e| format!("failed to register built-in tools: {e}"))?;
+
+                if enable_human_input
+                    && let Some(hitl_runtime) = hitl_runtime_for_worker.as_ref()
+                {
+                    registry
+                        .register(Box::new(RequestInputTool::new(
+                            hitl_runtime.clone(),
+                            Arc::clone(&sink) as Arc<dyn ActivitySink>,
+                        )))
+                        .map_err(|e| format!("failed to register request_input tool: {e}"))?;
+                }
 
                 // 7a. Register py_exec when the `python` Cargo feature is
                 // compiled in. Capability gating (`capability_token.python`)
@@ -1585,6 +1693,9 @@ impl SimulacraEngine {
                     None, // no hook pipeline for now
                 );
                 agent_loop.set_proc_budget_mirror(Arc::clone(&budget_arc), Arc::clone(&proc_turn));
+                if let Some(hitl_runtime) = hitl_runtime_for_worker {
+                    agent_loop.set_hitl_runtime(hitl_runtime);
+                }
 
                 // 11. Run the agent with cancellation support
                 let result = tokio::select! {

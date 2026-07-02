@@ -1,7 +1,7 @@
 # S050 — Agent Streaming Runtime
 
 **Status:** Active
-**Crates involved:** `simulacra-types`, `simulacra-provider`, `simulacra-runtime`
+**Crates involved:** `simulacra-types`, `simulacra-provider`, `simulacra-runtime`, `simulacra-server`, `simulacra-frontend`
 
 ## Context
 
@@ -40,6 +40,16 @@ successful provider call.
    assistant text to conversation state.
 10. OpenAI and Anthropic providers use their real HTTP streaming path for
     streaming-capable calls, while preserving buffered `chat` behavior.
+11. Streaming tool-call argument chunks emit observational tool-call delta
+    events as they arrive. These deltas are not journaled and do not mean the
+    tool has started executing.
+12. `ToolStart` remains the execution boundary and is emitted only after the
+    final provider response contains a complete `ToolCallMessage`.
+13. Tool-call deltas carry the provider tool-call `index`, optional
+    `tool_call_id`, optional `name`, and an `arguments_delta` string.
+14. OpenAI emits tool-call deltas from `delta.tool_calls[*]` metadata and
+    argument chunks. Anthropic emits tool-call deltas from `tool_use` block
+    metadata and `input_json_delta.partial_json` chunks.
 
 ## Assertions
 
@@ -66,9 +76,26 @@ successful provider call.
 - [x] Anthropic SSE text deltas are emitted in order while final response
   assembly remains correct. **Tested by
   `streaming_provider_emits_anthropic_text_deltas_and_assembles_final_response`.**
+- [x] OpenAI SSE tool-call argument deltas are emitted in stream order while
+  final `ToolCallMessage` assembly remains correct. **Tested by
+  `streaming_provider_emits_openai_tool_call_deltas_and_assembles_final_response`.**
+- [x] Anthropic SSE tool-call argument deltas are emitted in stream order while
+  final `ToolCallMessage` assembly remains correct. **Tested by
+  `streaming_provider_emits_anthropic_tool_call_deltas_and_assembles_final_response`.**
+- [x] Runtime maps provider tool-call deltas to `ActivityEvent::ToolCallDelta`
+  without journaling partial tool-call state. **Tested by
+  `provider_tool_call_deltas_map_to_activity_events_without_partial_journal_entries`.**
+- [x] Replay does not emit tool-call deltas because replay consumes recorded
+  final responses only. **Tested by `replay_does_not_emit_tool_call_deltas`.**
+- [x] Cancellation during a provider stream may expose already-emitted deltas
+  but does not journal or append partial tool-call state. **Tested by
+  `cancellation_after_tool_call_delta_does_not_journal_or_append_partial_tool_state`.**
+- [x] Server SSE maps runtime tool-call deltas to `tool.call_delta`. **Tested by
+  `tool_call_delta_events_translate_to_tool_call_delta_with_optional_metadata_and_seq`.**
+- [x] Frontend task streams merge `tool.call_delta` events into the matching
+  in-progress tool block and replace them with the final `tool.called` block.
+  **Tested by `agent-run.test.mjs`.**
 
 ## Out of Scope
 
-- Tool-call argument delta activity events.
-- Server-side SSE fan-out of `ActivityEvent`.
 - Persistent provider stream sessions or `write_stdin`-style interaction.

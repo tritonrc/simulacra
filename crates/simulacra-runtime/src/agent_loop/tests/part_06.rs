@@ -1,6 +1,6 @@
 struct StreamingFakeProvider {
     response: ProviderResponse,
-    chunks: Vec<String>,
+    events: Vec<simulacra_types::ProviderStreamEvent>,
     block_after_chunks: bool,
     chat_calls: Arc<std::sync::atomic::AtomicUsize>,
     stream_calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -10,10 +10,36 @@ impl StreamingFakeProvider {
     fn new(response: ProviderResponse, chunks: Vec<&str>) -> Self {
         Self {
             response,
-            chunks: chunks.into_iter().map(str::to_owned).collect(),
+            events: chunks
+                .into_iter()
+                .map(|text| simulacra_types::ProviderStreamEvent::TextDelta { text: text.into() })
+                .collect(),
             block_after_chunks: false,
             chat_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn with_events(
+        response: ProviderResponse,
+        events: Vec<simulacra_types::ProviderStreamEvent>,
+    ) -> Self {
+        Self {
+            response,
+            events,
+            block_after_chunks: false,
+            chat_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn blocking_with_events(
+        response: ProviderResponse,
+        events: Vec<simulacra_types::ProviderStreamEvent>,
+    ) -> Self {
+        Self {
+            block_after_chunks: true,
+            ..Self::with_events(response, events)
         }
     }
 
@@ -58,11 +84,11 @@ impl simulacra_types::StreamingProvider for StreamingFakeProvider {
         self.stream_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let response = self.response.clone();
-        let chunks = self.chunks.clone();
+        let events = self.events.clone();
         let block_after_chunks = self.block_after_chunks;
         Box::pin(async move {
-            for chunk in chunks {
-                sink.emit(simulacra_types::ProviderStreamEvent::TextDelta { text: chunk });
+            for event in events {
+                sink.emit(event);
                 tokio::task::yield_now().await;
             }
             if block_after_chunks {
@@ -80,6 +106,14 @@ fn collect_token_texts(events: &[ActivityEvent]) -> Vec<String> {
             ActivityEvent::Token { text } => Some(text.clone()),
             _ => None,
         })
+        .collect()
+}
+
+fn collect_tool_call_deltas(events: &[ActivityEvent]) -> Vec<ActivityEvent> {
+    events
+        .iter()
+        .filter(|event| matches!(event, ActivityEvent::ToolCallDelta { .. }))
+        .cloned()
         .collect()
 }
 
@@ -126,6 +160,76 @@ async fn streaming_provider_tokens_emit_in_order_and_final_response_is_journaled
         .collect();
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0].content, "Hello");
+}
+
+#[tokio::test]
+async fn provider_tool_call_deltas_map_to_activity_events_without_partial_journal_entries() {
+    let provider = StreamingFakeProvider::with_events(
+        text_response("done"),
+        vec![
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index: 0,
+                tool_call_id: Some("call-1".into()),
+                name: Some("file_read".into()),
+                arguments_delta: String::new(),
+            },
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index: 0,
+                tool_call_id: Some("call-1".into()),
+                name: Some("file_read".into()),
+                arguments_delta: "{\"path\":\"/tmp/a\"}".into(),
+            },
+            simulacra_types::ProviderStreamEvent::TextDelta {
+                text: "done".into(),
+            },
+        ],
+    );
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(crate::ChannelActivitySink::new(tx));
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(provider),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+        Some(sink),
+        None,
+    );
+
+    let output = agent.run("stream tool args").await.unwrap();
+    assert_eq!(output.exit_reason, ExitReason::Complete);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        collect_tool_call_deltas(&events),
+        vec![
+            ActivityEvent::ToolCallDelta {
+                index: 0,
+                tool_call_id: Some("call-1".into()),
+                name: Some("file_read".into()),
+                arguments_delta: String::new(),
+            },
+            ActivityEvent::ToolCallDelta {
+                index: 0,
+                tool_call_id: Some("call-1".into()),
+                name: Some("file_read".into()),
+                arguments_delta: "{\"path\":\"/tmp/a\"}".into(),
+            },
+        ]
+    );
+
+    let entries = journal.read_all(&AgentId("test-agent".into())).unwrap();
+    assert!(entries
+        .iter()
+        .any(|entry| matches!(entry.entry, JournalEntryKind::LlmResponse { .. })));
+    assert!(entries
+        .iter()
+        .all(|entry| !matches!(entry.entry, JournalEntryKind::ToolCall { .. })));
 }
 
 #[tokio::test]
@@ -219,6 +323,70 @@ async fn replay_uses_recorded_response_without_streaming_provider_call() {
 }
 
 #[tokio::test]
+async fn replay_does_not_emit_tool_call_deltas() {
+    let provider = StreamingFakeProvider::with_events(
+        text_response("live"),
+        vec![simulacra_types::ProviderStreamEvent::ToolCallDelta {
+            index: 0,
+            tool_call_id: Some("live-call".into()),
+            name: Some("file_read".into()),
+            arguments_delta: "{\"path\":\"/live\"}".into(),
+        }],
+    );
+    let recorded = text_response("recorded");
+    let replay_entries = vec![
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 2,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 2,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 3,
+            entry: JournalEntryKind::LlmResponse {
+                model: recorded.model.clone(),
+                token_usage: recorded.token_usage.clone(),
+                finish_reason: format!("{:?}", recorded.finish_reason),
+                assistant_message: Some(recorded.message.clone()),
+            },
+        },
+    ];
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(crate::ChannelActivitySink::new(tx));
+    let mut agent = AgentLoop::with_clock_and_replay(
+        default_config(),
+        Box::new(provider),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        default_budget(),
+        Box::new(SystemClock),
+        Some(replay_entries),
+    );
+    agent.sink = sink;
+
+    let output = agent.run("replay").await.unwrap();
+    assert_eq!(output.exit_reason, ExitReason::Complete);
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(collect_tool_call_deltas(&events).is_empty());
+}
+
+#[tokio::test]
 async fn cancellation_during_provider_stream_discards_partial_assistant_text() {
     let provider = StreamingFakeProvider::blocking(text_response("partial final"), vec!["partial"]);
     let token = crate::CancellationToken::new(std::time::Duration::from_millis(50));
@@ -272,4 +440,68 @@ async fn cancellation_during_provider_stream_discards_partial_assistant_text() {
     assert!(entries
         .iter()
         .all(|entry| !matches!(entry.entry, JournalEntryKind::LlmResponse { .. })));
+}
+
+#[tokio::test]
+async fn cancellation_after_tool_call_delta_does_not_journal_or_append_partial_tool_state() {
+    let provider = StreamingFakeProvider::blocking_with_events(
+        text_response("partial final"),
+        vec![simulacra_types::ProviderStreamEvent::ToolCallDelta {
+            index: 0,
+            tool_call_id: Some("call-partial".into()),
+            name: Some("file_read".into()),
+            arguments_delta: "{\"path\":\"/partial\"}".into(),
+        }],
+    );
+    let token = crate::CancellationToken::new(std::time::Duration::from_millis(50));
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(crate::ChannelActivitySink::new(tx));
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(provider),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+        Some(sink),
+        None,
+    );
+    agent.set_cancellation_token(token.clone());
+
+    let run = agent.run("cancel stream after tool delta");
+    tokio::pin!(run);
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                if matches!(event, Some(ActivityEvent::ToolCallDelta { ref tool_call_id, .. }) if tool_call_id.as_deref() == Some("call-partial")) {
+                    break;
+                }
+            }
+            result = &mut run => {
+                panic!("stream completed before cancellation could be signalled: {result:?}");
+            }
+        }
+    }
+
+    token.signal();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+        .await
+        .expect("stream cancellation should finish promptly")
+        .unwrap();
+
+    assert_eq!(output.exit_reason, ExitReason::Cancelled);
+    assert!(output
+        .messages
+        .iter()
+        .all(|message| message.tool_calls.is_empty()));
+
+    let entries = journal.read_all(&AgentId("test-agent".into())).unwrap();
+    assert!(entries
+        .iter()
+        .all(|entry| !matches!(entry.entry, JournalEntryKind::LlmResponse { .. })));
+    assert!(entries
+        .iter()
+        .all(|entry| !matches!(entry.entry, JournalEntryKind::ToolCall { .. })));
 }
