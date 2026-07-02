@@ -153,6 +153,8 @@ impl AgentLoop {
                 | JournalEntryKind::SubAgentSpawned { .. }
                 | JournalEntryKind::SubAgentCompleted { .. }
                 | JournalEntryKind::FileWrite { .. }
+                | JournalEntryKind::FileDelete { .. }
+                | JournalEntryKind::FileMove { .. }
                 | JournalEntryKind::HttpRequest { .. }
                 | JournalEntryKind::Checkpoint { .. }
                 | JournalEntryKind::HookDenial { .. }

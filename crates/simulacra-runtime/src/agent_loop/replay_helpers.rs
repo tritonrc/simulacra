@@ -13,6 +13,8 @@ pub(super) fn entry_kind_name(kind: &JournalEntryKind) -> &'static str {
         JournalEntryKind::SubAgentSpawned { .. } => "SubAgentSpawned",
         JournalEntryKind::SubAgentCompleted { .. } => "SubAgentCompleted",
         JournalEntryKind::FileWrite { .. } => "FileWrite",
+        JournalEntryKind::FileDelete { .. } => "FileDelete",
+        JournalEntryKind::FileMove { .. } => "FileMove",
         JournalEntryKind::HttpRequest { .. } => "HttpRequest",
         JournalEntryKind::Checkpoint { .. } => "Checkpoint",
         JournalEntryKind::HookDenial { .. } => "HookDenial",

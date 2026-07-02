@@ -184,7 +184,7 @@ async fn reconnection_preserves_transport_mode() {
         .expect("connect should succeed");
 
     // Trigger initial handshake via list_tools.
-    let tools = list_tools_with_retry(&mut manager).await;
+    let tools = manager.list_tools().await;
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "reconnect_tool");
 
@@ -331,4 +331,3 @@ async fn session_expiry_has_no_backoff_delay() {
         server.initialize_count()
     );
 }
-

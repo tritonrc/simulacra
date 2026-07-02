@@ -7,14 +7,11 @@ pub(super) async fn execute_tool_live(
     capability: &CapabilityToken,
     agent_name: &str,
 ) -> (String, bool) {
-    let result = tools.call(&tc.name, tc.arguments.clone(), capability).await;
+    let result = tools
+        .call_output(&tc.name, tc.arguments.clone(), capability)
+        .await;
     match result {
-        Ok(val) => {
-            // If the tool returned JSON with an "error" field, treat it as
-            // an error so the agent loop surfaces it with the ERROR: prefix.
-            let is_error = val.is_object() && val.get("error").is_some();
-            (val.to_string(), is_error)
-        }
+        Ok(output) => (output.content, output.is_error),
         Err(ref e @ simulacra_types::ToolError::CapabilityDenied(ref denied)) => {
             tracing::warn!(
                 simulacra.capability.operation = %denied.operation,

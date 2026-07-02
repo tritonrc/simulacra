@@ -1346,7 +1346,8 @@ impl SimulacraEngine {
 
                 // 7. Build ToolRegistry
                 let mut registry = ToolRegistry::new();
-                simulacra_tool::register_builtins(&mut registry, Arc::clone(&cell));
+                simulacra_tool::register_builtins(&mut registry, Arc::clone(&cell))
+                    .map_err(|e| format!("failed to register built-in tools: {e}"))?;
 
                 // 7a. Register py_exec when the `python` Cargo feature is
                 // compiled in. Capability gating (`capability_token.python`)
@@ -1355,9 +1356,11 @@ impl SimulacraEngine {
                 // a clean denial at invocation time rather than a phantom
                 // missing-tool error.
                 #[cfg(feature = "python")]
-                registry.register(Box::new(simulacra_python::PyExecTool::new(Arc::clone(
-                    &cell,
-                ))));
+                registry
+                    .register(Box::new(simulacra_python::PyExecTool::new(Arc::clone(
+                        &cell,
+                    ))))
+                    .map_err(|e| format!("failed to register Python tool: {e}"))?;
 
                 // 7b. Conditionally register memory tools (S037 §11). Opt-in
                 // per agent type via capability_token.memory.enabled. Even
@@ -1388,7 +1391,8 @@ impl SimulacraEngine {
                             rrwb: Some(Arc::clone(&rrwb)),
                             hook_pipeline: Some(Arc::clone(&hook_pipeline)),
                         },
-                    );
+                    )
+                    .map_err(|e| format!("failed to register memory tools: {e}"))?;
                 }
 
                 if let Some(ref mcp_config) = config_for_worker.mcp {
@@ -1448,7 +1452,9 @@ impl SimulacraEngine {
                                 tool.tool_name(),
                             )
                         }) {
-                            registry.register(Box::new(tool));
+                            registry
+                                .register(Box::new(tool))
+                                .map_err(|e| format!("failed to register MCP tool: {e}"))?;
                         }
                     }
                 }
@@ -1460,15 +1466,17 @@ impl SimulacraEngine {
                     let spawn_sink: Arc<dyn ActivitySink> =
                         Arc::clone(&sink) as Arc<dyn ActivitySink>;
                     let spawn_tx_clone = spawn_tx.clone();
-                    registry.register(Box::new(SpawnAgentTool {
-                        sender: spawn_tx,
-                        can_spawn: capability_token.spawn_types.clone(),
-                        activity_sink: spawn_sink,
-                        parent_id: AgentId(task_id.clone()),
-                        tiers: config_for_worker.tiers.clone(),
-                        parent_budget: Arc::clone(&budget_arc),
-                        parent_model: model_clone.clone(),
-                    }));
+                    registry
+                        .register(Box::new(SpawnAgentTool {
+                            sender: spawn_tx,
+                            can_spawn: capability_token.spawn_types.clone(),
+                            activity_sink: spawn_sink,
+                            parent_id: AgentId(task_id.clone()),
+                            tiers: config_for_worker.tiers.clone(),
+                            parent_budget: Arc::clone(&budget_arc),
+                            parent_model: model_clone.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register spawn_agent tool: {e}"))?;
                     spawn_rx = Some(rx);
                     supervisor_tx_for_factory = Some(spawn_tx_clone);
                 }
@@ -1494,7 +1502,7 @@ impl SimulacraEngine {
                                 |registry: &mut simulacra_tool::ToolRegistry,
                                  cell: Arc<AgentCell>| {
                                     registry
-                                        .register(Box::new(simulacra_python::PyExecTool::new(cell)));
+                                        .register(Box::new(simulacra_python::PyExecTool::new(cell)))
                                 },
                             ))
                         }

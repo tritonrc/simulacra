@@ -19,23 +19,12 @@ fn tool_registry_definitions_after_register_builtins_have_correct_names_and_desc
             "Write content to a file, creating parent directories as needed.",
         ),
         (
-            "file_edit",
-            "Apply a search-and-replace edit to an existing file.",
+            "apply_patch",
+            "Apply a Simulacra-style patch to the VFS.",
         ),
         (
             "shell_exec",
-            "Execute a shell command in the agent's virtual shell and return \
-                stdout, stderr, and exit code. \
-                Supported builtins: echo, cat, ls, mkdir, cp, mv, rm, head, tail, sed, grep, \
-                wc, find, sort, uniq, cut, tr, tee, true, false, cd, pwd, env, which, export, \
-                curl, wget. \
-                Operators: pipes (|), redirects (>, >>), conditional chains (&&, ||), \
-                sequence (;). State that persists across calls: env vars and the working \
-                directory (cd /tmp; later calls see /tmp as cwd). Interpreter aliases: \
-                node <file.js>, node -e <code>, node - for stdin, python <script.py>, \
-                python -c <code>, and python - for stdin run through mediated sandbox \
-                runtimes. All paths resolve inside the agent's sandbox VFS — there is no \
-                host filesystem access.",
+            "Execute a shell command in the sandbox shell and return structured output.",
         ),
         (
             "js_exec",
@@ -61,7 +50,7 @@ fn each_tool_definition_has_a_valid_json_schema_as_input_schema() {
     let expected_required = [
         ("file_read", vec!["path"]),
         ("file_write", vec!["path", "content"]),
-        ("file_edit", vec!["path", "old_string", "new_string"]),
+        ("apply_patch", vec!["patch"]),
         ("shell_exec", vec!["command"]),
         ("js_exec", vec!["code"]),
         ("list_dir", vec!["path"]),
@@ -87,5 +76,39 @@ fn each_tool_definition_has_a_valid_json_schema_as_input_schema() {
             .filter_map(Value::as_str)
             .collect::<Vec<_>>();
         assert_eq!(required, required_fields);
+    }
+}
+
+#[test]
+fn file_edit_is_not_registered_and_returns_unknown_tool_behavior() {
+    let capability = full_capability();
+    let harness = Harness::new(capability.clone(), unlimited_budget());
+
+    assert!(
+        !harness
+            .registry
+            .definitions()
+            .iter()
+            .any(|definition| definition.name == "file_edit"),
+        "file_edit must not be exposed in S012 builtins"
+    );
+
+    match call_tool(
+        &harness,
+        "file_edit",
+        json!({
+            "path": "/workspace/edit.txt",
+            "old_string": "old",
+            "new_string": "new"
+        }),
+        &capability,
+    ) {
+        Err(ToolError::ExecutionFailed(message)) => {
+            assert!(
+                message.contains("unknown tool") && message.contains("file_edit"),
+                "unknown-tool error should name file_edit, got {message:?}"
+            );
+        }
+        other => panic!("expected unknown-tool behavior for file_edit, got {other:?}"),
     }
 }

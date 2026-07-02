@@ -106,7 +106,8 @@ impl Harness {
             http_client,
         ));
         let mut registry = ToolRegistry::new();
-        register_builtins(&mut registry, Arc::clone(&cell));
+        register_builtins(&mut registry, Arc::clone(&cell))
+            .expect("built-in registration should succeed");
 
         Self {
             registry,
@@ -170,4 +171,3 @@ fn assert_invalid_arguments(result: Result<Value, ToolError>) {
         other => panic!("expected invalid arguments error, got {other:?}"),
     }
 }
-

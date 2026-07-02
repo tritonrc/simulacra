@@ -153,6 +153,7 @@ fn capture_store() -> (
             tracing_subscriber::registry::Registry::default().with(CaptureLayer { spans, events });
         tracing::subscriber::set_global_default(subscriber)
             .expect("global tracing subscriber should install");
+        tracing::callsite::rebuild_interest_cache();
     });
 
     (
@@ -186,6 +187,7 @@ async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
 
 fn capture_traces<T>(operation: impl FnOnce() -> T) -> (T, Vec<CapturedSpan>, Vec<CapturedEvent>) {
     let _guard = blocking_test_guard();
+    tracing::callsite::rebuild_interest_cache();
     let (spans, events) = capture_store();
     spans
         .lock()
@@ -197,6 +199,7 @@ fn capture_traces<T>(operation: impl FnOnce() -> T) -> (T, Vec<CapturedSpan>, Ve
         .clear();
 
     let result = operation();
+    tracing::callsite::rebuild_interest_cache();
     let captured_spans = spans
         .lock()
         .expect("span capture mutex should not be poisoned")
@@ -225,4 +228,3 @@ where
         .expect("test runtime should build")
         .block_on(future)
 }
-

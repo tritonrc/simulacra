@@ -346,13 +346,23 @@ impl tracing::field::Visit for FieldVisitor<'_> {
 }
 
 fn capture_trace<T>(f: impl FnOnce() -> T) -> (T, Vec<CapturedSpan>, Vec<CapturedEvent>) {
+    static TRACING_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _capture_guard = TRACING_CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
     let spans = Arc::new(Mutex::new(Vec::new()));
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry::Registry::default().with(CaptureLayer {
         spans: Arc::clone(&spans),
         events: Arc::clone(&events),
     });
-    let result = tracing::subscriber::with_default(subscriber, f);
+    let result = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let result = f();
+        tracing::callsite::rebuild_interest_cache();
+        result
+    });
     let spans = spans.lock().unwrap().clone();
     let events = events.lock().unwrap().clone();
     (result, spans, events)
@@ -425,4 +435,3 @@ impl ContextStrategy for PassthroughContext {
         messages.to_vec()
     }
 }
-

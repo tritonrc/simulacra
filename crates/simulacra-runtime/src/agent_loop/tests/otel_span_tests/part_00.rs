@@ -1,5 +1,5 @@
     use super::*;
-    use std::sync::Mutex as StdMutex;
+    use std::sync::{Mutex as StdMutex, OnceLock};
     use tracing_subscriber::layer::SubscriberExt;
 
     #[derive(Debug, Clone)]
@@ -118,6 +118,25 @@
         };
         let subscriber = tracing_subscriber::registry::Registry::default().with(layer);
         (subscriber, spans, events)
+    }
+
+    async fn install_capture<S>(
+        subscriber: S,
+    ) -> (
+        tokio::sync::MutexGuard<'static, ()>,
+        tracing::dispatcher::DefaultGuard,
+    )
+    where
+        S: tracing::Subscriber + Send + Sync + 'static,
+    {
+        static TRACING_CAPTURE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        let capture_guard = TRACING_CAPTURE_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let default_guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        (capture_guard, default_guard)
     }
 
     // S010 Assertion: Agent spans use invoke_agent operation name

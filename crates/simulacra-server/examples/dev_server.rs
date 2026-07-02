@@ -273,7 +273,7 @@ async fn seed_default_tenant_and_agent(
     // table — `py:exec`, `fs:read`, `fs:write`, etc. — is silently dropped
     // and gives the LLM no real tool, only a name to fight over.
     //
-    // Built-in tools: file_read, file_write, file_edit, list_dir (always on,
+    // Built-in tools: file_read, file_write, apply_patch, list_dir (always on,
     // gated by paths_read/paths_write patterns, default `/**`), shell_exec
     // (gated by `shell:exec`), js_exec (gated by `javascript`), py_exec
     // (gated by `python`; only registered when the `python` Cargo feature is
@@ -282,7 +282,7 @@ async fn seed_default_tenant_and_agent(
     let skill_ids: [simulacra_catalog::SkillId; 0] = [];
     let channel_ids: [simulacra_catalog::ChannelId; 0] = [];
     let system_prompt = "You are a demo agent running inside the Simulacra runtime. \
-        Your available tools are: file_read, file_write, file_edit, list_dir, \
+        Your available tools are: file_read, file_write, apply_patch, list_dir, \
         shell_exec, js_exec (JavaScript via QuickJS), and py_exec (Python via \
         the Monty runtime). \
         shell_exec runs against a virtual POSIX shell that supports: \

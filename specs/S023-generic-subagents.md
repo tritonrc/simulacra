@@ -54,7 +54,7 @@ Full design: `docs/superpowers/specs/2026-03-28-generic-subagents-design.md`
 - [x] Generic agent with no `capabilities` override inherits the parent's full capability token.
 - [x] Generic agent with a `capabilities` override gets `parent ∩ override` (two-way intersection).
 - [x] Generic agent's `can_spawn` is always empty — it cannot spawn children.
-- [x] Generic agent's tool registry includes all builtin tools (file_read/write/edit, shell_exec, js_exec, list_dir) and excludes `spawn_agent`. **Tested in `generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent`.**
+- [x] Generic agent's tool registry includes all builtin tools (file_read, file_write, apply_patch, shell_exec, js_exec, list_dir) and excludes `spawn_agent`. **Tested in `generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent`.**
 
 ### Tier configuration
 

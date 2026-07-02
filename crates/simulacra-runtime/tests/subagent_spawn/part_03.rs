@@ -218,7 +218,8 @@ fn agent_task_factory_applies_child_cell_and_tool_hooks_before_provider_call() {
                 cell.tenant_integrations == vec!["toy-saas".to_string()],
                 Ordering::SeqCst,
             );
-            registry.register(Box::new(ExtraProbeTool));
+            registry.register(Box::new(ExtraProbeTool))?;
+            Ok(())
         })),
     };
     let spawn = spawn_config("child-hooks-1", "parent-agent", child_budget(32, 1, 0));
@@ -392,9 +393,11 @@ fn child_may_spawn_descendants_only_from_its_own_remaining_budget() {
 fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_run() {
     let live_calls = Arc::new(AtomicUsize::new(0));
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(SummarySpawnTool {
-        live_calls: Arc::clone(&live_calls),
-    }));
+    tools
+        .register(Box::new(SummarySpawnTool {
+            live_calls: Arc::clone(&live_calls),
+        }))
+        .expect("test tool registration should succeed");
     let provider = FakeProvider::new(vec![]);
     let replay = vec![
         replay_entry("parent-agent", JournalEntryKind::TurnStart),
@@ -469,4 +472,3 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
         "replay should not invoke a live child tool call when ToolResult is already journaled"
     );
 }
-

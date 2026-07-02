@@ -122,7 +122,7 @@ fn spawn_recording_http_server(response_body: &str) -> RecordingHttpServer {
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
                     request_count_for_thread.fetch_add(1, Ordering::SeqCst);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
 
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -217,7 +217,7 @@ fn spawn_json_rpc_test_server(tools_list_body: &str, tool_call_body: &str) -> Js
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
 
                     if let Some(request) = read_http_request(&mut stream) {
                         request_count_for_thread.fetch_add(1, Ordering::SeqCst);
@@ -264,4 +264,3 @@ fn spawn_json_rpc_test_server(tools_list_body: &str, tool_call_body: &str) -> Js
         handle: Some(handle),
     }
 }
-

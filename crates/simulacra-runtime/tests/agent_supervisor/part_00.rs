@@ -12,7 +12,7 @@ use simulacra_types::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing_subscriber::layer::SubscriberExt;
@@ -130,6 +130,25 @@ fn setup_capture() -> (
     (subscriber, spans, events)
 }
 
+async fn install_capture<S>(
+    subscriber: S,
+) -> (
+    tokio::sync::MutexGuard<'static, ()>,
+    tracing::dispatcher::DefaultGuard,
+)
+where
+    S: tracing::Subscriber + Send + Sync + 'static,
+{
+    static TRACING_CAPTURE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let capture_guard = TRACING_CAPTURE_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let default_guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
+    (capture_guard, default_guard)
+}
+
 struct FakeProvider {
     responses: Mutex<Vec<ProviderResponse>>,
 }
@@ -237,4 +256,3 @@ fn tool_call_response(tool_name: &str, arguments: serde_json::Value) -> Provider
         model: "test-model".into(),
     }
 }
-

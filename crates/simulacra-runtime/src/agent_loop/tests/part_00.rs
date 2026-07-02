@@ -2,8 +2,8 @@ use super::*;
 use crate::InMemoryJournalStorage;
 use rust_decimal::Decimal;
 use simulacra_types::{
-    FinishReason, JournalEntryKind, ProviderError, ProviderResponse, ToolCallMessage,
-    ToolDefinition,
+    FinishReason, JournalEntryKind, Locator, MemoryCapability, MemoryPath, MemoryVersion,
+    ProviderError, ProviderResponse, TenantId, ToolCallMessage, ToolDefinition,
 };
 use std::sync::Mutex;
 
@@ -105,6 +105,243 @@ impl simulacra_types::Tool for EchoTool {
         >,
     > {
         Box::pin(async move { Ok(arguments) })
+    }
+}
+
+/// A fake tool that returns a legacy JSON object containing an `error` field.
+struct LegacyErrorFieldTool;
+
+impl simulacra_types::Tool for LegacyErrorFieldTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "legacy_error_field".into(),
+            description: "Returns a legacy object with an error field".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn call(
+        &self,
+        _arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { Ok(serde_json::json!({ "error": "legacy failure" })) })
+    }
+}
+
+/// A fake tool that returns the explicit typed output shape.
+struct ExplicitErrorOutputTool;
+
+impl simulacra_types::Tool for ExplicitErrorOutputTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "explicit_error_output".into(),
+            description: "Returns an explicit typed error output".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn call(
+        &self,
+        _arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            Ok(simulacra_types::ToolOutput::error("explicit failure").to_value())
+        })
+    }
+}
+
+/// A fake typed-error tool with a caller-provided name and message.
+struct NamedErrorOutputTool {
+    name: &'static str,
+    content: &'static str,
+}
+
+impl simulacra_types::Tool for NamedErrorOutputTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "Returns an explicit typed error output".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn call(
+        &self,
+        _arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let content = self.content;
+        Box::pin(async move { Ok(simulacra_types::ToolOutput::error(content).to_value()) })
+    }
+}
+
+struct NoopMemoryReceiver;
+
+impl simulacra_memory::MemoryEventReceiver for NoopMemoryReceiver {
+    fn recv<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = simulacra_memory::MemoryRecvOutcome> + Send + 'a>,
+    > {
+        Box::pin(async { simulacra_memory::MemoryRecvOutcome::Closed })
+    }
+
+    fn recv_blocking(&mut self) -> Option<simulacra_memory::MemoryEvent> {
+        None
+    }
+}
+
+struct NoopMemoryStore;
+
+impl simulacra_memory::MemoryStore for NoopMemoryStore {
+    fn put(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+        _data: &[u8],
+    ) -> Result<MemoryVersion, simulacra_memory::MemoryError> {
+        Err(simulacra_memory::MemoryError::Internal(
+            "noop memory store".into(),
+        ))
+    }
+
+    fn get(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+    ) -> Result<(Vec<u8>, MemoryVersion), simulacra_memory::MemoryError> {
+        Err(simulacra_memory::MemoryError::NotFound("noop".into()))
+    }
+
+    fn exists(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+    ) -> Result<bool, simulacra_memory::MemoryError> {
+        Ok(false)
+    }
+
+    fn list_prefix(
+        &self,
+        _tenant: &TenantId,
+        _prefix: &MemoryPath,
+    ) -> Result<Vec<simulacra_memory::MemoryEntry>, simulacra_memory::MemoryError> {
+        Ok(Vec::new())
+    }
+
+    fn current_version(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+    ) -> Result<Option<MemoryVersion>, simulacra_memory::MemoryError> {
+        Ok(None)
+    }
+
+    fn delete(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+    ) -> Result<MemoryVersion, simulacra_memory::MemoryError> {
+        Err(simulacra_memory::MemoryError::NotFound("noop".into()))
+    }
+
+    fn delete_prefix(
+        &self,
+        _tenant: &TenantId,
+        _prefix: &MemoryPath,
+    ) -> Result<u64, simulacra_memory::MemoryError> {
+        Ok(0)
+    }
+
+    fn subscribe(
+        &self,
+    ) -> Result<Box<dyn simulacra_memory::MemoryEventReceiver>, simulacra_memory::MemoryError> {
+        Ok(Box::new(NoopMemoryReceiver))
+    }
+}
+
+struct NoopVectorIndex;
+
+impl simulacra_memory::VectorIndex for NoopVectorIndex {
+    fn upsert(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+        _version: MemoryVersion,
+        _embedder_id: &simulacra_memory::EmbedderId,
+        _chunks: &[simulacra_memory::IndexedChunk],
+    ) -> Result<simulacra_memory::UpsertOutcome, simulacra_memory::MemoryError> {
+        Ok(simulacra_memory::UpsertOutcome::Applied)
+    }
+
+    fn delete_path(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+        _tombstone_version: MemoryVersion,
+    ) -> Result<(), simulacra_memory::MemoryError> {
+        Ok(())
+    }
+
+    fn delete_prefix(
+        &self,
+        _tenant: &TenantId,
+        _prefix: &MemoryPath,
+    ) -> Result<u64, simulacra_memory::MemoryError> {
+        Ok(0)
+    }
+
+    fn search(
+        &self,
+        _tenant: &TenantId,
+        _scope: &MemoryPath,
+        _query_embedding: &[f32],
+        _embedder_id: &simulacra_memory::EmbedderId,
+        _k: usize,
+        _min_cosine: Option<f32>,
+    ) -> Result<Vec<simulacra_memory::SearchHit>, simulacra_memory::MemoryError> {
+        Ok(Vec::new())
+    }
+
+    fn embedder_fingerprint(
+        &self,
+        _tenant: &TenantId,
+    ) -> Result<Option<simulacra_memory::EmbedderId>, simulacra_memory::MemoryError> {
+        Ok(None)
+    }
+
+    fn mark_tenant_stale(&self, _tenant: &TenantId) -> Result<u64, simulacra_memory::MemoryError> {
+        Ok(0)
+    }
+
+    fn get_chunk(
+        &self,
+        _tenant: &TenantId,
+        _path: &MemoryPath,
+        _version: MemoryVersion,
+        _chunk_index: usize,
+    ) -> Result<Option<(Locator, String)>, simulacra_memory::MemoryError> {
+        Ok(None)
     }
 }
 

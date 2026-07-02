@@ -65,7 +65,8 @@ fn build_registry(h: &Harness) -> ToolRegistry {
             rrwb: None,
             hook_pipeline: None,
         },
-    );
+    )
+    .expect("memory tool registration should succeed");
     registry
 }
 
@@ -301,7 +302,8 @@ async fn semantic_search_is_opt_in() {
             rrwb: None,
             hook_pipeline: None,
         },
-    );
+    )
+    .expect("disabled memory registration should succeed as a no-op");
 
     let tool_names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
     assert!(

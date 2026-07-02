@@ -10,7 +10,8 @@ use simulacra_types::{
 use simulacra_vfs::MemoryFs;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::MutexGuard;
 use tracing_subscriber::layer::SubscriberExt;
 
 #[derive(Debug, Default)]
@@ -83,28 +84,35 @@ impl JournalStorage for FakeJournalStorage {
 struct Harness {
     registry: ToolRegistry,
     vfs: Arc<MemoryFs>,
+    journal: Arc<FakeJournalStorage>,
 }
 
 impl Harness {
     fn new(capability: CapabilityToken, budget: ResourceBudget) -> Self {
         let vfs = Arc::new(MemoryFs::new());
         let vfs_dyn: Arc<dyn VirtualFs> = vfs.clone();
-        let journal: Arc<dyn JournalStorage> = Arc::new(FakeJournalStorage::default());
+        let journal = Arc::new(FakeJournalStorage::default());
+        let journal_dyn: Arc<dyn JournalStorage> = journal.clone();
         let http_client: Arc<dyn simulacra_http::HttpClient> =
             Arc::new(simulacra_http::UreqHttpClient::default());
         let cell = Arc::new(AgentCell::new(
             vfs_dyn,
             capability,
             Arc::new(Mutex::new(budget)),
-            journal,
+            journal_dyn,
             http_client,
         ));
         let mut registry = ToolRegistry::new();
-        register_builtins(&mut registry, Arc::clone(&cell));
+        register_builtins(&mut registry, Arc::clone(&cell))
+            .expect("built-in registration should succeed");
 
         let _ = cell;
 
-        Self { registry, vfs }
+        Self {
+            registry,
+            vfs,
+            journal,
+        }
     }
 }
 
@@ -225,14 +233,32 @@ where
         .block_on(future)
 }
 
+fn registry_call_guard() -> MutexGuard<'static, ()> {
+    static REGISTRY_CALL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    REGISTRY_CALL_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
 fn capture_async<R>(operation: impl FnOnce() -> R) -> (R, Vec<CapturedSpan>, Vec<CapturedEvent>) {
+    static TRACING_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = TRACING_CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
     let spans = Arc::new(Mutex::new(Vec::new()));
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry::Registry::default().with(CaptureLayer {
         spans: Arc::clone(&spans),
         events: Arc::clone(&events),
     });
-    let result = tracing::subscriber::with_default(subscriber, operation);
+    let result = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let result = operation();
+        tracing::callsite::rebuild_interest_cache();
+        result
+    });
     let spans = spans.lock().unwrap().clone();
     let events = events.lock().unwrap().clone();
     (result, spans, events)
@@ -262,13 +288,6 @@ fn unlimited_budget() -> ResourceBudget {
     ResourceBudget::new(0, 0, Decimal::ZERO, 0)
 }
 
-fn budget_with_turns_exhausted() -> ResourceBudget {
-    ResourceBudget {
-        used_turns: 1,
-        ..ResourceBudget::new(0, 1, Decimal::ZERO, 0)
-    }
-}
-
 fn budget_with_vfs_bytes_exhausted() -> ResourceBudget {
     ResourceBudget {
         max_vfs_bytes: 1,
@@ -283,7 +302,18 @@ fn call_tool(
     arguments: Value,
     capability: &CapabilityToken,
 ) -> Result<Value, ToolError> {
-    run_async(harness.registry.call(name, arguments, capability))
+    call_registry(&harness.registry, name, arguments, capability)
+}
+
+fn call_registry(
+    registry: &ToolRegistry,
+    name: &str,
+    arguments: Value,
+    capability: &CapabilityToken,
+) -> Result<Value, ToolError> {
+    let _guard = registry_call_guard();
+    tracing::callsite::rebuild_interest_cache();
+    run_async(registry.call(name, arguments, capability))
 }
 
 fn string_result(value: &Value) -> String {
@@ -291,6 +321,18 @@ fn string_result(value: &Value) -> String {
         .as_str()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| value.to_string())
+}
+
+fn tool_content(value: &Value) -> String {
+    value
+        .get("content")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| string_result(value))
+}
+
+fn tool_structured(value: &Value) -> &Value {
+    value.get("structured").unwrap_or(value)
 }
 
 fn assert_error_result_contains(value: &Value, expected_substring: &str) {
@@ -313,4 +355,3 @@ fn assert_invalid_arguments(result: Result<Value, ToolError>) {
         other => panic!("expected invalid arguments error, got {other:?}"),
     }
 }
-

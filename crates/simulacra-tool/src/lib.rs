@@ -15,10 +15,12 @@ pub use error::SkillError;
 pub use memory::{
     MemoryReadChunkTool, MemoryToolHandles, SemanticSearchTool, register_memory_tools,
 };
-pub use registry::ToolRegistry;
+pub use registry::{ToolExposure, ToolMetadata, ToolRegistry};
 #[cfg(feature = "sandbox")]
 pub use sandbox_tools::register_builtins;
-pub use simulacra_types::{CapabilityToken, Tool, ToolDefinition, ToolError};
+pub use simulacra_types::{
+    CapabilityToken, Tool, ToolDefinition, ToolError, ToolOutput, ToolSchema,
+};
 #[cfg(feature = "sandbox")]
 pub use skills::SkillTool;
 pub use skills::{SkillMeta, discover_and_filter_skills, parse_skill_frontmatter};

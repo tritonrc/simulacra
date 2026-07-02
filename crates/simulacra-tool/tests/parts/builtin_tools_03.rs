@@ -11,14 +11,10 @@ fn shell_exec_echo_hello_returns_stdout_stderr_and_exit_code() {
     )
     .expect("shell_exec should succeed");
 
-    assert_eq!(
-        result,
-        json!({
-            "stdout": "hello\n",
-            "stderr": "",
-            "exit_code": 0
-        })
-    );
+    let structured = tool_structured(&result);
+    assert_eq!(structured.get("stdout"), Some(&json!("hello\n")));
+    assert_eq!(structured.get("stderr"), Some(&json!("")));
+    assert_eq!(structured.get("exit_code"), Some(&json!(0)));
 }
 
 #[test]
@@ -34,7 +30,8 @@ fn shell_exec_nonexistent_command_returns_non_zero_exit_code_not_tool_error() {
     )
     .expect("shell_exec should return a normal result even for failed commands");
 
-    let exit_code = result
+    let structured = tool_structured(&result);
+    let exit_code = structured
         .get("exit_code")
         .and_then(Value::as_i64)
         .unwrap_or_default();
@@ -57,7 +54,7 @@ fn js_exec_one_plus_one_returns_the_string_result() {
     let result = call_tool(&harness, "js_exec", json!({ "code": "1 + 1" }), &capability)
         .expect("js_exec should succeed");
 
-    assert_eq!(result, json!("2"));
+    assert_eq!(tool_content(&result), "2");
 }
 
 #[test]
@@ -94,7 +91,7 @@ fn list_dir_root_returns_entries_in_the_root_directory() {
     let result = call_tool(&harness, "list_dir", json!({ "path": "/" }), &capability)
         .expect("list_dir should succeed");
 
-    let listing = string_result(&result);
+    let listing = tool_content(&result);
     assert!(listing.contains("workspace/"));
     assert!(listing.contains("todo.txt"));
 }
@@ -132,7 +129,7 @@ fn directory_entries_are_suffixed_with_slash_in_the_output() {
     )
     .expect("list_dir should succeed");
 
-    let listing = string_result(&result);
+    let listing = tool_content(&result);
     assert!(listing.contains("src/"));
 }
 
@@ -237,4 +234,3 @@ fn vfs_errors_from_agent_cell_surface_as_tool_error_execution_failed_with_path_a
         other => panic!("expected execution failed error, got {other:?}"),
     }
 }
-

@@ -75,7 +75,9 @@ async fn tool_call_then_text_response() {
         text_response("Done!"),
     ]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
 
     let mut agent = build_loop(
         provider,
@@ -130,7 +132,9 @@ async fn max_turns_exits_max_turns() {
         serde_json::json!({"msg": "loop"}),
     )]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
 
     let mut config = default_config();
     config.max_turns = 1;

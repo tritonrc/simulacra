@@ -131,7 +131,9 @@ async fn e2e_full_loop_with_tool_call() {
     let provider = AnthropicProvider::new(api_key(), MODEL);
 
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(GetTimeTool));
+    tools
+        .register(Box::new(GetTimeTool))
+        .expect("test tool registration should succeed");
 
     let mut config = e2e_config();
     config.system_prompt =

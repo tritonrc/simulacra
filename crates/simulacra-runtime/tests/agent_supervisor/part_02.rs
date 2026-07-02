@@ -174,7 +174,7 @@ async fn agent_spawn_produces_create_agent_span_with_agent_name() {
         Arc::new(NoopTaskFactory),
     );
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     supervisor
         .spawn_agent(spawn_config(
             "child-agent",
@@ -208,7 +208,7 @@ async fn agent_invocation_is_wrapped_in_invoke_agent_span() {
     let provider = FakeProvider::new(vec![text_response("done")]);
     let mut agent = build_loop(provider, ToolRegistry::new(), journal, default_budget());
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     let _output = agent.run("say hello").await.expect("run should succeed");
 
     let spans = captured_spans.lock().unwrap();
@@ -233,10 +233,12 @@ async fn simulacra_agent_turns_counter_tracks_turns_per_agent() {
         text_response("done"),
     ]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
     let mut agent = build_loop(provider, tools, journal, default_budget());
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     let _output = agent
         .run("use the echo tool and finish")
         .await
@@ -275,7 +277,7 @@ async fn agent_spawn_is_logged_at_info_with_agent_name_parent_and_capabilities()
         Arc::new(NoopTaskFactory),
     );
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     supervisor
         .spawn_agent(spawn_config(
             "child-agent",
@@ -315,7 +317,7 @@ async fn agent_completion_is_logged_at_info_with_agent_name_exit_reason_and_toke
     let provider = FakeProvider::new(vec![text_response("done")]);
     let mut agent = build_loop(provider, ToolRegistry::new(), journal, default_budget());
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     let output = agent.run("say hello").await.expect("run should succeed");
 
     let events = captured_events.lock().unwrap();
@@ -340,13 +342,13 @@ async fn agent_completion_is_logged_at_info_with_agent_name_exit_reason_and_toke
 }
 
 // S009 O11y Assertion: Agent restart is logged at WARN with agent name, strategy, and failure reason.
-#[test]
-fn agent_restart_is_logged_at_warn_with_agent_name_strategy_and_failure_reason() {
+#[tokio::test]
+async fn agent_restart_is_logged_at_warn_with_agent_name_strategy_and_failure_reason() {
     let (subscriber, _captured_spans, captured_events) = setup_capture();
     let supervisor = AgentSupervisor::new(CapabilityToken::default(), default_budget());
     let agent_id = AgentId("restarting-child".into());
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     assert!(
         supervisor.handle_failure(&agent_id, &RestartStrategy::RetryOnce, "boom"),
         "retry_once should request a restart on the first failure"
@@ -418,13 +420,13 @@ fn retry_twice_then_fail_restarts_at_most_twice() {
 }
 
 // S009 Assertion: let_crash does not restart the child.
-#[test]
-fn let_crash_does_not_restart() {
+#[tokio::test]
+async fn let_crash_does_not_restart() {
     let (subscriber, _captured_spans, captured_events) = setup_capture();
     let supervisor = AgentSupervisor::new(CapabilityToken::default(), default_budget());
     let agent_id = AgentId("let-crash-child".into());
 
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let (_capture_guard, _guard) = install_capture(subscriber).await;
     let should_restart = supervisor.handle_failure(&agent_id, &RestartStrategy::LetCrash, "boom");
 
     assert!(
