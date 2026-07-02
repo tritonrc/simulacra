@@ -143,6 +143,7 @@ The frontmatter `name` is authoritative. Directory names are not the source of t
 
 1. Simulacra discovers skills from two sources at bootstrap:
    - project-local VFS paths under `/skills/**/SKILL.md`;
+   - catalog-authored skills snapshotted by `SimulacraEngine` into `/skills/<name>/SKILL.md`;
    - configured host skill paths that are mounted read-only into the VFS before discovery (see S020 for mount semantics).
 1a. Project-local `/skills` discovery is rooted at the mounted VFS `/skills` directory. Simulacra recursively scans downward from `/skills` for `SKILL.md` files, so grouped paths such as `/skills/<group>/<dir>/SKILL.md` are valid. It MUST NOT walk upward or search for sibling/ancestor `skills/` directories elsewhere in the VFS or host filesystem.
 2. After bootstrap, skill resolution is VFS-first. Both project skills and mounted external skills are addressed through canonical VFS paths.
@@ -237,6 +238,7 @@ The frontmatter `name` is authoritative. Directory names are not the source of t
 ### Discovery and config
 
 - [x] Skills are discovered from project VFS `/skills/**/SKILL.md` paths and configured host skill mounts. **Implemented in `discover_and_filter_skills()` in `simulacra-tool/src/skills.rs` — recursively walks downward from `/skills` via VFS.**
+- [x] Catalog-authored skills participate in the same VFS-first discovery path. **`SimulacraEngine` snapshots catalog skill documents into `/skills/<name>/SKILL.md` before calling `discover_and_filter_skills()`.**
 - [x] `/skills` discovery remains rooted at `/skills` and does not walk upward or search sibling/ancestor `skills/` directories. **`discover_skill_paths()` starts at `/skills`; covered by `discovery_does_not_walk_up_or_search_for_other_skills_directories`.**
 - [x] Nested grouped skill directories under `/skills` are supported. **Covered by `discovery_accepts_nested_skill_directories_under_skills_root`.**
 - [x] The skill registry is keyed by frontmatter `name`, not directory name. **`discovered` HashMap is keyed by `meta.name` from frontmatter, not `dir_name`.**

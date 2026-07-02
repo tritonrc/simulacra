@@ -24,7 +24,9 @@ use simulacra_runtime::{
     SpawnAgentTool,
 };
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
-use simulacra_tool::{MemoryToolHandles, ToolRegistry, register_memory_tools};
+use simulacra_tool::{
+    MemoryToolHandles, SkillTool, ToolRegistry, discover_and_filter_skills, register_memory_tools,
+};
 use simulacra_types::VirtualFs;
 use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ResourceBudget, ToolDefinition};
 use simulacra_vfs::{
@@ -910,8 +912,8 @@ impl SimulacraEngine {
         snapshots.get(task_id).map(|s| s.resolved.clone())
     }
 
-    /// Return the per-task composed VFS stack (with catalog skills mounted at
-    /// `/var/skills/`).
+    /// Return the per-task composed VFS stack with catalog skills snapshotted
+    /// at `/skills/<name>/SKILL.md` and `/var/skills/<name>.md`.
     pub fn debug_composed_vfs(&self, task_id: &str) -> Option<Arc<dyn VirtualFs>> {
         let snapshots = self.resolved_snapshots.lock().ok()?;
         snapshots.get(task_id).map(|s| Arc::clone(&s.composed_vfs))
@@ -1169,20 +1171,26 @@ impl SimulacraEngine {
             }
         }
 
-        // Mount catalog skills at /var/skills/<name>.md, shadowing any host
-        // mount at the same path. Bodies are pre-rendered via CatalogSkillFs
-        // so YAML frontmatter handling stays consistent with the read-only
-        // fs view used elsewhere.
+        // Mount catalog skills at canonical /skills/<name>/SKILL.md paths for
+        // S017 discovery, and preserve /var/skills/<name>.md as a compatibility
+        // debug path. Bodies are pre-rendered via CatalogSkillFs so YAML
+        // frontmatter handling stays consistent with the read-only fs view.
+        let _ = memory_fs.mkdir("/skills");
         let _ = memory_fs.mkdir("/var");
         let _ = memory_fs.mkdir("/var/skills");
         let skill_fs = CatalogSkillFs::new(resolved.skills.clone());
         for skill in &resolved.skills {
-            let rendered_path = format!("/{}.md", skill.name);
+            validate_catalog_skill_name_for_vfs(&skill.name)?;
+            let rendered_path = format!("/{}/SKILL.md", skill.name);
             let body = skill_fs.read(&rendered_path).map_err(|e| {
                 EngineError::VfsError(format!(
                     "failed to render catalog skill '{}': {e}",
                     skill.name
                 ))
+            })?;
+            let canonical_path = format!("/skills/{}/SKILL.md", skill.name);
+            memory_fs.write(&canonical_path, &body).map_err(|e| {
+                EngineError::VfsError(format!("failed to mount catalog skill: {e}"))
             })?;
             let mount_path = format!("/var/skills/{}.md", skill.name);
             memory_fs.write(&mount_path, &body).map_err(|e| {
@@ -1234,15 +1242,12 @@ impl SimulacraEngine {
         // later inspection. Catalog mutations after this point cannot reach
         // the running task (S042 assertion 6).
         //
-        // S045 — wrap the composed view in a `ReadOnlyPathGuard` for
-        // `/var/agent_files/`. The mount holds a snapshot copy in memory_fs
-        // (writable) but the spec assertion is that write/mkdir/remove
-        // there return ROFS at the composed-VFS level. The guard adds that
-        // enforcement without changing how memory_fs handles other paths.
-        let composed_vfs: Arc<dyn VirtualFs> = Arc::new(ReadOnlyPathGuard::new(
-            Arc::clone(&memory_fs) as Arc<dyn VirtualFs>,
-            "/var/agent_files",
-        ));
+        // S042/S045 — these mounts hold snapshot copies in memory_fs (writable),
+        // but the composed/runtime VFS must reject write/mkdir/remove attempts
+        // under their read-only namespaces.
+        let runtime_root_vfs =
+            read_only_spawn_snapshot_paths(Arc::clone(&memory_fs) as Arc<dyn VirtualFs>);
+        let composed_vfs = Arc::clone(&runtime_root_vfs);
         {
             let mut snapshots = self.resolved_snapshots.lock().unwrap();
             snapshots.insert(
@@ -1271,6 +1276,11 @@ impl SimulacraEngine {
         let hit_cache = Arc::clone(&self.hit_cache);
         let hook_pipeline = Arc::clone(&self.hook_pipeline);
         let hitl_runtime_for_worker = hitl_runtime.clone();
+        let agent_skill_names: Vec<String> = resolved
+            .skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
         // S043 — clone the optional provider factory into the worker closure.
         // `None` in production; `Some(...)` only when a test installed an
         // override via `with_provider_factory`.
@@ -1304,8 +1314,7 @@ impl SimulacraEngine {
                 // handles. When disabled, memory paths fall through to the
                 // inner VFS (MemoryFs) and return NotFound — enforcing the
                 // opt-in model per S037 §14.
-                let inner_vfs: Arc<dyn simulacra_types::VirtualFs> =
-                    memory_fs as Arc<dyn simulacra_types::VirtualFs>;
+                let inner_vfs: Arc<dyn simulacra_types::VirtualFs> = runtime_root_vfs;
 
                 // 1b. Wrap with MailboxFs (persists /proc/mailbox/** to artifact store).
                 //
@@ -1501,6 +1510,22 @@ impl SimulacraEngine {
                         },
                     )
                     .map_err(|e| format!("failed to register memory tools: {e}"))?;
+                }
+
+                let skill_catalog = discover_and_filter_skills(
+                    &vfs,
+                    &agent_skill_names,
+                    &capability_token,
+                    &agent_type_name_owned,
+                )
+                .map_err(|e| format!("failed to discover catalog skills: {e}"))?;
+                if skill_catalog
+                    .iter()
+                    .any(|skill| !skill.disable_model_invocation && skill.allow_implicit_invocation)
+                {
+                    registry
+                        .register(Box::new(SkillTool::new(Arc::clone(&cell), skill_catalog)))
+                        .map_err(|e| format!("failed to register Skill tool: {e}"))?;
                 }
 
                 if let Some(ref mcp_config) = config_for_worker.mcp {
@@ -1822,6 +1847,24 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
         spawn_types,
         skill_patterns,
         memory: simulacra_types::MemoryCapability::default(),
+    }
+}
+
+fn read_only_spawn_snapshot_paths(vfs: Arc<dyn VirtualFs>) -> Arc<dyn VirtualFs> {
+    ["/skills", "/var/skills", "/var/agent_files"]
+        .into_iter()
+        .fold(vfs, |inner, prefix| {
+            Arc::new(ReadOnlyPathGuard::new(inner, prefix)) as Arc<dyn VirtualFs>
+        })
+}
+
+fn validate_catalog_skill_name_for_vfs(name: &str) -> Result<(), EngineError> {
+    if CatalogSkillFs::is_valid_skill_path_name(name) {
+        Ok(())
+    } else {
+        Err(EngineError::VfsError(format!(
+            "invalid catalog skill name for VFS path segment: {name:?}"
+        )))
     }
 }
 

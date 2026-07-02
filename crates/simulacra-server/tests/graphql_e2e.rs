@@ -15,7 +15,8 @@
 //!   the runtime entry point S031's HTTP API delegates to) resolves the
 //!   catalog-defined agent.
 //! - line 574 ✓ A skill authored via `createSkill` appears at
-//!   `/var/skills/<name>.md` in the running task's composed VFS.
+//!   `/skills/<name>/SKILL.md` and `/var/skills/<name>.md` in the running
+//!   task's composed VFS.
 //!
 //! Deferred (NOT exercised here, with rationale):
 //! - line 572 ("Agent runs to completion against a recording HTTP fixture"):
@@ -239,9 +240,9 @@ async fn create_agent_via_graphql_then_spawn_task_resolves_the_catalog_row() {
 }
 
 /// Spec line 574: a skill authored through `createSkill` is mounted at
-/// `/var/skills/<name>.md` in the running task's composed VFS, with the
-/// body the mutation supplied. Proves `CatalogSkillFs` reads through the
-/// same catalog the GraphQL surface writes to.
+/// `/skills/<name>/SKILL.md` and `/var/skills/<name>.md` in the running
+/// task's composed VFS, with the body the mutation supplied. Proves the
+/// engine reads through the same catalog the GraphQL surface writes to.
 #[tokio::test]
 async fn skill_authored_via_graphql_visible_at_var_skills_in_running_task() {
     let catalog = Catalog::open_in_memory().expect("in-memory catalog");
@@ -271,7 +272,7 @@ async fn skill_authored_via_graphql_visible_at_var_skills_in_running_task() {
 
     // Now createAgent referencing the GraphQL-authored skill id. This
     // exercises the `skill_ids` validation path on createAgent (the catalog
-    // join that maps id → skill body for /var/skills/) end-to-end through
+    // join that maps id → skill body for the per-task skill VFS end-to-end through
     // the API.
     let create_agent = format!(
         r#"
@@ -299,7 +300,7 @@ async fn skill_authored_via_graphql_visible_at_var_skills_in_running_task() {
     assert_eq!(skills_array[0]["body"], "Just say hi when you start.");
 
     // Spawn the task — the per-task VFS is composed at this point, so
-    // /var/skills/noop.md must be readable.
+    // /skills/noop/SKILL.md and /var/skills/noop.md must be readable.
     let engine = build_engine(&catalog);
     let manager = TaskManager::new();
     let handle = engine
@@ -319,18 +320,39 @@ async fn skill_authored_via_graphql_visible_at_var_skills_in_running_task() {
         .debug_composed_vfs(&handle.task_id)
         .expect("engine must expose composed per-task VFS");
 
-    // Listing must contain noop.md (CatalogSkillFs renders one file per skill).
+    // Canonical S017 listing must contain the skill directory and SKILL.md.
+    let mut skill_listing = vfs
+        .list_dir("/skills")
+        .expect("/skills must expose GraphQL-authored catalog skills");
+    skill_listing.sort();
+    assert_eq!(skill_listing, vec!["noop"]);
+    let noop_listing = vfs
+        .list_dir("/skills/noop")
+        .expect("/skills/noop must be a skill directory");
+    assert_eq!(noop_listing, vec!["SKILL.md"]);
+
+    // Compatibility listing must contain noop.md.
     let listing = vfs
         .list_dir("/var/skills")
-        .expect("/var/skills must be mounted by CatalogSkillFs over the shared catalog");
+        .expect("/var/skills compatibility path must be mounted over the shared catalog");
     assert!(
         listing.iter().any(|name| name == "noop.md"),
         "GraphQL-authored skill must appear at /var/skills/noop.md; got listing: {listing:?}"
     );
 
-    // Body must round-trip. CatalogSkillFs renders the body verbatim (with
-    // optional YAML frontmatter when metadata is present — we passed `null`
-    // so the rendered body is just the catalog body).
+    // Body must round-trip with S017 frontmatter plus the catalog body.
+    let canonical_rendered = vfs
+        .read("/skills/noop/SKILL.md")
+        .expect("/skills/noop/SKILL.md must be readable");
+    let canonical_text = String::from_utf8(canonical_rendered).expect("skill file is utf8");
+    assert!(
+        canonical_text.contains("name: noop")
+            && canonical_text.contains("description: say hi")
+            && canonical_text.contains("Just say hi when you start."),
+        "canonical skill must contain frontmatter and the GraphQL-supplied body, got: {canonical_text:?}"
+    );
+
+    // The compatibility path serves the same rendered document.
     let rendered = vfs
         .read("/var/skills/noop.md")
         .expect("/var/skills/noop.md must be readable");

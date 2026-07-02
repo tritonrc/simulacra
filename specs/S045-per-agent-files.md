@@ -202,7 +202,7 @@ impl FsLayer for CatalogAgentFileFs {
 }
 ```
 
-Mounted by `SimulacraEngine::spawn_task` at `/var/agent_files/` from the resolved agent's files snapshot — same pattern as `CatalogSkillFs` at `/var/skills/`.
+Mounted by `SimulacraEngine::spawn_task` at `/var/agent_files/` from the resolved agent's files snapshot — the same snapshot-at-spawn pattern used for catalog-backed skill files.
 
 ### `ResolvedAgent` extension
 

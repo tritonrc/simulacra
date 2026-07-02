@@ -2,13 +2,15 @@
 //! to an inner filesystem but rejects writes/removes/mkdir for paths
 //! under a configured prefix.
 //!
-//! Used by the engine to enforce that `/var/agent_files/` is read-only
-//! at the composed-VFS level, even though the underlying `MemoryFs` is
-//! writable. Writes outside the prefix delegate normally.
+//! Used by the engine to enforce that snapshot-backed namespaces are read-only
+//! at the composed-VFS level, even though the underlying `MemoryFs` is writable.
+//! Writes outside the prefix delegate normally.
 
 use std::sync::Arc;
 
 use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+
+use crate::path::normalize;
 
 pub struct ReadOnlyPathGuard {
     inner: Arc<dyn VirtualFs>,
@@ -32,6 +34,7 @@ impl ReadOnlyPathGuard {
 
     fn is_locked(&self, path: &str) -> bool {
         // Lock the prefix itself (without trailing slash) and everything under it.
+        let path = normalize(path);
         let trimmed = self.locked_prefix.trim_end_matches('/');
         path == trimmed || path.starts_with(&self.locked_prefix)
     }
@@ -88,5 +91,28 @@ impl VirtualFs for ReadOnlyPathGuard {
 
     fn restore(&self, snapshot: &VfsSnapshot) -> Result<(), VfsError> {
         self.inner.restore(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use simulacra_types::{VfsError, VirtualFs};
+
+    use super::ReadOnlyPathGuard;
+    use crate::MemoryFs;
+
+    #[test]
+    fn write_rejects_normalized_paths_inside_locked_prefix() {
+        let fs = Arc::new(MemoryFs::new());
+        fs.write("/skills/runbook/SKILL.md", b"original").unwrap();
+        let guarded = ReadOnlyPathGuard::new(fs as Arc<dyn VirtualFs>, "/skills");
+
+        let err = guarded
+            .write("/workspace/../skills/runbook/SKILL.md", b"tampered")
+            .expect_err("normalized path inside locked prefix must be read-only");
+
+        assert!(matches!(err, VfsError::PermissionDenied(_)));
     }
 }

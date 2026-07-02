@@ -5,7 +5,8 @@
 //!
 //!   1. `spawn_task` resolves agent from catalog, not from `SimulacraConfig.agent_types`.
 //!   2. Agent unknown to catalog returns `EngineError::AgentNotFound` (no panic).
-//!   3. Per-task VFS exposes catalog skills at `/var/skills/<name>.md`.
+//!   3. Per-task VFS exposes catalog skills at `/skills/<name>/SKILL.md`
+//!      and the compatibility `/var/skills/<name>.md` path.
 //!   4. Capabilities from catalog feed the per-task capability checker.
 //!   5. Memory pool config from catalog routes the task's memory store.
 //!   6. Catalog mutations during a running task do not affect that task.
@@ -17,8 +18,8 @@
 //! these tests can prove the *running task's* state (not just that the
 //! catalog returned the right values). The current `debug_workspace_snapshot`
 //! returns the **raw** `MemoryFs` workspace layer — it does NOT include the
-//! `CatalogSkillFs` mount at `/var/skills/`, the `MemoryStoreFs` mount at
-//! `/var/memory/`, the capability token, etc. Proving "running agent IS X"
+//! catalog skill snapshots, the `MemoryStoreFs` mount at `/var/memory/`,
+//! the capability token, etc. Proving "running agent IS X"
 //! requires direct accessors:
 //!
 //!   pub fn debug_resolved_agent(&self, task_id: &str)
@@ -31,9 +32,9 @@
 //! `debug_resolved_agent` is the snapshot the engine took at spawn time;
 //! the catalog mutation test relies on this snapshot being immutable wrt
 //! later catalog updates. `debug_composed_vfs` returns the full per-task
-//! VFS stack so we can read `/var/skills/*.md` (CatalogSkillFs) and
-//! observe that the catalog skills are mounted, not just resolvable from
-//! the catalog. `debug_capability_token` lets us prove that
+//! VFS stack so we can read `/skills/*/SKILL.md` and `/var/skills/*.md`
+//! and observe that the catalog skills are mounted, not just resolvable
+//! from the catalog. `debug_capability_token` lets us prove that
 //! `resolved.capabilities` was lifted into the running task's
 //! `CapabilityToken` rather than discarded.
 
@@ -389,7 +390,7 @@ async fn spawn_task_with_unknown_tenant_namespace_returns_tenant_error() {
     }
 }
 
-// ─── Assertion 3: per-task VFS exposes catalog skills at /var/skills/ ───
+// ─── Assertion 3: per-task VFS exposes catalog skills at /skills and /var/skills ───
 
 #[tokio::test]
 async fn catalog_skill_visible_at_var_skills_in_running_task() {
@@ -426,22 +427,40 @@ async fn catalog_skill_visible_at_var_skills_in_running_task() {
     // Phase 2 must add: SimulacraEngine::debug_composed_vfs(task_id)
     //   -> Option<Arc<dyn simulacra_types::VirtualFs>>
     // Returns the *full* composed per-task VFS stack (MemoryFs + MailboxFs +
-    // [MemoryStoreFs] + ServiceFs + ProcFs + the new CatalogSkillFs mount).
+    // [MemoryStoreFs] + ServiceFs + ProcFs + catalog skill snapshots).
     // The existing debug_workspace_snapshot only returns the raw MemoryFs
     // workspace layer, which does NOT include the catalog skills mount.
     let vfs = engine
         .debug_composed_vfs(&handle.task_id)
         .expect("engine must expose the composed VFS for the task");
 
+    let mut canonical_listing = vfs
+        .list_dir("/skills")
+        .expect("/skills must expose catalog skills for S017 discovery");
+    canonical_listing.sort();
+    assert_eq!(canonical_listing, vec!["search", "summarize"]);
+
+    let search_dir = vfs
+        .list_dir("/skills/search")
+        .expect("/skills/search must be a skill directory");
+    assert_eq!(search_dir, vec!["SKILL.md"]);
+
+    let canonical_search = read_utf8(vfs.as_ref(), "/skills/search/SKILL.md");
+    assert!(
+        canonical_search.contains("name: search")
+            && canonical_search.contains("description: test skill")
+            && canonical_search.contains("search body"),
+        "/skills/search/SKILL.md must contain valid S017 frontmatter plus body, got: {canonical_search:?}"
+    );
+
     let mut listing = vfs
         .list_dir("/var/skills")
-        .expect("/var/skills must be mounted from the catalog");
+        .expect("/var/skills compatibility path must be mounted from the catalog");
     listing.sort();
     assert_eq!(listing, vec!["search.md", "summarize.md"]);
 
-    // Bodies must round-trip. CatalogSkillFs renders with optional YAML
-    // frontmatter; we only created skills without metadata so the body is
-    // the suffix of the rendered file.
+    // Bodies must round-trip. CatalogSkillFs renders YAML frontmatter; the
+    // catalog body is the suffix of the rendered file.
     let search = read_utf8(vfs.as_ref(), "/var/skills/search.md");
     let summarize = read_utf8(vfs.as_ref(), "/var/skills/summarize.md");
     assert!(
@@ -452,6 +471,100 @@ async fn catalog_skill_visible_at_var_skills_in_running_task() {
         summarize.contains("summarize body"),
         "/var/skills/summarize.md must contain the catalog skill body, got: {summarize:?}"
     );
+}
+
+#[tokio::test]
+async fn catalog_skill_mounts_are_read_only_for_writes_and_removes() {
+    let catalog = Catalog::open_in_memory().unwrap();
+    let tenant = create_tenant(&catalog, "acme").await;
+    let skill = create_skill(&catalog, &tenant, "noop", "original body").await;
+    create_agent(
+        &catalog,
+        &tenant,
+        "readonly-skill-worker",
+        "from-catalog",
+        std::slice::from_ref(&skill.id),
+        &[],
+        None,
+    )
+    .await;
+
+    let engine = build_engine(catalog_backed_config(), &catalog);
+    let manager = TaskManager::new();
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "try to mutate mounted skills",
+            &tenant_config("acme", "readonly-skill-worker"),
+            None,
+            json!({}),
+            None,
+            None,
+        )
+        .await
+        .expect("spawn_task should succeed");
+
+    let vfs = engine
+        .debug_composed_vfs(&handle.task_id)
+        .expect("engine must expose the composed VFS for the task");
+
+    for path in [
+        "/skills/noop/SKILL.md",
+        "/workspace/../skills/noop/SKILL.md",
+        "/var/skills/noop.md",
+    ] {
+        let err = vfs
+            .write(path, b"tampered")
+            .expect_err("catalog skill snapshots must reject writes");
+        assert!(matches!(err, VfsError::PermissionDenied(_)));
+    }
+
+    let err = vfs
+        .remove("/skills/noop/SKILL.md")
+        .expect_err("catalog skill snapshots must reject removes");
+    assert!(matches!(err, VfsError::PermissionDenied(_)));
+}
+
+#[tokio::test]
+async fn catalog_skill_name_with_path_separator_returns_vfs_error() {
+    let catalog = Catalog::open_in_memory().unwrap();
+    let tenant = create_tenant(&catalog, "acme").await;
+    let skill = create_skill(&catalog, &tenant, "bad/name", "body").await;
+    create_agent(
+        &catalog,
+        &tenant,
+        "unsafe-skill-worker",
+        "from-catalog",
+        std::slice::from_ref(&skill.id),
+        &[],
+        None,
+    )
+    .await;
+
+    let engine = build_engine(catalog_backed_config(), &catalog);
+    let manager = TaskManager::new();
+    let error = engine
+        .spawn_task(
+            &manager,
+            "spawn with unsafe skill name",
+            &tenant_config("acme", "unsafe-skill-worker"),
+            None,
+            json!({}),
+            None,
+            None,
+        )
+        .await
+        .expect_err("unsafe catalog skill names must fail before VFS mount");
+
+    match error {
+        EngineError::VfsError(message) => {
+            assert!(
+                message.contains("bad/name") && message.contains("invalid catalog skill name"),
+                "VFS error should name the unsafe skill, got: {message}"
+            );
+        }
+        other => panic!("expected EngineError::VfsError for unsafe skill name, got: {other:?}"),
+    }
 }
 
 // Edge case for assertion 3: an agent with zero skills should still spawn
@@ -1245,6 +1358,11 @@ async fn catalog_mutation_during_running_task_does_not_affect_that_tasks_snapsho
         served.contains("original body") && !served.contains("changed body"),
         "/var/skills/noop.md must keep the spawn-time body, got: {served:?}"
     );
+    let canonical_served = read_utf8(vfs.as_ref(), "/skills/noop/SKILL.md");
+    assert!(
+        canonical_served.contains("original body") && !canonical_served.contains("changed body"),
+        "/skills/noop/SKILL.md must keep the spawn-time body, got: {canonical_served:?}"
+    );
 
     // And the per-task capability token must NOT have absorbed the new
     // catalog grant.
@@ -1391,6 +1509,17 @@ async fn two_concurrent_tasks_have_isolated_skills_capabilities_and_memory_pool(
     listing_b.sort();
     assert_eq!(listing_a, vec!["skill-a.md"]);
     assert_eq!(listing_b, vec!["skill-b.md"]);
+
+    let mut canonical_listing_a = vfs_a
+        .list_dir("/skills")
+        .expect("agent a /skills must exist");
+    let mut canonical_listing_b = vfs_b
+        .list_dir("/skills")
+        .expect("agent b /skills must exist");
+    canonical_listing_a.sort();
+    canonical_listing_b.sort();
+    assert_eq!(canonical_listing_a, vec!["skill-a"]);
+    assert_eq!(canonical_listing_b, vec!["skill-b"]);
 
     // CapabilityToken isolation.
     let token_a = engine
