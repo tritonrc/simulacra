@@ -129,6 +129,23 @@ impl AgentLoop {
                     );
                     return Err(exhausted.into());
                 }
+                TurnResult::Cancelled => {
+                    self.emit_replay_ratio(total_replay_entries);
+                    let exit_reason = ExitReason::Cancelled;
+                    tracing::info!(
+                        "gen_ai.agent.name" = self.config.agent_id.0.as_str(),
+                        "simulacra.agent.exit_reason" = format!("{:?}", exit_reason).as_str(),
+                        "simulacra.agent.token_total" = total_usage.total(),
+                        "agent cancelled"
+                    );
+                    return Ok(AgentLoopOutput {
+                        exit_reason,
+                        messages,
+                        token_usage: total_usage,
+                        used_turns: self.budget.used_turns,
+                        used_cost: self.budget.used_cost,
+                    });
+                }
             }
         }
 

@@ -25,3 +25,4 @@
 | [S021](S021-fetch.md) | WHATWG-aligned Fetch API & HTTP control plane | Active | `simulacra-http`, `simulacra-fetch`, `simulacra-sandbox`, `simulacra-quickjs` |
 | [S022](S022-shell-http.md) | Shell HTTP Builtins (curl/wget) | Active | `simulacra-shell`, `simulacra-sandbox` |
 | [S023](S023-generic-subagents.md) | Generic sub-agent spawning with runtime-defined system prompts and tiers | Active | `simulacra-runtime` |
+| [S049](S049-agent-turn-runtime.md) | Agent Turn Runtime Foundation | Active | `simulacra-runtime` |

@@ -344,7 +344,8 @@ let cancellation = CancellationToken::new(Duration::from_secs(30));
 // When task.cancel arrives:
 // 1. TaskManager retrieves the CancellationToken for the task
 // 2. Calls cancellation.signal()
-// 3. The agent loop checks cancellation on each turn and exits with ExitReason::Cancelled
+// 3. The agent loop checks cancellation before provider calls and during tool dispatch,
+//    then exits with ExitReason::Cancelled or a cancelled tool result per S049
 // 4. The background task completes, triggering the terminal state transition
 ```
 
@@ -356,7 +357,7 @@ impl TaskManager {
 }
 ```
 
-`cancel_task` is updated to signal the token before transitioning state. The actual state transition to `Cancelled` happens when the background agent task observes cancellation and exits.
+`cancel_task` is updated to signal the token before transitioning state. The actual state transition to `Cancelled` happens when the background agent task observes cancellation and exits. S049 owns the shared `AgentLoop` cancellation checks and tool-dispatch cancellation result shape.
 
 ### Input and approval channels (interface only)
 
@@ -368,7 +369,7 @@ For `input.response` and `approval.respond`, the interface is defined but full A
 // approval_tx: Option<tokio::sync::mpsc::Sender<(String, bool, Option<String>)>>
 ```
 
-SimulacraEngine creates these channels at spawn time and passes the receivers to the agent task. The existing TaskManager `provide_input` and `respond_approval` methods are extended to send on these channels. The AgentLoop does not yet consume them — that requires AgentLoop changes tracked as follow-up work.
+SimulacraEngine creates these channels at spawn time and passes the receivers to the agent task. The existing TaskManager `provide_input` and `respond_approval` methods are extended to send on these channels. The AgentLoop does not yet consume them — S049 adds turn/runtime structure, but full `input.response` and approval-resume consumption remains follow-up work.
 
 ### Budget warnings
 

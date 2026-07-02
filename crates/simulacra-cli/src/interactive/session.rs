@@ -923,6 +923,13 @@ where
                     self.view.last_exit_reason = Some(ExitReason::BudgetExhausted);
                     break 'turn LoopAction::Continue;
                 }
+                Ok(TurnResult::Cancelled) => {
+                    let msg = "[cancelled]";
+                    self.view.visible_output.push(msg.to_string());
+                    self.io.write_line(msg);
+                    self.view.last_exit_reason = Some(ExitReason::Cancelled);
+                    break 'turn LoopAction::Continue;
+                }
                 Err(e) => {
                     // Check if this is a retryable provider error
                     let is_retryable = e

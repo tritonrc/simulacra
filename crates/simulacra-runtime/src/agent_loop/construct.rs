@@ -19,7 +19,7 @@ impl AgentLoop {
         Self {
             config,
             provider,
-            tools,
+            tools: Arc::new(tools),
             context_strategy,
             journal,
             budget,
@@ -31,6 +31,7 @@ impl AgentLoop {
             sink: activity_sink.unwrap_or_else(|| Arc::new(NoopActivitySink)),
             journal_write_failures: AtomicU32::new(0),
             vfs: None,
+            cancellation: None,
         }
     }
 
@@ -49,7 +50,7 @@ impl AgentLoop {
         Self {
             config,
             provider,
-            tools,
+            tools: Arc::new(tools),
             context_strategy,
             journal,
             budget,
@@ -61,6 +62,7 @@ impl AgentLoop {
             sink: Arc::new(NoopActivitySink),
             journal_write_failures: AtomicU32::new(0),
             vfs: None,
+            cancellation: None,
         }
     }
 
@@ -98,6 +100,11 @@ impl AgentLoop {
     /// replay-from-checkpoint loses any VFS mutations captured at checkpoint time.
     pub fn set_vfs(&mut self, vfs: Arc<dyn VirtualFs>) {
         self.vfs = Some(vfs);
+    }
+
+    /// Attach the runtime cancellation token observed by provider/tool dispatch.
+    pub fn set_cancellation_token(&mut self, cancellation: crate::CancellationToken) {
+        self.cancellation = Some(cancellation);
     }
 
     /// Read-only access to the current budget state.
