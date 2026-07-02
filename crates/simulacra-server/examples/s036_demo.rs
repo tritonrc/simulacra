@@ -131,6 +131,8 @@ async fn main() {
                 paths_read: vec!["/**".into()],
                 paths_write: vec!["/workspace/**".into(), "/proc/mailbox/**".into()],
 
+                skill_patterns: vec![],
+
                 memory: None,
             }),
             skills: vec![],

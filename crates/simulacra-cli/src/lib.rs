@@ -958,9 +958,9 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
     // built-in tool named `Skill`. Simulacra does NOT register one tool per skill.
     // Skills are not first-class tools.
     //
-    // Agents with only user-invocable or model-disabled skills do not register
-    // the Skill tool for that agent. do not expose an empty Skill tool definition
-    // to the model.
+    // Agents with only user-invocable, model-disabled, or implicit-disabled
+    // skills do not register the Skill tool for that agent. This avoids
+    // exposing an empty Skill tool definition to the model.
     //
     // User-triggered skill resolution in interactive mode still works for any
     // remaining user_invocable skills.
@@ -974,14 +974,17 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
     // percentage of the active model's context window. Only model-invocable
     // skills count against the metadata budget. Metadata entries are considered
     // in agent_type.skills order. Simulacra includes as many name + description
-    // entries as fit within the metadata budget and omits the remainder from
-    // the model-visible Skill tool definition.
+    // entries as fit within the metadata budget, truncates oversized
+    // descriptions first, and omits the remainder from the model-visible Skill
+    // tool definition.
     //
     // If one or more model-invocable skills are omitted due to the metadata
     // budget, the Skill tool description MUST indicate that the catalog is partial.
     //
     // Omitted skills remain user-invocable when policy allows.
-    let has_model_visible = skill_catalog.iter().any(|s| !s.disable_model_invocation);
+    let has_model_visible = skill_catalog
+        .iter()
+        .any(|s| !s.disable_model_invocation && s.allow_implicit_invocation);
     if has_model_visible {
         registry.register(Box::new(SkillTool::new(
             Arc::clone(&cell),
@@ -1927,6 +1930,8 @@ fn default_config(task: &str) -> SimulacraConfig {
                 mcp: vec![],
                 paths_read: vec!["/**".into()],
                 paths_write: vec!["/**".into()],
+
+                skill_patterns: vec![],
 
                 memory: None,
             }),

@@ -294,6 +294,11 @@ pub struct CapabilitiesConfig {
     pub paths_read: Vec<String>,
     #[serde(default)]
     pub paths_write: Vec<String>,
+    /// Skill capability grants using `skill:<name>` patterns. Empty means
+    /// "allow all skills" at the CapabilityToken layer; `agent_type.skills`
+    /// remains the per-agent allow-list.
+    #[serde(default)]
+    pub skill_patterns: Vec<String>,
     /// Memory capability — opt-in per S037. Absent = disabled. When
     /// present and `enabled = true`, the agent gets `/var/memory/**` and
     /// `/mnt/**` subtree access per `search_scopes` / `write_scopes`, plus
@@ -602,7 +607,11 @@ pub fn build_capability_token(agent_type: &AgentTypeConfig) -> CapabilityToken {
                 .map(|s| PathPattern(s.clone()))
                 .collect(),
             spawn_types: Vec::new(),
-            skill_patterns: vec![],
+            skill_patterns: caps
+                .skill_patterns
+                .iter()
+                .map(|s| normalize_skill_capability_pattern(s))
+                .collect(),
             memory: build_memory_capability(caps.memory.as_ref()),
         },
         None => CapabilityToken::default(),
@@ -638,6 +647,15 @@ fn build_memory_capability(
         enabled: cfg.enabled,
         search_scopes: parse_scopes(&cfg.search_scopes),
         write_scopes: parse_scopes(&cfg.write_scopes),
+    }
+}
+
+fn normalize_skill_capability_pattern(pattern: &str) -> String {
+    let pattern = pattern.trim();
+    if pattern.starts_with("skill:") || pattern == "*" {
+        pattern.to_string()
+    } else {
+        format!("skill:{pattern}")
     }
 }
 
@@ -796,6 +814,7 @@ url = "http://localhost:3000"
                 python: false,
                 paths_read: vec![],
                 paths_write: vec![],
+                skill_patterns: vec![],
 
                 memory: None,
             }),
@@ -833,6 +852,7 @@ url = "http://localhost:3000"
                 python: false,
                 paths_read: vec![],
                 paths_write: vec![],
+                skill_patterns: vec![],
 
                 memory: None,
             }),
@@ -862,6 +882,7 @@ url = "http://localhost:3000"
                 python: true,
                 paths_read: vec![],
                 paths_write: vec![],
+                skill_patterns: vec![],
 
                 memory: None,
             }),
@@ -893,6 +914,7 @@ url = "http://localhost:3000"
                 python: false,
                 paths_read: vec!["/src/**".into(), "/docs/**".into()],
                 paths_write: vec!["/src/**".into()],
+                skill_patterns: vec![],
 
                 memory: None,
             }),
@@ -951,6 +973,7 @@ url = "http://localhost:3000"
                 python: false,
                 paths_read: vec![],
                 paths_write: vec![],
+                skill_patterns: vec![],
 
                 memory: None,
             }),
@@ -962,13 +985,11 @@ url = "http://localhost:3000"
     }
 
     #[test]
-    fn build_capability_token_skill_patterns_always_empty() {
-        // The current implementation always sets skill_patterns to vec![]
-        // regardless of the agent config skills field.
+    fn build_capability_token_maps_skill_patterns_from_capabilities() {
         let agent = AgentTypeConfig {
             model: "m".into(),
             system_prompt: None,
-            skills: vec!["skill:rust-dev".into()],
+            skills: vec!["rust-dev".into()],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
@@ -982,6 +1003,7 @@ url = "http://localhost:3000"
                 python: false,
                 paths_read: vec![],
                 paths_write: vec![],
+                skill_patterns: vec!["skill:rust-*".into(), "reviewer".into()],
 
                 memory: None,
             }),
@@ -989,7 +1011,44 @@ url = "http://localhost:3000"
 
         let token = build_capability_token(&agent);
 
-        assert!(token.skill_patterns.is_empty());
+        assert_eq!(
+            token.skill_patterns,
+            vec!["skill:rust-*".to_string(), "skill:reviewer".to_string()]
+        );
+    }
+
+    #[test]
+    fn capability_config_parses_skill_patterns_from_toml() {
+        let toml_str = r#"
+[project]
+name = "test"
+
+[agent_types.worker]
+model = "m"
+skills = ["rust-dev", "reviewer"]
+
+[agent_types.worker.capabilities]
+skill_patterns = ["skill:rust-*", "reviewer"]
+"#;
+
+        let config: SimulacraConfig = toml::from_str(toml_str).expect("should parse");
+        let agent = config
+            .agent_types
+            .get("worker")
+            .expect("worker agent should be present");
+
+        assert_eq!(
+            agent
+                .capabilities
+                .as_ref()
+                .expect("capabilities should parse")
+                .skill_patterns,
+            vec!["skill:rust-*".to_string(), "reviewer".to_string()]
+        );
+        assert_eq!(
+            build_capability_token(agent).skill_patterns,
+            vec!["skill:rust-*".to_string(), "skill:reviewer".to_string()]
+        );
     }
 
     #[test]
@@ -1011,6 +1070,7 @@ url = "http://localhost:3000"
                 python: false,
                 paths_read: vec!["/workspace/**".into()],
                 paths_write: vec!["/workspace/src/**".into()],
+                skill_patterns: vec!["skill:code-review".into()],
 
                 memory: None,
             }),
@@ -1033,7 +1093,7 @@ url = "http://localhost:3000"
             vec![PathPattern("/workspace/src/**".into())]
         );
         assert_eq!(token.spawn_types, vec!["worker"]);
-        assert!(token.skill_patterns.is_empty());
+        assert_eq!(token.skill_patterns, vec!["skill:code-review"]);
     }
 
     // ── C2: VFS defaults ────────────────────────────────────────────────

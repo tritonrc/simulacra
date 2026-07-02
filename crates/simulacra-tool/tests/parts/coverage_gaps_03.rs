@@ -64,6 +64,7 @@ fn skill_tool_definition_includes_catalog_description_for_model_visible_skills()
         description: "Review code for quality".into(),
         vfs_path: "/skills/cr/SKILL.md".into(),
         disable_model_invocation: false,
+        allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
         body: Some("body".into()),
@@ -90,6 +91,7 @@ fn skill_tool_definition_excludes_model_disabled_skills_from_catalog() {
         description: "Should not appear".into(),
         vfs_path: "/skills/internal/SKILL.md".into(),
         disable_model_invocation: true,
+        allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
         body: Some("body".into()),
@@ -99,6 +101,28 @@ fn skill_tool_definition_excludes_model_disabled_skills_from_catalog() {
     assert!(
         !def.description.contains("internal-only"),
         "model-disabled skill should be excluded from catalog, got: {}",
+        def.description
+    );
+}
+
+#[test]
+fn skill_tool_definition_excludes_implicit_disabled_skills_from_catalog() {
+    let vfs = Arc::new(MemoryFs::new());
+    let catalog = vec![SkillMeta {
+        name: "quiet-only".into(),
+        description: "Should not appear".into(),
+        vfs_path: "/skills/quiet/SKILL.md".into(),
+        disable_model_invocation: false,
+        allow_implicit_invocation: false,
+        user_invocable: true,
+        allowed_tools: vec![],
+        body: Some("body".into()),
+    }];
+    let (tool, _, _) = make_skill_tool(&vfs, catalog);
+    let def = tool.definition();
+    assert!(
+        !def.description.contains("quiet-only"),
+        "implicit-disabled skill should be excluded from catalog, got: {}",
         def.description
     );
 }
@@ -138,6 +162,7 @@ fn skill_tool_call_with_model_disabled_skill_returns_error_result() {
         description: "Review code for quality".into(),
         vfs_path: "/skills/internal/SKILL.md".into(),
         disable_model_invocation: true,
+        allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
         body: Some("body".into()),
@@ -152,6 +177,30 @@ fn skill_tool_call_with_model_disabled_skill_returns_error_result() {
 }
 
 #[test]
+fn skill_tool_call_with_implicit_disabled_skill_returns_error_result() {
+    let vfs = Arc::new(MemoryFs::new());
+    vfs.write("/skills/quiet/SKILL.md", sample_skill_content().as_bytes())
+        .unwrap();
+    let catalog = vec![SkillMeta {
+        name: "code-review".into(),
+        description: "Review code for quality".into(),
+        vfs_path: "/skills/quiet/SKILL.md".into(),
+        disable_model_invocation: false,
+        allow_implicit_invocation: false,
+        user_invocable: true,
+        allowed_tools: vec![],
+        body: Some("body".into()),
+    }];
+    let (tool, _, _) = make_skill_tool(&vfs, catalog);
+    let capability = full_capability();
+
+    let result = run_async(tool.call(json!({ "command": "code-review" }), &capability))
+        .expect("implicit-disabled skill should return error result");
+
+    assert_error_result_contains(&result, "allow_implicit_invocation=false");
+}
+
+#[test]
 fn skill_tool_call_with_capability_denied_skill_returns_error_result() {
     let vfs = Arc::new(MemoryFs::new());
     vfs.write("/skills/cr/SKILL.md", sample_skill_content().as_bytes())
@@ -161,6 +210,7 @@ fn skill_tool_call_with_capability_denied_skill_returns_error_result() {
         description: "Review code for quality".into(),
         vfs_path: "/skills/cr/SKILL.md".into(),
         disable_model_invocation: false,
+        allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
         body: Some("body".into()),
@@ -189,6 +239,7 @@ fn skill_tool_call_with_valid_skill_returns_markdown_body() {
         description: "Review code for quality".into(),
         vfs_path: "/skills/cr/SKILL.md".into(),
         disable_model_invocation: false,
+        allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
         body: Some("body".into()),
@@ -222,6 +273,7 @@ fn skill_tool_catalog_truncation_indicates_partial_when_budget_exceeded() {
             description: format!("This is a very long description for skill number {i} that should consume budget quickly"),
             vfs_path: format!("/skills/s{i}/SKILL.md"),
             disable_model_invocation: false,
+            allow_implicit_invocation: true,
             user_invocable: true,
             allowed_tools: vec![],
             body: Some("body".into()),
@@ -235,5 +287,38 @@ fn skill_tool_catalog_truncation_indicates_partial_when_budget_exceeded() {
         def.description.contains("partial"),
         "expected partial catalog indication when budget exceeded, got: {}",
         def.description
+    );
+}
+
+#[test]
+fn skill_tool_catalog_truncates_long_descriptions_before_omitting_the_skill() {
+    let vfs = Arc::new(MemoryFs::new());
+    let (_, cell, _) = make_skill_tool(&vfs, vec![]);
+    let catalog = vec![SkillMeta {
+        name: "oversized".into(),
+        description: "x".repeat(10_000),
+        vfs_path: "/skills/oversized/SKILL.md".into(),
+        disable_model_invocation: false,
+        allow_implicit_invocation: true,
+        user_invocable: true,
+        allowed_tools: vec![],
+        body: Some("body".into()),
+    }];
+    let tool = SkillTool::new_with_metadata_budget(cell, catalog, 64);
+    let def = tool.definition();
+
+    assert!(
+        def.description.contains("oversized"),
+        "a single oversized skill should be retained with a truncated description, got: {}",
+        def.description
+    );
+    assert!(
+        def.description.contains("..."),
+        "the retained oversized entry should indicate description truncation, got: {}",
+        def.description
+    );
+    assert!(
+        !def.description.contains("partial"),
+        "truncating one oversized description should not mark the catalog partial"
     );
 }

@@ -305,6 +305,7 @@ fn engine_config(namespace: &str, agent_type: &str) -> SimulacraConfig {
                 python: false,
                 paths_read: vec!["/**".to_string()],
                 paths_write: vec!["/workspace/**".to_string()],
+                skill_patterns: vec![],
                 memory: None,
             }),
         },

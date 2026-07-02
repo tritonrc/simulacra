@@ -39,6 +39,8 @@ fn engine_config() -> SimulacraConfig {
                 paths_read: vec!["/**".to_string()],
                 paths_write: vec!["/workspace/**".to_string(), "/proc/mailbox/**".to_string()],
 
+                skill_patterns: vec![],
+
                 memory: None,
             }),
         },

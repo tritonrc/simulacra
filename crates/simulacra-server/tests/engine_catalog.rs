@@ -943,6 +943,7 @@ async fn catalog_capabilities_are_lifted_into_per_task_capability_token() {
     let capabilities = vec![
         "net:read:api.example.com".to_string(),
         "net:read:metrics.example.com".to_string(),
+        "skill:rust-*".to_string(),
     ];
     create_agent(
         &catalog,
@@ -1002,6 +1003,11 @@ async fn catalog_capabilities_are_lifted_into_per_task_capability_token() {
     assert_eq!(
         net_grants, want_grants,
         "catalog capabilities must land in CapabilityToken.network"
+    );
+    assert_eq!(
+        token.skill_patterns,
+        vec!["skill:rust-*".to_string()],
+        "catalog skill capabilities must land in CapabilityToken.skill_patterns"
     );
 }
 

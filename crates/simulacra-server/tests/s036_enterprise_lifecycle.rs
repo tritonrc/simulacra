@@ -172,6 +172,7 @@ fn simulacra_config(base_url: &str) -> SimulacraConfig {
                 python: false,
                 paths_read: vec!["/**".to_string()],
                 paths_write: vec!["/workspace/**".to_string(), "/proc/mailbox/**".to_string()],
+                skill_patterns: vec![],
                 memory: None,
             }),
         },

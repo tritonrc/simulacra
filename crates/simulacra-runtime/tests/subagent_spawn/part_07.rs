@@ -38,6 +38,8 @@ fn generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent() 
             paths_read: vec![],
             paths_write: vec![],
 
+            skill_patterns: vec![],
+
             memory: None,
         }),
         provider_kind: ProviderKind::OpenAI,
@@ -320,6 +322,8 @@ fn generic_child_invoke_agent_span_nests_under_parent_trace() {
             python: false,
             paths_read: vec![],
             paths_write: vec![],
+
+            skill_patterns: vec![],
 
             memory: None,
         }),

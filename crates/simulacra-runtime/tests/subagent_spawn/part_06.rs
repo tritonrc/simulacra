@@ -51,6 +51,8 @@ fn generic_spawn_with_system_prompt_creates_child() {
             paths_read: vec![],
             paths_write: vec![],
 
+            skill_patterns: vec![],
+
             memory: None,
         }),
         provider_kind: ProviderKind::OpenAI,
@@ -268,6 +270,8 @@ fn generic_spawn_inherits_parent_capabilities() {
             paths_read: vec![],
             paths_write: vec![],
 
+            skill_patterns: vec![],
+
             memory: None,
         }),
         provider_kind: ProviderKind::OpenAI,
@@ -356,6 +360,8 @@ fn generic_spawn_with_capability_override_intersects_parent() {
             python: false,
             paths_read: vec![],
             paths_write: vec![],
+
+            skill_patterns: vec![],
 
             memory: None,
         }),

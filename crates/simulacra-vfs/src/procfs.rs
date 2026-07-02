@@ -18,70 +18,16 @@
 //! via narrow traits ([`ToolLister`] and [`HookLister`]) that callers must
 //! implement on their concrete types before wiring in a [`ProcFs`].
 
-use std::sync::{Arc, Mutex, atomic::AtomicU64, atomic::Ordering};
-use std::time::Instant;
+use std::sync::atomic::Ordering;
 
-use simulacra_types::{
-    CapabilityToken, FsMetadata, ResourceBudget, VfsError, VfsSnapshot, VirtualFs,
-};
+use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
 use tracing::{debug, info_span, warn};
 
 use crate::path::normalize;
 
-// ---------------------------------------------------------------------------
-// Narrow delegation traits (avoid depending on simulacra-tool / simulacra-hooks)
-// ---------------------------------------------------------------------------
+mod state;
 
-/// Provides tool names and compact-JSON definitions for `/proc/tools/`.
-pub trait ToolLister: Send + Sync + 'static {
-    /// All tool names, in any order. ProcFs will sort them.
-    fn tool_names(&self) -> Vec<String>;
-    /// Compact JSON object for the given tool, or `None` if not found.
-    fn tool_json(&self, name: &str) -> Option<String>;
-}
-
-/// Provides hook names per operation type for `/proc/hooks/`.
-pub trait HookLister: Send + Sync + 'static {
-    /// Hook names registered for `operation` (e.g. `"tool_call"`), in order.
-    fn hook_names(&self, operation: &str) -> Vec<String>;
-}
-
-// ---------------------------------------------------------------------------
-// ProcState
-// ---------------------------------------------------------------------------
-
-/// All the live runtime state that `/proc` files expose.
-pub struct ProcState {
-    pub agent_id: String,
-    pub agent_name: String,
-    pub model: String,
-    pub parent_id: Option<String>,
-    pub budget: Arc<Mutex<ResourceBudget>>,
-    pub capabilities: CapabilityToken,
-    pub tools: Arc<dyn ToolLister>,
-    pub session_id: String,
-    pub session_start: Instant,
-    pub journal_entries: Arc<AtomicU64>,
-    pub hooks: Arc<dyn HookLister>,
-    pub turn: Arc<AtomicU64>,
-}
-
-// ---------------------------------------------------------------------------
-// ProcFs
-// ---------------------------------------------------------------------------
-
-/// A [`VirtualFs`] layer that adds a virtual `/proc` directory.
-pub struct ProcFs<V: VirtualFs> {
-    inner: V,
-    state: Arc<ProcState>,
-}
-
-impl<V: VirtualFs> ProcFs<V> {
-    /// Wrap `inner` with a `/proc` layer backed by `state`.
-    pub fn new(inner: V, state: Arc<ProcState>) -> Self {
-        Self { inner, state }
-    }
-}
+pub use state::{HookLister, ProcFs, ProcState, ToolLister};
 
 // ---------------------------------------------------------------------------
 // Path classification helpers

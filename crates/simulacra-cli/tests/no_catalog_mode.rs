@@ -416,6 +416,7 @@ async fn no_catalog_mode_resolved_agent_carries_full_config() {
         python: false,
         paths_read: vec![],
         paths_write: vec![],
+        skill_patterns: vec!["skill:rust-*".into()],
         memory: None,
     });
     config.agent_types.insert("planner".into(), planner);
@@ -451,6 +452,7 @@ async fn no_catalog_mode_resolved_agent_carries_full_config() {
         "{caps:?}"
     );
     assert!(caps.contains(&"mcp:github:*".to_string()), "{caps:?}");
+    assert!(caps.contains(&"skill:rust-*".to_string()), "{caps:?}");
 }
 
 // ---------------------------------------------------------------------------

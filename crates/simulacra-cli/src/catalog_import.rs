@@ -218,6 +218,13 @@ pub fn capabilities_to_strings(agent: &AgentTypeConfig) -> Vec<String> {
             format!("mcp:{m}")
         });
     }
+    for skill in &caps.skill_patterns {
+        out.push(if skill.starts_with("skill:") {
+            skill.clone()
+        } else {
+            format!("skill:{skill}")
+        });
+    }
     out
 }
 

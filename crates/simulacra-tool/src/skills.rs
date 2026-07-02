@@ -1,5 +1,7 @@
 //! Skill discovery and the model-visible `Skill` tool.
 
+mod frontmatter;
+
 use std::collections::HashMap;
 #[cfg(feature = "sandbox")]
 use std::future::Future;
@@ -18,6 +20,12 @@ use simulacra_types::{Tool, ToolDefinition, ToolError};
 use crate::SkillError;
 #[cfg(feature = "sandbox")]
 use crate::sandbox_tools::{map_sandbox_error, require_str};
+pub use frontmatter::parse_skill_frontmatter;
+#[cfg(feature = "sandbox")]
+use frontmatter::strip_yaml_frontmatter;
+
+#[cfg(feature = "sandbox")]
+const DEFAULT_SKILL_METADATA_BUDGET_CHARS: usize = 8_000;
 
 // ---------------------------------------------------------------------------
 // SkillTool (S017)
@@ -49,6 +57,10 @@ pub struct SkillMeta {
     /// A model-triggered call to a model-disabled skill returns an error tool result
     /// even if the model guessed the name.
     pub disable_model_invocation: bool,
+    /// When false, the skill is not surfaced in model-visible skill metadata and
+    /// model-triggered `Skill` calls for it are rejected. User-triggered loading
+    /// is still controlled by `user_invocable`.
+    pub allow_implicit_invocation: bool,
     /// When false, the skill is not available through `/skill-name` invocation.
     /// A skill with `user_invocable: false` may still appear in the model-visible
     /// Skill tool description if model invocation is enabled (i.e. when
@@ -101,8 +113,9 @@ pub struct SkillMeta {
 /// skill list, or denied by the capability token, `Skill` returns an error
 /// tool result. The agent sees the denial reason.
 ///
-/// If the named skill has `disable_model_invocation: true`, a model-triggered
-/// call returns an error tool result even if the model guessed the name.
+/// If the named skill has `disable_model_invocation: true` or
+/// `allow_implicit_invocation: false`, a model-triggered call returns an error
+/// tool result even if the model guessed the name.
 #[cfg(feature = "sandbox")]
 pub struct SkillTool {
     cell: Arc<AgentCell>,
@@ -110,12 +123,29 @@ pub struct SkillTool {
     /// `agent_type.skills`, and `skill:<name>` capability patterns.
     /// Capability checks happen at the call site before returning a skill body.
     catalog: Vec<SkillMeta>,
+    metadata_budget_chars: usize,
 }
 
 #[cfg(feature = "sandbox")]
 impl SkillTool {
     pub fn new(cell: Arc<AgentCell>, catalog: Vec<SkillMeta>) -> Self {
-        Self { cell, catalog }
+        Self {
+            cell,
+            catalog,
+            metadata_budget_chars: DEFAULT_SKILL_METADATA_BUDGET_CHARS,
+        }
+    }
+
+    pub fn new_with_metadata_budget(
+        cell: Arc<AgentCell>,
+        catalog: Vec<SkillMeta>,
+        metadata_budget_chars: usize,
+    ) -> Self {
+        Self {
+            cell,
+            catalog,
+            metadata_budget_chars,
+        }
     }
 
     /// Build the model-visible skill catalog description (name + description
@@ -123,8 +153,9 @@ impl SkillTool {
     /// budget to limit context consumption.
     ///
     /// Only model-invocable skills count against the metadata budget. A skill
-    /// with `disable_model_invocation: true` is excluded from the model-visible
-    /// `Skill` tool description even if it is otherwise available to the agent.
+    /// with `disable_model_invocation: true` or `allow_implicit_invocation: false`
+    /// is excluded from the model-visible `Skill` tool description even if it is
+    /// otherwise available to the agent.
     ///
     /// Metadata entries are considered in the order listed by
     /// `agent_type.skills` (the order in which they appear in the catalog).
@@ -138,7 +169,7 @@ impl SkillTool {
         let model_visible: Vec<&SkillMeta> = self
             .catalog
             .iter()
-            .filter(|s| !s.disable_model_invocation)
+            .filter(|s| !s.disable_model_invocation && s.allow_implicit_invocation)
             .collect();
 
         let mut desc = String::from("Available skills:\n");
@@ -146,12 +177,33 @@ impl SkillTool {
         let mut omitted = 0;
 
         for skill in &model_visible {
-            let entry = format!("- {}: {}\n", skill.name, skill.description);
+            let normalized_description = skill
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let entry = format!("- {}: {normalized_description}\n", skill.name);
             if desc.len() + entry.len() <= metadata_budget_chars {
                 desc.push_str(&entry);
                 included += 1;
             } else {
-                omitted += 1;
+                let prefix = format!("- {}: ", skill.name);
+                let suffix = "...\n";
+                let available = metadata_budget_chars
+                    .saturating_sub(desc.len())
+                    .saturating_sub(prefix.len())
+                    .saturating_sub(suffix.len());
+                if available > 0 {
+                    desc.push_str(&prefix);
+                    desc.push_str(truncate_to_char_boundary(
+                        &normalized_description,
+                        available,
+                    ));
+                    desc.push_str(suffix);
+                    included += 1;
+                } else {
+                    omitted += 1;
+                }
             }
         }
 
@@ -177,11 +229,9 @@ impl Tool for SkillTool {
         // definition includes only `name + description`, not the full SKILL.md
         // body. The `"command"` field is required. `additionalProperties` is false.
         //
-        // The metadata budget for skill descriptions is derived as a configured
-        // percentage of the active model's context window. For now we use a
-        // reasonable default of 4096 characters.
-        let metadata_budget_chars = 4096;
-        let catalog_desc = self.build_catalog_description(metadata_budget_chars);
+        // The metadata budget can be provided by the caller when model context
+        // is known. Otherwise SkillTool::new uses the default fallback budget.
+        let catalog_desc = self.build_catalog_description(self.metadata_budget_chars);
 
         ToolDefinition {
             name: "Skill".into(),
@@ -240,6 +290,17 @@ impl Tool for SkillTool {
             });
         }
 
+        if !skill.allow_implicit_invocation {
+            return Box::pin(async move {
+                Ok(json!({
+                    "is_error": true,
+                    "content": format!(
+                        "skill {command:?} has allow_implicit_invocation=false and cannot be invoked by the model"
+                    )
+                }))
+            });
+        }
+
         // Capability checks happen at the call site: before returning a
         // skill body, Simulacra verifies that the requested skill is allowed by
         // the current capability token.
@@ -284,120 +345,12 @@ impl Tool for SkillTool {
     }
 }
 
-/// Strip YAML frontmatter (delimited by `---`) from a SKILL.md string,
-/// returning only the markdown body after the closing `---`.
-#[cfg(feature = "sandbox")]
-fn strip_yaml_frontmatter(content: &str) -> String {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return content.to_string();
-    }
-    // Find the closing `---` after the opening one.
-    if let Some(end) = trimmed[3..].find("\n---") {
-        let after_close = &trimmed[3 + end + 4..]; // skip past "\n---"
-        after_close.trim_start_matches('\n').to_string()
-    } else {
-        content.to_string()
-    }
-}
-
-/// Parse SKILL.md YAML frontmatter into a SkillMeta.
-///
-/// A valid skill directory requires `SKILL.md` with YAML frontmatter plus a
-/// markdown body. The `name` field is the canonical identifier used by both
-/// `Skill(command=...)` and `/skill-name`. The `description` field is exposed
-/// in the model-visible skill catalog.
-///
-/// `disable_model_invocation: true` blocks model-triggered invocation.
-/// `user_invocable: false` blocks `/skill-name` invocation but the skill may
-/// still appear in the model-visible catalog if disable_model_invocation is
-/// false. When `user_invocable: false`, `/skill-name` falls through to the
-/// unknown command path.
-///
-/// `allowed_tools` narrows interactive pre-approval only and does NOT widen
-/// capability policy.
-pub fn parse_skill_frontmatter(content: &str, vfs_path: &str) -> Result<SkillMeta, String> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return Err("SKILL.md must begin with YAML frontmatter (---)".into());
-    }
-    let end = trimmed[3..]
-        .find("\n---")
-        .ok_or("SKILL.md frontmatter missing closing ---")?;
-
-    let yaml_str = &trimmed[3..3 + end + 1]; // include trailing newline
-
-    // Parse YAML fields manually (avoid adding a yaml dependency).
-    let mut name = None;
-    let mut description = None;
-    let mut disable_model_invocation = false;
-    let mut user_invocable = true;
-    let mut allowed_tools = Vec::new();
-    let mut in_allowed_tools = false;
-
-    for line in yaml_str.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if in_allowed_tools {
-            if let Some(item) = line.strip_prefix("- ") {
-                allowed_tools.push(item.trim().to_string());
-                continue;
-            } else {
-                in_allowed_tools = false;
-            }
-        }
-
-        if let Some((key, val)) = line.split_once(':') {
-            let key = key.trim();
-            let val = val.trim();
-            match key {
-                "name" => name = Some(val.to_string()),
-                "description" => description = Some(val.to_string()),
-                "disable_model_invocation" => {
-                    disable_model_invocation = val == "true";
-                }
-                "user_invocable" => {
-                    user_invocable = val != "false";
-                }
-                "allowed_tools" if val.is_empty() => {
-                    in_allowed_tools = true;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let name = name.ok_or("SKILL.md frontmatter missing required field: name")?;
-    let description =
-        description.ok_or("SKILL.md frontmatter missing required field: description")?;
-
-    // Validate that there is a non-empty markdown body after the frontmatter.
-    let body_start = 3 + end + 4; // skip opening "---", yaml, "\n---"
-    let body = trimmed[body_start..].trim();
-    if body.is_empty() {
-        return Err("SKILL.md requires a markdown body after the YAML frontmatter".into());
-    }
-
-    Ok(SkillMeta {
-        name,
-        description,
-        vfs_path: vfs_path.to_string(),
-        disable_model_invocation,
-        user_invocable,
-        allowed_tools,
-        body: Some(body.to_string()),
-    })
-}
-
 // ---------------------------------------------------------------------------
 // discover_and_filter_skills
 // ---------------------------------------------------------------------------
 
-/// Walk the VFS `/skills` directory, parse `SKILL.md` frontmatter for each
-/// subdirectory, and filter the result by the agent type's configured skill
+/// Walk the VFS `/skills` directory tree, parse discovered `SKILL.md`
+/// frontmatter, and filter the result by the agent type's configured skill
 /// list and the capability token's `skill:<name>` patterns.
 ///
 /// User-triggered skill loads are recorded as host-side session events before
@@ -416,46 +369,40 @@ pub fn discover_and_filter_skills(
         return Ok(Vec::new());
     }
 
-    // Discover skills from /skills/<dir>/SKILL.md in the VFS.
+    // Discover skills below the mounted VFS /skills root. This recurses
+    // downward to support grouped skill layouts, but never walks upward or
+    // searches for other skills directories elsewhere in the VFS.
     let mut discovered: HashMap<String, SkillMeta> = HashMap::new();
-    let mut invalid_names: Vec<String> = Vec::new();
 
-    if let Ok(entries) = vfs.list_dir("/skills") {
-        for dir_name in &entries {
-            let skill_path = format!("/skills/{dir_name}/SKILL.md");
-            if !vfs.exists(&skill_path) {
-                continue;
-            }
-            match vfs.read(&skill_path) {
-                Ok(data) => {
-                    let content = String::from_utf8_lossy(&data).into_owned();
-                    match parse_skill_frontmatter(&content, &skill_path) {
-                        Ok(meta) => {
-                            // Duplicate skill names across discovery roots
-                            // fail startup instead of shadowing.
-                            if discovered.contains_key(&meta.name) {
-                                return Err(SkillError::DuplicateSkillName {
-                                    name: meta.name.clone(),
-                                    first_path: discovered[&meta.name].vfs_path.clone(),
-                                    second_path: skill_path,
-                                });
-                            }
-                            discovered.insert(meta.name.clone(), meta);
+    for skill_path in discover_skill_paths(vfs.as_ref(), "/skills") {
+        match vfs.read(&skill_path) {
+            Ok(data) => {
+                let content = String::from_utf8_lossy(&data).into_owned();
+                match parse_skill_frontmatter(&content, &skill_path) {
+                    Ok(meta) => {
+                        // Duplicate skill names across discovery roots
+                        // fail startup instead of shadowing.
+                        if discovered.contains_key(&meta.name) {
+                            return Err(SkillError::DuplicateSkillName {
+                                name: meta.name.clone(),
+                                first_path: discovered[&meta.name].vfs_path.clone(),
+                                second_path: skill_path,
+                            });
                         }
-                        Err(e) => {
-                            // Invalid or missing SKILL.md frontmatter is
-                            // skipped with a warning when unreferenced.
-                            tracing::warn!(
-                                path = %skill_path,
-                                error = %e,
-                                "skip invalid SKILL.md frontmatter"
-                            );
-                            invalid_names.push(dir_name.clone());
-                        }
+                        discovered.insert(meta.name.clone(), meta);
+                    }
+                    Err(e) => {
+                        // Invalid or missing SKILL.md frontmatter is skipped
+                        // with a warning when unreferenced.
+                        tracing::warn!(
+                            path = %skill_path,
+                            error = %e,
+                            "skip invalid SKILL.md frontmatter"
+                        );
                     }
                 }
-                Err(_) => continue,
             }
+            Err(_) => continue,
         }
     }
 
@@ -493,4 +440,42 @@ pub fn discover_and_filter_skills(
     }
 
     Ok(catalog)
+}
+
+fn discover_skill_paths(vfs: &dyn VirtualFs, root: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_skill_paths(vfs, root, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn collect_skill_paths(vfs: &dyn VirtualFs, dir: &str, paths: &mut Vec<String>) {
+    let Ok(entries) = vfs.list_dir(dir) else {
+        return;
+    };
+
+    for entry in entries {
+        let child = format!("{dir}/{entry}");
+        let skill_path = format!("{child}/SKILL.md");
+        if vfs.exists(&skill_path) {
+            paths.push(skill_path);
+        }
+
+        if vfs.metadata(&child).is_ok_and(|meta| meta.is_dir) {
+            collect_skill_paths(vfs, &child, paths);
+        }
+    }
+}
+
+#[cfg(feature = "sandbox")]
+fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }

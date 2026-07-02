@@ -252,6 +252,7 @@ async fn import_capabilities_converts_to_string_form() {
         python: false,
         paths_read: vec![],
         paths_write: vec![],
+        skill_patterns: vec!["skill:rust-*".into()],
         memory: None,
     });
     config.agent_types.insert("x".into(), agent);
@@ -290,5 +291,9 @@ async fn import_capabilities_converts_to_string_form() {
     assert!(
         caps.contains(&"mcp:github:*".to_string()),
         "expected mcp:github:* in caps: {caps:?}"
+    );
+    assert!(
+        caps.contains(&"skill:rust-*".to_string()),
+        "expected skill:rust-* in caps: {caps:?}"
     );
 }

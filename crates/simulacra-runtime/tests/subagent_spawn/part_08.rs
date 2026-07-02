@@ -29,6 +29,8 @@ fn generic_spawn_with_tier_uses_tier_model() {
         paths_read: vec![],
         paths_write: vec![],
 
+        skill_patterns: vec![],
+
         memory: None,
     });
     config
@@ -104,6 +106,8 @@ fn generic_spawn_without_tier_inherits_parent_model() {
             python: false,
             paths_read: vec![],
             paths_write: vec![],
+
+            skill_patterns: vec![],
 
             memory: None,
         }),
@@ -300,6 +304,8 @@ fn generic_spawn_empty_system_prompt_uses_default() {
             python: false,
             paths_read: vec![],
             paths_write: vec![],
+
+            skill_patterns: vec![],
 
             memory: None,
         }),

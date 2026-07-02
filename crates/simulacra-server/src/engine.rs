@@ -1660,6 +1660,7 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
     let mut network: Vec<NetworkPermission> = Vec::new();
     let mut mcp_tools: Vec<String> = Vec::new();
     let mut spawn_types: Vec<String> = Vec::new();
+    let mut skill_patterns: Vec<String> = Vec::new();
 
     for cap in &resolved.capabilities {
         let trimmed = cap.trim();
@@ -1677,6 +1678,9 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
                 if let Some(pattern) = normalize_mcp_capability(other) {
                     mcp_tools.push(pattern);
                 }
+            }
+            other if other.starts_with("skill:") => {
+                skill_patterns.push(other.to_owned());
             }
             other if other.starts_with("spawn:") => {
                 let agent_type = other.trim_start_matches("spawn:").trim();
@@ -1697,7 +1701,7 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
         paths_write: vec![PathPattern("/**".into())],
         mcp_tools,
         spawn_types,
-        skill_patterns: vec![],
+        skill_patterns,
         memory: simulacra_types::MemoryCapability::default(),
     }
 }
