@@ -97,6 +97,13 @@ pub enum JournalEntryKind {
         path: String,
         size_bytes: u64,
     },
+    FileDelete {
+        path: String,
+    },
+    FileMove {
+        from: String,
+        to: String,
+    },
     HttpRequest {
         method: String,
         url: String,
@@ -374,6 +381,36 @@ mod tests {
                 assert_eq!(*size_bytes, 4096);
             }
             other => panic!("expected FileWrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_file_delete_and_move() {
+        let delete = make_entry(JournalEntryKind::FileDelete {
+            path: "/workspace/old.rs".into(),
+        });
+        let move_entry = make_entry(JournalEntryKind::FileMove {
+            from: "/workspace/old.rs".into(),
+            to: "/workspace/new.rs".into(),
+        });
+
+        let decoded_delete: JournalEntry =
+            serde_json::from_str(&serde_json::to_string(&delete).unwrap()).unwrap();
+        match &decoded_delete.entry {
+            JournalEntryKind::FileDelete { path } => {
+                assert_eq!(path, "/workspace/old.rs");
+            }
+            other => panic!("expected FileDelete, got {other:?}"),
+        }
+
+        let decoded_move: JournalEntry =
+            serde_json::from_str(&serde_json::to_string(&move_entry).unwrap()).unwrap();
+        match &decoded_move.entry {
+            JournalEntryKind::FileMove { from, to } => {
+                assert_eq!(from, "/workspace/old.rs");
+                assert_eq!(to, "/workspace/new.rs");
+            }
+            other => panic!("expected FileMove, got {other:?}"),
         }
     }
 

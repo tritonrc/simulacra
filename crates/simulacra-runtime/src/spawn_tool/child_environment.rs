@@ -27,7 +27,9 @@ pub(super) struct ChildEnvironment {
     pub(super) sink: Arc<dyn ActivitySink>,
 }
 
-pub(super) fn build_child_environment(spec: ChildEnvironmentSpec<'_>) -> ChildEnvironment {
+pub(super) fn build_child_environment(
+    spec: ChildEnvironmentSpec<'_>,
+) -> Result<ChildEnvironment, simulacra_types::ToolError> {
     let child_proc = child_proc_runtime(
         Arc::clone(&spec.inherited_vfs),
         Arc::clone(&spec.inherited_journal),
@@ -42,7 +44,7 @@ pub(super) fn build_child_environment(spec: ChildEnvironmentSpec<'_>) -> ChildEn
         },
     );
     let cell = build_child_cell(&child_proc, spec.child_config, &spec);
-    let registry = build_child_registry(&cell, Arc::clone(&child_proc.budget), &spec);
+    let registry = build_child_registry(&cell, Arc::clone(&child_proc.budget), &spec)?;
     child_proc.tools.set(registry.definitions());
 
     let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
@@ -51,11 +53,11 @@ pub(super) fn build_child_environment(spec: ChildEnvironmentSpec<'_>) -> ChildEn
         spec.parent_sink,
     ));
 
-    ChildEnvironment {
+    Ok(ChildEnvironment {
         proc: child_proc,
         registry,
         sink,
-    }
+    })
 }
 
 fn build_child_cell(
@@ -85,11 +87,11 @@ fn build_child_registry(
     cell: &Arc<simulacra_sandbox::AgentCell>,
     child_budget: Arc<Mutex<ResourceBudget>>,
     spec: &ChildEnvironmentSpec<'_>,
-) -> simulacra_tool::ToolRegistry {
+) -> Result<simulacra_tool::ToolRegistry, simulacra_types::ToolError> {
     let mut registry = simulacra_tool::ToolRegistry::new();
-    simulacra_tool::register_builtins(&mut registry, Arc::clone(cell));
+    simulacra_tool::register_builtins(&mut registry, Arc::clone(cell))?;
     if let Some(register_extra_tools) = &spec.tool_registrar {
-        register_extra_tools(&mut registry, Arc::clone(cell));
+        register_extra_tools(&mut registry, Arc::clone(cell))?;
     }
     if let Some(spawn_tool) = &spec.spawn_tool {
         registry.register(Box::new(SpawnAgentTool {
@@ -100,7 +102,7 @@ fn build_child_registry(
             tiers: spawn_tool.tiers.clone(),
             parent_budget: child_budget,
             parent_model: spawn_tool.parent_model.clone(),
-        }));
+        }))?;
     }
-    registry
+    Ok(registry)
 }

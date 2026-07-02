@@ -696,7 +696,7 @@ fn bootstrap_registers_the_six_builtin_tools_from_s012() {
         assert_eq!(
             tool_names,
             vec![
-                "file_edit",
+                "apply_patch",
                 "file_read",
                 "file_write",
                 "js_exec",
@@ -711,7 +711,7 @@ fn bootstrap_registers_the_six_builtin_tools_from_s012() {
         assert_eq!(
             tool_names,
             vec![
-                "file_edit",
+                "apply_patch",
                 "file_read",
                 "file_write",
                 "js_exec",

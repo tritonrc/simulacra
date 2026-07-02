@@ -19,7 +19,7 @@ writeFileSync, appendFileSync, readdirSync, statSync, renameSync, unlinkSync, mk
 plus pipes, redirects, `&&`, `||`, and `;`. Cwd and env vars persist across shell calls. \
 `node <file.js>`, `node -e <code>`, `node -`, `python <script.py>`, `python -c <code>`, \
 and `python -` run through the sandboxed JS/Python engines when capabilities allow.
-- **file_read**, **file_write**, **file_edit**: Read, write, or edit files in the virtual filesystem.
+- **file_read**, **file_write**, **apply_patch**: Read, write, or patch files in the virtual filesystem.
 - **list_dir**: List directory contents.
 
 All file paths are relative to `/workspace/`. Network access is available when permitted by \

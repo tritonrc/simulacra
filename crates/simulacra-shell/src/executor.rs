@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use simulacra_types::VirtualFs;
+use simulacra_types::{VfsError, VirtualFs};
 use tracing::{Span, field};
 
 use crate::CommandResult;
@@ -54,6 +54,18 @@ impl<'a> ShellExecutor<'a> {
             "/".to_string()
         };
         self
+    }
+
+    /// Builder: set the initial working directory, returning an error instead
+    /// of falling back when the path is missing or not a directory.
+    pub fn try_with_cwd(mut self, cwd: impl Into<String>) -> Result<Self, VfsError> {
+        let candidate = normalize_path(&cwd.into(), "/");
+        let metadata = self.vfs.metadata(&candidate)?;
+        if !metadata.is_dir {
+            return Err(VfsError::NotADirectory(candidate));
+        }
+        self.cwd = candidate;
+        Ok(self)
     }
 
     /// Builder: attach a mediated runner for commands such as `node` or

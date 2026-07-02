@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use simulacra_hooks::{HookError, HookPipeline, Operation, Verdict};
 use simulacra_memory::{HitIdCache, MemoryStore, VectorIndex};
 use simulacra_types::{
-    CapabilityToken, HitId, MemoryCapability, TenantId, Tool, ToolDefinition, ToolError,
+    CapabilityToken, HitId, MemoryCapability, TenantId, Tool, ToolDefinition, ToolError, ToolOutput,
 };
 
 // ─── memory_read_chunk ───────────────────────────────────────────────────────
@@ -277,5 +277,13 @@ impl Tool for MemoryReadChunkTool {
 
             Ok(result_json)
         })
+    }
+
+    fn output_from_value(&self, value: Value) -> ToolOutput {
+        if value.get("error").is_some() {
+            ToolOutput::error(value.to_string()).with_structured(value)
+        } else {
+            ToolOutput::from_value(value)
+        }
     }
 }

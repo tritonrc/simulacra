@@ -101,7 +101,9 @@ async fn replay_fails_when_recorded_tool_call_does_not_match_live_tool_call() {
     ];
 
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
     let mut agent = AgentLoop::with_clock_and_replay(
         default_config(),
         Box::new(FakeProvider::new(vec![])),
@@ -245,7 +247,9 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
     ];
 
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
     let mut agent = AgentLoop::with_clock_and_replay(
         default_config(),
         Box::new(FakeProvider::new(vec![])),
@@ -352,7 +356,9 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
     ];
 
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
     let mut agent = AgentLoop::with_clock_and_replay(
         default_config(),
         Box::new(FakeProvider::new(vec![])),
@@ -388,4 +394,3 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
         "unexpected error: {message}"
     );
 }
-

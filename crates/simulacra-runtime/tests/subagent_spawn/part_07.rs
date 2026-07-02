@@ -87,7 +87,7 @@ fn generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent() 
     let expected_builtins: BTreeSet<String> = [
         "file_read",
         "file_write",
-        "file_edit",
+        "apply_patch",
         "shell_exec",
         "js_exec",
         "list_dir",
@@ -443,4 +443,3 @@ async fn generic_spawn_without_tier_reverse_looks_up_parent_model_for_resolved_t
         "generic spawn without tier should label the child with the first tier whose model matches the parent model"
     );
 }
-

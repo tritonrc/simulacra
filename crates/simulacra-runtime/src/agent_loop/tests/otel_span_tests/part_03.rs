@@ -16,7 +16,7 @@
             budget,
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let result = agent.run("trip the turn budget").await;
         assert!(result.is_err(), "an exhausted budget should stop the loop");
 
@@ -47,7 +47,9 @@
             text_response("Done!"),
         ]);
         let mut tools = ToolRegistry::new();
-        tools.register(Box::new(EchoTool));
+        tools
+            .register(Box::new(EchoTool))
+            .expect("test tool registration should succeed");
 
         let mut agent = build_loop(
             provider,
@@ -57,7 +59,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _output = agent
             .run("consume budget twice")
             .await
@@ -97,7 +99,7 @@
             budget,
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let result = agent.run("emit a budget exhaustion event").await;
         assert!(result.is_err(), "an exhausted budget should fail the run");
 
@@ -196,7 +198,7 @@
             Some(replay_entries),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let result = agent.run("hit replay divergence").await;
         assert!(result.is_err(), "divergent replay should fail loudly");
 
@@ -309,7 +311,7 @@
             None,
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("nest spans").await.unwrap();
 
         let spans = spans.lock().unwrap();

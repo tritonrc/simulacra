@@ -112,7 +112,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                     tool_registrar: child_tool_registrar.clone(),
                     spawn_tool: None,
                     parent_sink,
-                });
+                })?;
 
                 run_spawn_before_hook(
                     pipeline.as_ref(),
@@ -213,7 +213,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                 tool_registrar: child_tool_registrar.clone(),
                 spawn_tool,
                 parent_sink,
-            });
+            })?;
 
             run_spawn_before_hook(
                 pipeline.as_ref(),

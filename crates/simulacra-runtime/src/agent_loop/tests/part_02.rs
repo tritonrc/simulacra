@@ -47,7 +47,9 @@ async fn context_strategy_compacts_messages() {
         text_response("Final"),
     ]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
 
     let mut agent = build_loop(
         provider,
@@ -90,7 +92,9 @@ async fn token_usage_accumulates_across_turns() {
         text_response("done"),
     ]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
 
     let mut agent = build_loop(
         provider,
@@ -119,7 +123,9 @@ async fn budget_used_turns_increments() {
         text_response("done"),
     ]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(EchoTool));
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
 
     let budget = default_budget();
     let mut agent = build_loop(
@@ -151,7 +157,9 @@ async fn capability_denial_is_journaled_with_operation_details() {
         text_response("done"),
     ]);
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(DenyShellTool));
+    tools
+        .register(Box::new(DenyShellTool))
+        .expect("test tool registration should succeed");
 
     let mut agent = build_loop(
         provider,
@@ -191,6 +199,247 @@ async fn capability_denial_is_journaled_with_operation_details() {
         denied_result.0.contains("shell capability not granted"),
         "journaled denial should include the denial reason"
     );
+}
+
+#[tokio::test]
+async fn explicit_tool_output_is_error_true_is_journaled_and_prefixed() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![
+        tool_call_response("explicit_error_output", serde_json::json!({})),
+        text_response("done"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(ExplicitErrorOutputTool))
+        .expect("test tool registration should succeed");
+
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("run explicit error tool").await.unwrap();
+
+    let journaled = journal
+        .read_all(&AgentId("test-agent".into()))
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } if tool_name == "explicit_error_output" => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("expected explicit error tool result");
+
+    assert_eq!(journaled, ("explicit failure".to_string(), true));
+    assert!(output.messages.iter().any(|message| {
+        message.role == Role::Tool && message.content == "ERROR: explicit failure"
+    }));
+}
+
+#[tokio::test]
+async fn builtin_tool_output_error_is_journaled_and_prefixed() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![
+        tool_call_response("file_read", serde_json::json!({ "path": "/missing.txt" })),
+        text_response("done"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(NamedErrorOutputTool {
+            name: "file_read",
+            content: "not found: /missing.txt",
+        }))
+        .expect("test tool registration should succeed");
+
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("read a missing file").await.unwrap();
+
+    let journaled = journal
+        .read_all(&AgentId("test-agent".into()))
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } if tool_name == "file_read" => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("expected file_read tool result");
+
+    assert!(journaled.0.contains("not found"), "got {:?}", journaled.0);
+    assert!(journaled.1);
+    assert!(output.messages.iter().any(|message| {
+        message.role == Role::Tool && message.content.starts_with("ERROR: ")
+    }));
+}
+
+#[tokio::test]
+async fn skill_tool_output_error_is_journaled_and_prefixed() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![
+        tool_call_response("Skill", serde_json::json!({ "command": "missing" })),
+        text_response("done"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(NamedErrorOutputTool {
+            name: "Skill",
+            content: "unknown skill: \"missing\"",
+        }))
+        .expect("test tool registration should succeed");
+
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("load a missing skill").await.unwrap();
+
+    let journaled = journal
+        .read_all(&AgentId("test-agent".into()))
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } if tool_name == "Skill" => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("expected Skill tool result");
+
+    assert!(journaled.0.contains("unknown skill"), "got {:?}", journaled.0);
+    assert!(journaled.1);
+    assert!(output.messages.iter().any(|message| {
+        message.role == Role::Tool && message.content.starts_with("ERROR: unknown skill")
+    }));
+}
+
+#[tokio::test]
+async fn legacy_error_field_without_explicit_is_error_is_not_journaled_as_error() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![
+        tool_call_response("legacy_error_field", serde_json::json!({})),
+        text_response("done"),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(LegacyErrorFieldTool))
+        .expect("test tool registration should succeed");
+
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("run legacy error-shaped tool").await.unwrap();
+
+    let journaled = journal
+        .read_all(&AgentId("test-agent".into()))
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } if tool_name == "legacy_error_field" => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("expected legacy error-field tool result");
+
+    assert_eq!(journaled.0, r#"{"error":"legacy failure"}"#);
+    assert!(!journaled.1, "plain error fields must not imply is_error");
+    assert!(output.messages.iter().any(|message| {
+        message.role == Role::Tool && message.content == r#"{"error":"legacy failure"}"#
+    }));
+}
+
+#[tokio::test]
+async fn memory_read_chunk_error_payload_is_journaled_as_tool_error() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![
+        tool_call_response("memory_read_chunk", serde_json::json!({ "hit_id": "missing" })),
+        text_response("done"),
+    ]);
+
+    let memory_scope = MemoryPath::parse("/var/memory/self").unwrap();
+    let memory_capability = MemoryCapability {
+        enabled: true,
+        search_scopes: vec![memory_scope],
+        write_scopes: Vec::new(),
+    };
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(simulacra_tool::MemoryReadChunkTool::new(
+            TenantId::parse("tenant-a").unwrap(),
+            memory_capability,
+            Arc::new(NoopMemoryStore),
+            Arc::new(NoopVectorIndex),
+            Arc::new(simulacra_memory::HitIdCache::new()),
+            None,
+        )))
+        .expect("test tool registration should succeed");
+
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("read a missing memory hit").await.unwrap();
+
+    let journaled = journal
+        .read_all(&AgentId("test-agent".into()))
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            } if tool_name == "memory_read_chunk" => Some((content, is_error)),
+            _ => None,
+        })
+        .expect("expected memory_read_chunk tool result");
+
+    assert!(journaled.0.contains("hit_not_found"));
+    assert!(journaled.1, "memory error payloads must set is_error");
+    assert!(output.messages.iter().any(|message| {
+        message.role == Role::Tool
+            && message.content.starts_with("ERROR: ")
+            && message.content.contains("hit_not_found")
+    }));
 }
 
 // -----------------------------------------------------------------------

@@ -11,7 +11,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _output = agent.run("Say hello").await.expect("run should succeed");
 
         let spans = captured_spans.lock().unwrap();
@@ -36,7 +36,9 @@
             text_response("Done!"),
         ]);
         let mut tools = ToolRegistry::new();
-        tools.register(Box::new(EchoTool));
+        tools
+            .register(Box::new(EchoTool))
+            .expect("test tool registration should succeed");
 
         let mut agent = build_loop(
             provider,
@@ -46,7 +48,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _output = agent
             .run("Use echo tool")
             .await
@@ -82,7 +84,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("capture live journal spans").await.unwrap();
 
         let spans = captured_spans.lock().unwrap();
@@ -174,7 +176,7 @@
             Some(replay_entries),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("replayed task").await.unwrap();
 
         let spans = captured_spans.lock().unwrap();
@@ -186,4 +188,3 @@
             "expected replayed journal appends to be tagged with simulacra.journal.mode=replayed"
         );
     }
-

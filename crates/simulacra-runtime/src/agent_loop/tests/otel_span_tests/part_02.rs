@@ -11,7 +11,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("emit journal metrics").await.unwrap();
 
         let events = captured_events.lock().unwrap();
@@ -97,7 +97,7 @@
             Some(replay_entries),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("measure replay ratio").await.unwrap();
 
         let events = captured_events.lock().unwrap();
@@ -121,7 +121,9 @@
             text_response("done"),
         ]);
         let mut tools = ToolRegistry::new();
-        tools.register(Box::new(DenyShellTool));
+        tools
+            .register(Box::new(DenyShellTool))
+            .expect("test tool registration should succeed");
 
         let mut agent = build_loop(
             provider,
@@ -131,7 +133,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("emit a capability denial").await.unwrap();
 
         let spans = captured_spans.lock().unwrap();
@@ -176,7 +178,9 @@
             text_response("done"),
         ]);
         let mut tools = ToolRegistry::new();
-        tools.register(Box::new(DenyShellTool));
+        tools
+            .register(Box::new(DenyShellTool))
+            .expect("test tool registration should succeed");
 
         let mut agent = build_loop(
             provider,
@@ -186,7 +190,7 @@
             default_budget(),
         );
 
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
         let _ = agent.run("emit a capability denial").await.unwrap();
 
         let events = captured_events.lock().unwrap();
@@ -206,4 +210,3 @@
             "capability denial WARN event should include the agent name for attribution"
         );
     }
-

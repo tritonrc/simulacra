@@ -25,7 +25,7 @@ fn mcp_tool_calls_emit_execute_tool_span_with_mcp_source_attributes() {
         .to_string(),
     );
 
-    let ((_, server_name), spans, _events) = capture_traces(|| {
+    let ((result, server_name), spans, _events) = capture_traces(|| {
         run_async(async {
             let mut manager = McpManager::new();
             let capability = capability_with_mcp_tools(&["mcp:*:echo"]);
@@ -48,6 +48,7 @@ fn mcp_tool_calls_emit_execute_tool_span_with_mcp_source_attributes() {
             (result, server_name)
         })
     });
+    result.expect("call_tool should succeed before telemetry assertions are evaluated");
 
     let execute_tool_span = spans
         .iter()
@@ -94,7 +95,7 @@ fn mcp_tool_calls_increment_counter_with_server_and_tool_labels() {
         .to_string(),
     );
 
-    let ((_, server_name), _spans, events) = capture_traces(|| {
+    let ((result, server_name), _spans, events) = capture_traces(|| {
         run_async(async {
             let mut manager = McpManager::new();
             let capability = capability_with_mcp_tools(&["mcp:*:echo"]);
@@ -117,6 +118,7 @@ fn mcp_tool_calls_increment_counter_with_server_and_tool_labels() {
             (result, server_name)
         })
     });
+    result.expect("call_tool should succeed before metric assertions are evaluated");
 
     let metric_event = events
         .iter()
@@ -195,7 +197,7 @@ fn mcp_tool_calls_emit_gen_ai_tool_message_events_for_input_and_output() {
         .to_string(),
     );
 
-    let (_result, _spans, events) = capture_traces(|| {
+    let (result, _spans, events) = capture_traces(|| {
         run_async(async {
             let mut manager = McpManager::new();
             let capability = capability_with_mcp_tools(&["mcp:*:echo"]);
@@ -216,6 +218,7 @@ fn mcp_tool_calls_emit_gen_ai_tool_message_events_for_input_and_output() {
                 .await
         })
     });
+    result.expect("call_tool should succeed before tool message assertions are evaluated");
 
     let input_event = events
         .iter()
@@ -267,4 +270,3 @@ fn mcp_tool_calls_emit_gen_ai_tool_message_events_for_input_and_output() {
     assert_eq!(input_event.current_span.as_deref(), Some("execute_tool"));
     assert_eq!(output_event.current_span.as_deref(), Some("execute_tool"));
 }
-

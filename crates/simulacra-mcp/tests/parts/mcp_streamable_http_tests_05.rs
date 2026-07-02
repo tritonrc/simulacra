@@ -74,7 +74,7 @@ async fn session_expiry_on_404_triggers_rehandshake() {
         .expect("connect should succeed");
 
     // Trigger initial handshake.
-    let tools = list_tools_with_retry(&mut manager).await;
+    let tools = manager.list_tools().await;
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "session_tool");
 
@@ -126,7 +126,7 @@ async fn session_expiry_failed_rehandshake_returns_error_without_retry_dispatch(
         .await
         .expect("connect should succeed");
 
-    let tools = list_tools_with_retry(&mut manager).await;
+    let tools = manager.list_tools().await;
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "session_tool");
 
@@ -228,4 +228,3 @@ async fn sse_stream_no_result_returns_protocol_error() {
 // Fake MCP server that returns a transient transport failure on the first
 // tool call, then succeeds on subsequent handshakes + tool calls after
 // reconnection.
-

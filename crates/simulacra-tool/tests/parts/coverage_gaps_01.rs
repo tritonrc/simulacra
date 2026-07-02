@@ -1,43 +1,29 @@
 // ---------------------------------------------------------------------------
-// FT6: file_edit missing old_string / new_string error paths
+// FT6: apply_patch missing or invalid patch argument
 // ---------------------------------------------------------------------------
 
 #[test]
-fn file_edit_without_old_string_returns_invalid_arguments() {
+fn apply_patch_without_patch_argument_returns_invalid_arguments() {
     let capability = full_capability();
     let harness = Harness::new(capability.clone(), unlimited_budget());
-    harness
-        .vfs
-        .write("/workspace/edit.txt", b"content")
-        .unwrap();
 
     assert_invalid_arguments(call_tool(
         &harness,
-        "file_edit",
-        json!({
-            "path": "/workspace/edit.txt",
-            "new_string": "replacement"
-        }),
+        "apply_patch",
+        json!({}),
         &capability,
     ));
 }
 
 #[test]
-fn file_edit_without_new_string_returns_invalid_arguments() {
+fn apply_patch_with_non_string_patch_returns_invalid_arguments() {
     let capability = full_capability();
     let harness = Harness::new(capability.clone(), unlimited_budget());
-    harness
-        .vfs
-        .write("/workspace/edit.txt", b"content")
-        .unwrap();
 
     assert_invalid_arguments(call_tool(
         &harness,
-        "file_edit",
-        json!({
-            "path": "/workspace/edit.txt",
-            "old_string": "content"
-        }),
+        "apply_patch",
+        json!({ "patch": 42 }),
         &capability,
     ));
 }
@@ -238,4 +224,3 @@ fn shell_exec_with_exhausted_turns_budget_returns_execution_failed() {
         other => panic!("expected execution failed error for budget exhaustion, got {other:?}"),
     }
 }
-

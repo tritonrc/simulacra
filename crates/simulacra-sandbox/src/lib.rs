@@ -167,6 +167,8 @@ pub struct AgentCell {
     /// Persistent shell working directory, surviving across `execute_shell` calls.
     /// `cd /tmp` in one call leaves the next call rooted at `/tmp`.
     shell_cwd: Mutex<String>,
+    /// Serializes multi-step VFS mutation batches through this cell.
+    vfs_mutation_lock: Mutex<()>,
     /// JS runtime wrapper that preserves mediated host configuration and
     /// remote source caches. Each eval creates a fresh QuickJS context.
     js_runtime: SendableJsRuntime,
@@ -179,6 +181,78 @@ pub struct AgentCell {
     pub integration_registry: Option<Arc<simulacra_integration::IntegrationRegistry>>,
     /// S033: Which integrations this agent's tenant is granted access to.
     pub tenant_integrations: Vec<String>,
+}
+
+/// A VFS mutation batch item executed through [`AgentCell`].
+#[derive(Debug, Clone)]
+pub enum VfsMutation {
+    Write {
+        path: String,
+        data: Vec<u8>,
+        precondition: VfsWritePrecondition,
+    },
+    Delete {
+        path: String,
+    },
+    Move {
+        from: String,
+        to: String,
+    },
+    MoveAndWrite {
+        from: String,
+        to: String,
+        data: Vec<u8>,
+        from_precondition: Option<Vec<u8>>,
+    },
+}
+
+/// Expected state for a [`VfsMutation::Write`] before it may execute.
+#[derive(Debug, Clone)]
+pub enum VfsWritePrecondition {
+    Any,
+    Missing,
+    Matches(Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
+enum VfsPathState {
+    Missing,
+    File(Vec<u8>),
+    Dir,
+}
+
+#[derive(Debug, Clone)]
+struct VfsRollbackExpectation {
+    path: String,
+    expected_after: VfsPathState,
+}
+
+#[derive(Debug, Clone)]
+struct VfsRollbackEntry {
+    path: String,
+    before: VfsPathState,
+    expected_after: VfsPathState,
+}
+
+#[derive(Debug, Clone)]
+enum PreparedVfsMutation {
+    Write {
+        path: String,
+        data: Vec<u8>,
+    },
+    Delete {
+        path: String,
+    },
+    Move {
+        from: String,
+        to: String,
+        data: Vec<u8>,
+    },
+    MoveAndWrite {
+        from: String,
+        to: String,
+        data: Vec<u8>,
+    },
 }
 
 impl AgentCell {
@@ -200,6 +274,7 @@ impl AgentCell {
             module_stubs: Mutex::new(HashMap::new()),
             shell_env: Mutex::new(HashMap::new()),
             shell_cwd: Mutex::new("/".to_string()),
+            vfs_mutation_lock: Mutex::new(()),
             js_runtime: SendableJsRuntime::new(),
             script_executor: None,
             integration_registry: None,
@@ -255,6 +330,436 @@ impl AgentCell {
             &self.budget,
             &self.journal,
             &self.agent_id,
+        )
+    }
+
+    /// Check write admission for a future VFS mutation without mutating the VFS.
+    pub fn preflight_path_write(&self, path: &str) -> Result<(), SandboxError> {
+        check_and_journal_capability(
+            || self.capability.check_path_write(path),
+            "preflight_path_write",
+            cap_name_for_write(path),
+            &self.journal,
+            &self.agent_id,
+        )
+    }
+
+    /// Check whether a path exists when the caller has write capability for it.
+    pub fn path_exists_for_write(&self, path: &str) -> Result<bool, SandboxError> {
+        let _span = tracing::info_span!(
+            "sandbox_path_exists_for_write",
+            simulacra.operation.name = "sandbox_path_exists_for_write",
+            simulacra.vfs.path = path,
+        )
+        .entered();
+
+        check_and_journal_capability(
+            || self.capability.check_path_write(path),
+            "path_exists_for_write",
+            cap_name_for_write(path),
+            &self.journal,
+            &self.agent_id,
+        )?;
+
+        Ok(self.vfs.exists(path))
+    }
+
+    /// Check whether a future batch of VFS writes fits the current byte budget.
+    pub fn preflight_vfs_write_bytes(&self, bytes: u64) -> Result<(), SandboxError> {
+        let b = self
+            .budget
+            .lock()
+            .map_err(|e| SandboxError::Internal(format!("budget mutex poisoned: {e}")))?;
+        if let Err(exhausted) = b.check_budget() {
+            journal_budget_exhaustion(&self.journal, &self.agent_id, &exhausted);
+            tracing::warn!(
+                simulacra.budget.resource = %exhausted.resource,
+                simulacra.budget.used = %exhausted.used,
+                simulacra.budget.limit = %exhausted.limit,
+                "budget exhausted"
+            );
+            return Err(SandboxError::BudgetExhausted(exhausted));
+        }
+
+        let projected = b.used_vfs_bytes.saturating_add(bytes);
+        if b.max_vfs_bytes > 0 && projected > b.max_vfs_bytes {
+            let exhausted = BudgetExhausted {
+                resource: "vfs_bytes".into(),
+                used: projected.to_string(),
+                limit: b.max_vfs_bytes.to_string(),
+            };
+            journal_budget_exhaustion(&self.journal, &self.agent_id, &exhausted);
+            tracing::warn!(
+                simulacra.budget.resource = "vfs_bytes",
+                simulacra.budget.used = %projected,
+                simulacra.budget.limit = %b.max_vfs_bytes,
+                "budget exhausted"
+            );
+            return Err(SandboxError::BudgetExhausted(exhausted));
+        }
+
+        Ok(())
+    }
+
+    /// Apply a set of VFS mutations as a single capability-checked, journaled batch.
+    pub fn apply_vfs_mutations(
+        &self,
+        tool_name: &str,
+        mutations: &[VfsMutation],
+    ) -> Result<(), SandboxError> {
+        let _span = tracing::info_span!(
+            "sandbox_apply_vfs_mutations",
+            simulacra.operation.name = "sandbox_apply_vfs_mutations",
+            simulacra.tool.name = tool_name,
+            simulacra.vfs.mutation_count = mutations.len() as u64,
+        )
+        .entered();
+
+        let _mutation_guard = self
+            .vfs_mutation_lock
+            .lock()
+            .map_err(|e| SandboxError::Internal(format!("vfs mutation mutex poisoned: {e}")))?;
+
+        for mutation in mutations {
+            match mutation {
+                VfsMutation::Write { path, .. } | VfsMutation::Delete { path } => {
+                    check_and_journal_capability(
+                        || self.capability.check_path_write(path),
+                        tool_name,
+                        cap_name_for_write(path),
+                        &self.journal,
+                        &self.agent_id,
+                    )?;
+                }
+                VfsMutation::Move { from, to } | VfsMutation::MoveAndWrite { from, to, .. } => {
+                    check_and_journal_capability(
+                        || self.capability.check_path_read(from),
+                        tool_name,
+                        cap_name_for_read(from),
+                        &self.journal,
+                        &self.agent_id,
+                    )?;
+                    check_and_journal_capability(
+                        || self.capability.check_path_write(from),
+                        tool_name,
+                        cap_name_for_write(from),
+                        &self.journal,
+                        &self.agent_id,
+                    )?;
+                    check_and_journal_capability(
+                        || self.capability.check_path_write(to),
+                        tool_name,
+                        cap_name_for_write(to),
+                        &self.journal,
+                        &self.agent_id,
+                    )?;
+                }
+            }
+        }
+
+        self.preflight_vfs_write_bytes(0)?;
+
+        let mut write_bytes = 0_u64;
+        let mut file_write_entries = Vec::new();
+        let mut file_delete_entries = Vec::new();
+        let mut file_move_entries = Vec::new();
+        for mutation in mutations {
+            match mutation {
+                VfsMutation::Write { path, data, .. } => {
+                    write_bytes = write_bytes.saturating_add(data.len() as u64);
+                    file_write_entries.push((path.as_str(), data.len() as u64));
+                }
+                VfsMutation::Delete { path } => {
+                    file_delete_entries.push(path.as_str());
+                }
+                VfsMutation::Move { from, to } => {
+                    let metadata = self.vfs.metadata(from).map_err(SandboxError::Vfs)?;
+                    if !metadata.is_file {
+                        return Err(SandboxError::Vfs(VfsError::NotAFile(from.clone())));
+                    }
+                    write_bytes = write_bytes.saturating_add(metadata.size);
+                    file_move_entries.push((from.as_str(), to.as_str()));
+                    file_write_entries.push((to.as_str(), metadata.size));
+                }
+                VfsMutation::MoveAndWrite { from, to, data, .. } => {
+                    write_bytes = write_bytes.saturating_add(data.len() as u64);
+                    file_move_entries.push((from.as_str(), to.as_str()));
+                    file_write_entries.push((to.as_str(), data.len() as u64));
+                }
+            }
+        }
+
+        if write_bytes > 0 {
+            reserve_vfs_bytes(&self.budget, write_bytes, &self.journal, &self.agent_id)?;
+        }
+
+        let mut rollback_expectations = Vec::new();
+        let mut created_parent_dirs = Vec::new();
+        let mut prepared_mutations = Vec::with_capacity(mutations.len());
+        let preparation_result: Result<(), SandboxError> = (|| {
+            for mutation in mutations {
+                match mutation {
+                    VfsMutation::Write {
+                        path,
+                        data,
+                        precondition,
+                    } => {
+                        ensure_parent_components_are_directories(&self.vfs, path)?;
+                        validate_write_precondition(&self.vfs, path, precondition)?;
+                        upsert_rollback_expectation(
+                            &mut rollback_expectations,
+                            path,
+                            VfsPathState::File(data.clone()),
+                        );
+                        record_missing_parent_dirs(&self.vfs, path, &mut created_parent_dirs);
+                        prepared_mutations.push(PreparedVfsMutation::Write {
+                            path: path.clone(),
+                            data: data.clone(),
+                        });
+                    }
+                    VfsMutation::Delete { path } => {
+                        let metadata = self.vfs.metadata(path).map_err(SandboxError::Vfs)?;
+                        if !metadata.is_file {
+                            return Err(SandboxError::Vfs(VfsError::NotAFile(path.clone())));
+                        }
+                        upsert_rollback_expectation(
+                            &mut rollback_expectations,
+                            path,
+                            VfsPathState::Missing,
+                        );
+                        prepared_mutations.push(PreparedVfsMutation::Delete { path: path.clone() });
+                    }
+                    VfsMutation::Move { from, to } => {
+                        let metadata = self.vfs.metadata(from).map_err(SandboxError::Vfs)?;
+                        if !metadata.is_file {
+                            return Err(SandboxError::Vfs(VfsError::NotAFile(from.clone())));
+                        }
+                        ensure_parent_components_are_directories(&self.vfs, to)?;
+                        ensure_vfs_path_missing(&self.vfs, to)?;
+                        let data = self.vfs.read(from).map_err(SandboxError::Vfs)?;
+                        upsert_rollback_expectation(
+                            &mut rollback_expectations,
+                            from,
+                            VfsPathState::Missing,
+                        );
+                        upsert_rollback_expectation(
+                            &mut rollback_expectations,
+                            to,
+                            VfsPathState::File(data.clone()),
+                        );
+                        record_missing_parent_dirs(&self.vfs, to, &mut created_parent_dirs);
+                        prepared_mutations.push(PreparedVfsMutation::Move {
+                            from: from.clone(),
+                            to: to.clone(),
+                            data,
+                        });
+                    }
+                    VfsMutation::MoveAndWrite {
+                        from,
+                        to,
+                        data,
+                        from_precondition,
+                    } => {
+                        let metadata = self.vfs.metadata(from).map_err(SandboxError::Vfs)?;
+                        if !metadata.is_file {
+                            return Err(SandboxError::Vfs(VfsError::NotAFile(from.clone())));
+                        }
+                        if let Some(expected) = from_precondition {
+                            validate_file_matches(&self.vfs, from, expected)?;
+                        }
+                        ensure_parent_components_are_directories(&self.vfs, to)?;
+                        ensure_vfs_path_missing(&self.vfs, to)?;
+                        upsert_rollback_expectation(
+                            &mut rollback_expectations,
+                            from,
+                            VfsPathState::Missing,
+                        );
+                        upsert_rollback_expectation(
+                            &mut rollback_expectations,
+                            to,
+                            VfsPathState::File(data.clone()),
+                        );
+                        record_missing_parent_dirs(&self.vfs, to, &mut created_parent_dirs);
+                        prepared_mutations.push(PreparedVfsMutation::MoveAndWrite {
+                            from: from.clone(),
+                            to: to.clone(),
+                            data: data.clone(),
+                        });
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = preparation_result {
+            if write_bytes > 0 {
+                release_vfs_bytes(&self.budget, write_bytes)?;
+            }
+            return Err(err);
+        }
+
+        let rollback_states = match capture_vfs_rollback_entries(&self.vfs, &rollback_expectations)
+        {
+            Ok(states) => states,
+            Err(err) => {
+                if write_bytes > 0 {
+                    release_vfs_bytes(&self.budget, write_bytes)?;
+                }
+                return Err(SandboxError::Vfs(err));
+            }
+        };
+
+        let append_plan_result = self.journal.append(JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: self.agent_id.clone(),
+            timestamp_ms: 0,
+            entry: JournalEntryKind::ToolResult {
+                tool_call_id: None,
+                tool_name: tool_name.to_string(),
+                content: format!("planned {} VFS mutation(s)", mutations.len()),
+                is_error: false,
+            },
+        });
+        if let Err(err) = append_plan_result {
+            if write_bytes > 0 {
+                release_vfs_bytes(&self.budget, write_bytes)?;
+            }
+            tracing::error!(error = %err, "journal append failed for VFS mutation plan");
+            return Err(SandboxError::Internal(format!(
+                "journal append failed for VFS mutation plan: {err}"
+            )));
+        }
+
+        for path in file_delete_entries {
+            if let Err(err) = self.journal.append(JournalEntry {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                agent_id: self.agent_id.clone(),
+                timestamp_ms: 0,
+                entry: JournalEntryKind::FileDelete {
+                    path: path.to_string(),
+                },
+            }) {
+                if write_bytes > 0 {
+                    release_vfs_bytes(&self.budget, write_bytes)?;
+                }
+                tracing::error!(error = %err, "journal append failed for VFS mutation delete");
+                return Err(SandboxError::Internal(format!(
+                    "journal append failed for VFS mutation delete: {err}"
+                )));
+            }
+        }
+
+        for (from, to) in file_move_entries {
+            if let Err(err) = self.journal.append(JournalEntry {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                agent_id: self.agent_id.clone(),
+                timestamp_ms: 0,
+                entry: JournalEntryKind::FileMove {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                },
+            }) {
+                if write_bytes > 0 {
+                    release_vfs_bytes(&self.budget, write_bytes)?;
+                }
+                tracing::error!(error = %err, "journal append failed for VFS mutation move");
+                return Err(SandboxError::Internal(format!(
+                    "journal append failed for VFS mutation move: {err}"
+                )));
+            }
+        }
+
+        for (path, size_bytes) in file_write_entries {
+            if let Err(err) = self.journal.append(JournalEntry {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                agent_id: self.agent_id.clone(),
+                timestamp_ms: 0,
+                entry: JournalEntryKind::FileWrite {
+                    path: path.to_string(),
+                    size_bytes,
+                },
+            }) {
+                if write_bytes > 0 {
+                    release_vfs_bytes(&self.budget, write_bytes)?;
+                }
+                tracing::error!(error = %err, "journal append failed for VFS mutation write");
+                return Err(SandboxError::Internal(format!(
+                    "journal append failed for VFS mutation write: {err}"
+                )));
+            }
+        }
+
+        let result: Result<(), VfsError> = (|| {
+            for mutation in &prepared_mutations {
+                match mutation {
+                    PreparedVfsMutation::Write { path, data } => {
+                        self.vfs.write(path, data)?;
+                    }
+                    PreparedVfsMutation::Delete { path } => {
+                        self.vfs.remove(path)?;
+                    }
+                    PreparedVfsMutation::Move { from, to, data } => {
+                        self.vfs.write(to, data)?;
+                        self.vfs.remove(from)?;
+                    }
+                    PreparedVfsMutation::MoveAndWrite { from, to, data } => {
+                        self.vfs.write(to, data)?;
+                        self.vfs.remove(from)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(err) = result {
+            if write_bytes > 0 {
+                release_vfs_bytes(&self.budget, write_bytes)?;
+            }
+            if let Err(restore_err) =
+                restore_vfs_path_states(&self.vfs, &rollback_states, &created_parent_dirs)
+            {
+                return Err(SandboxError::Internal(format!(
+                    "failed to roll back VFS mutations after {err}: {restore_err}"
+                )));
+            }
+            if let Err(journal_err) = self.journal.append(JournalEntry {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                agent_id: self.agent_id.clone(),
+                timestamp_ms: 0,
+                entry: JournalEntryKind::ToolResult {
+                    tool_call_id: None,
+                    tool_name: tool_name.to_string(),
+                    content: err.to_string(),
+                    is_error: true,
+                },
+            }) {
+                tracing::error!(error = %journal_err, "journal append failed for VFS mutation error");
+            }
+            return Err(SandboxError::Vfs(err));
+        }
+
+        Ok(())
+    }
+
+    /// Remove a VFS path, checking path write capability first.
+    pub fn remove_path(&self, path: &str) -> Result<(), SandboxError> {
+        self.apply_vfs_mutations(
+            "remove_path",
+            &[VfsMutation::Delete {
+                path: path.to_string(),
+            }],
+        )
+    }
+
+    /// Move a VFS file, checking read capability for the source and write
+    /// capability for both paths.
+    pub fn move_path(&self, from: &str, to: &str) -> Result<(), SandboxError> {
+        self.apply_vfs_mutations(
+            "move_path",
+            &[VfsMutation::Move {
+                from: from.to_string(),
+                to: to.to_string(),
+            }],
         )
     }
 
@@ -432,6 +937,15 @@ impl AgentCell {
         &self,
         command: &str,
     ) -> Result<simulacra_shell::CommandResult, SandboxError> {
+        self.execute_shell_with_workdir(command, None)
+    }
+
+    /// Execute a shell command with an optional one-call working directory.
+    pub fn execute_shell_with_workdir(
+        &self,
+        command: &str,
+        workdir: Option<&str>,
+    ) -> Result<simulacra_shell::CommandResult, SandboxError> {
         // Rebuild interest cache to ensure callsite is evaluated
         // against the current thread-local subscriber, not a stale
         // cached decision from a different thread.
@@ -452,6 +966,13 @@ impl AgentCell {
             &self.agent_id,
         )?;
 
+        if let Some(path) = workdir {
+            let metadata = self.metadata(path)?;
+            if !metadata.is_dir {
+                return Err(SandboxError::Vfs(VfsError::NotADirectory(path.to_string())));
+            }
+        }
+
         // Atomically reserve the turn before execution.
         reserve_turn(&self.budget, &self.journal, &self.agent_id)?;
 
@@ -470,7 +991,15 @@ impl AgentCell {
             agent_id: self.agent_id.clone(),
             http_client: Arc::clone(&self.http_client),
         };
-        let cwd = self
+        let cwd = match workdir {
+            Some(path) => path.to_string(),
+            None => self
+                .shell_cwd
+                .lock()
+                .map_err(|e| SandboxError::Internal(format!("shell_cwd mutex poisoned: {e}")))?
+                .clone(),
+        };
+        let previous_cwd = self
             .shell_cwd
             .lock()
             .map_err(|e| SandboxError::Internal(format!("shell_cwd mutex poisoned: {e}")))?
@@ -483,10 +1012,14 @@ impl AgentCell {
             agent_id: self.agent_id.clone(),
         };
         let shell_external = AgentCellShellExternal { cell: self };
-        let mut executor =
-            simulacra_shell::ShellExecutor::new(&shell_vfs, env, Some(&shell_http_proxy))
-                .with_cwd(cwd)
-                .with_external(&shell_external);
+        let executor =
+            simulacra_shell::ShellExecutor::new(&shell_vfs, env, Some(&shell_http_proxy));
+        let executor = if workdir.is_some() {
+            executor.try_with_cwd(cwd).map_err(SandboxError::Vfs)?
+        } else {
+            executor.with_cwd(cwd)
+        };
+        let mut executor = executor.with_external(&shell_external);
         let result = executor.run(command);
         // Persist the environment + cwd for subsequent calls so that
         // `cd /tmp` in one call leaves the next call rooted at /tmp.
@@ -497,11 +1030,16 @@ impl AgentCell {
             .lock()
             .map_err(|e| SandboxError::Internal(format!("shell_env mutex poisoned: {e}")))? =
             new_env;
+        let cwd_to_store = if workdir.is_some() {
+            previous_cwd
+        } else {
+            new_cwd
+        };
         *self
             .shell_cwd
             .lock()
             .map_err(|e| SandboxError::Internal(format!("shell_cwd mutex poisoned: {e}")))? =
-            new_cwd;
+            cwd_to_store;
 
         self.finish_shell_command(command, shell_start, result)
     }
@@ -691,6 +1229,191 @@ impl AgentCell {
             timeout_ms,
         )
     }
+}
+
+fn ensure_vfs_path_missing(vfs: &Arc<dyn VirtualFs>, path: &str) -> Result<(), SandboxError> {
+    if vfs.exists(path) {
+        return Err(SandboxError::Vfs(VfsError::AlreadyExists(path.to_string())));
+    }
+    Ok(())
+}
+
+fn ensure_parent_components_are_directories(
+    vfs: &Arc<dyn VirtualFs>,
+    path: &str,
+) -> Result<(), SandboxError> {
+    for parent in parent_paths(path) {
+        match vfs.metadata(&parent) {
+            Ok(metadata) if metadata.is_file => {
+                return Err(SandboxError::Vfs(VfsError::NotADirectory(parent)));
+            }
+            Ok(_) | Err(VfsError::NotFound(_)) => {}
+            Err(err) => return Err(SandboxError::Vfs(err)),
+        }
+    }
+    Ok(())
+}
+
+fn validate_write_precondition(
+    vfs: &Arc<dyn VirtualFs>,
+    path: &str,
+    precondition: &VfsWritePrecondition,
+) -> Result<(), SandboxError> {
+    match precondition {
+        VfsWritePrecondition::Any => {
+            if let Ok(metadata) = vfs.metadata(path)
+                && metadata.is_dir
+            {
+                return Err(SandboxError::Vfs(VfsError::NotAFile(path.to_string())));
+            }
+            Ok(())
+        }
+        VfsWritePrecondition::Missing => ensure_vfs_path_missing(vfs, path),
+        VfsWritePrecondition::Matches(expected) => validate_file_matches(vfs, path, expected),
+    }
+}
+
+fn validate_file_matches(
+    vfs: &Arc<dyn VirtualFs>,
+    path: &str,
+    expected: &[u8],
+) -> Result<(), SandboxError> {
+    let metadata = vfs.metadata(path).map_err(SandboxError::Vfs)?;
+    if !metadata.is_file {
+        return Err(SandboxError::Vfs(VfsError::NotAFile(path.to_string())));
+    }
+    let current = vfs.read(path).map_err(SandboxError::Vfs)?;
+    if current != expected {
+        return Err(SandboxError::Vfs(VfsError::Io(format!(
+            "stale write precondition failed for {path}"
+        ))));
+    }
+    Ok(())
+}
+
+fn parent_paths(path: &str) -> Vec<String> {
+    let Some((parent, _name)) = path.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let parent = if parent.is_empty() { "/" } else { parent };
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    for segment in parent.split('/').filter(|segment| !segment.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        paths.push(current.clone());
+    }
+    paths
+}
+
+fn record_missing_parent_dirs(
+    vfs: &Arc<dyn VirtualFs>,
+    path: &str,
+    created_parent_dirs: &mut Vec<String>,
+) {
+    for parent in parent_paths(path) {
+        if !vfs.exists(&parent)
+            && !created_parent_dirs
+                .iter()
+                .any(|existing| existing == &parent)
+        {
+            created_parent_dirs.push(parent);
+        }
+    }
+}
+
+fn upsert_rollback_expectation(
+    expectations: &mut Vec<VfsRollbackExpectation>,
+    path: &str,
+    expected_after: VfsPathState,
+) {
+    if let Some(existing) = expectations
+        .iter_mut()
+        .find(|expectation| expectation.path == path)
+    {
+        existing.expected_after = expected_after;
+    } else {
+        expectations.push(VfsRollbackExpectation {
+            path: path.to_string(),
+            expected_after,
+        });
+    }
+}
+
+fn capture_vfs_rollback_entries(
+    vfs: &Arc<dyn VirtualFs>,
+    expectations: &[VfsRollbackExpectation],
+) -> Result<Vec<VfsRollbackEntry>, VfsError> {
+    let mut entries = Vec::with_capacity(expectations.len());
+    for expectation in expectations {
+        let path = &expectation.path;
+        let state = match vfs.metadata(path) {
+            Ok(metadata) if metadata.is_file => VfsPathState::File(vfs.read(path)?),
+            Ok(metadata) if metadata.is_dir => VfsPathState::Dir,
+            Ok(_) => VfsPathState::Missing,
+            Err(VfsError::NotFound(_)) => VfsPathState::Missing,
+            Err(err) => return Err(err),
+        };
+        entries.push(VfsRollbackEntry {
+            path: path.clone(),
+            before: state,
+            expected_after: expectation.expected_after.clone(),
+        });
+    }
+    Ok(entries)
+}
+
+fn vfs_path_matches_state(
+    vfs: &Arc<dyn VirtualFs>,
+    path: &str,
+    expected: &VfsPathState,
+) -> Result<bool, VfsError> {
+    match expected {
+        VfsPathState::Missing => Ok(!vfs.exists(path)),
+        VfsPathState::File(expected_data) => match vfs.metadata(path) {
+            Ok(metadata) if metadata.is_file => Ok(vfs.read(path)? == *expected_data),
+            Ok(_) | Err(VfsError::NotFound(_)) => Ok(false),
+            Err(err) => Err(err),
+        },
+        VfsPathState::Dir => match vfs.metadata(path) {
+            Ok(metadata) => Ok(metadata.is_dir),
+            Err(VfsError::NotFound(_)) => Ok(false),
+            Err(err) => Err(err),
+        },
+    }
+}
+
+fn restore_vfs_path_states(
+    vfs: &Arc<dyn VirtualFs>,
+    states: &[VfsRollbackEntry],
+    created_parent_dirs: &[String],
+) -> Result<(), VfsError> {
+    for entry in states.iter().rev() {
+        if !vfs_path_matches_state(vfs, &entry.path, &entry.expected_after)? {
+            continue;
+        }
+        match &entry.before {
+            VfsPathState::Missing => {
+                if vfs.exists(&entry.path) {
+                    vfs.remove(&entry.path)?;
+                }
+            }
+            VfsPathState::File(data) => {
+                vfs.write(&entry.path, data)?;
+            }
+            VfsPathState::Dir => {
+                vfs.mkdir(&entry.path)?;
+            }
+        }
+    }
+
+    for path in created_parent_dirs.iter().rev() {
+        if matches!(vfs.list_dir(path), Ok(entries) if entries.is_empty()) {
+            vfs.remove(path)?;
+        }
+    }
+
+    Ok(())
 }
 
 struct AgentCellShellExternal<'a> {

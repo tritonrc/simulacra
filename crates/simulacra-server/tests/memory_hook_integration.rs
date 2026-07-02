@@ -72,7 +72,8 @@ fn build_registry(harness: &Harness, hook_pipeline: Option<Arc<HookPipeline>>) -
             rrwb: None,
             hook_pipeline,
         },
-    );
+    )
+    .expect("memory tool registration should succeed");
     registry
 }
 

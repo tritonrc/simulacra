@@ -18,7 +18,7 @@ Each spec lives in `specs/` and is testable. If code and spec disagree, the spec
 | `specs/S009-supervisor.md` | Active | Agent supervisor: spawn, cancel, restart strategies, message priority |
 | `specs/S010-otel.md` | Reference | Observability conventions: span schemas, metric names, log levels (not a feature spec — o11y assertions live in each spec) |
 | `specs/S011-sandbox-composition.md` | Active | Sandbox proxy layer: Golden Rule enforcement, AgentCell composition of VFS + Shell + QuickJS |
-| `specs/S012-builtin-tools.md` | Active | Built-in tools: file_read, file_write, file_edit, shell_exec, js_exec, list_dir |
+| `specs/S012-builtin-tools.md` | Active | Built-in tools: file_read, file_write, apply_patch, shell_exec, js_exec, list_dir |
 | `specs/S013-cli.md` | Active | CLI: argument parsing, config loading, runtime wiring, headless execution |
 | `specs/S014-esm-modules.md` | Active | ESM modules: module loading, remote fetch, import resolution |
 | `specs/S015-interactive.md` | Active | Interactive mode: REPL, streaming output, tool approval, session persistence |

@@ -7,7 +7,7 @@ use simulacra_memory::{Embedder, HitIdCache, MemoryStore, RecentWritesBuffer, Ve
 use simulacra_types::{MemoryCapability, TenantId};
 
 use super::{MemoryReadChunkTool, SemanticSearchTool};
-use crate::ToolRegistry;
+use crate::{ToolError, ToolRegistry};
 
 // ─── register_memory_tools ───────────────────────────────────────────────────
 
@@ -32,10 +32,21 @@ pub struct MemoryToolHandles {
 /// When memory is disabled, this function is a no-op — the tools do not
 /// appear in the registry and the agent cannot call them. See S037 §11
 /// (opt-in default).
-pub fn register_memory_tools(registry: &mut ToolRegistry, handles: MemoryToolHandles) {
+pub fn register_memory_tools(
+    registry: &mut ToolRegistry,
+    handles: MemoryToolHandles,
+) -> Result<(), ToolError> {
     if !handles.capability.enabled {
-        return;
+        return Ok(());
     }
+    for name in ["semantic_search", "memory_read_chunk"] {
+        if registry.metadata(name).is_some() {
+            return Err(ToolError::ExecutionFailed(format!(
+                "duplicate tool registration: {name}"
+            )));
+        }
+    }
+
     let search = SemanticSearchTool::new(
         handles.tenant.clone(),
         handles.capability.clone(),
@@ -53,6 +64,7 @@ pub fn register_memory_tools(registry: &mut ToolRegistry, handles: MemoryToolHan
         handles.hit_cache,
         handles.hook_pipeline,
     );
-    registry.register(Box::new(search));
-    registry.register(Box::new(read));
+    registry.register(Box::new(search))?;
+    registry.register(Box::new(read))?;
+    Ok(())
 }

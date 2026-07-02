@@ -157,7 +157,7 @@ if agent_type is None:
 10. Generic agent's model is resolved from `tier`: look up in `[tiers]` config. If `tier` is absent, inherit parent's model.
 11. Generic agent's capabilities are `parent ∩ override` (two-way intersection). If no override, inherit parent's full token.
 12. Generic agent's `can_spawn` is always empty — cannot spawn children.
-13. Generic agent's tool registry includes all builtins (file_read, file_write, file_edit, shell_exec, js_exec, list_dir). `SpawnAgentTool` is NOT registered for generic agents — they cannot see or attempt to spawn children.
+13. Generic agent's tool registry includes all builtins (file_read, file_write, apply_patch, shell_exec, js_exec, list_dir). `SpawnAgentTool` is NOT registered for generic agents — they cannot see or attempt to spawn children.
 
 ### Tier configuration
 

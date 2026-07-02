@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use simulacra_tool::{CapabilityToken, ToolRegistry};
 use simulacra_types::{Tool, ToolDefinition, ToolError};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing_subscriber::layer::SubscriberExt;
 
 struct PendingSpawnAgentTool;
@@ -162,18 +162,44 @@ impl tracing::field::Visit for FieldVisitor<'_> {
 }
 
 fn capture_spans<T>(f: impl FnOnce() -> T) -> (T, Vec<CapturedSpan>) {
-    let spans = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry::Registry::default().with(CaptureLayer {
-        spans: Arc::clone(&spans),
+    static TRACING_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static CAPTURED_SPANS: OnceLock<Arc<Mutex<Vec<CapturedSpan>>>> = OnceLock::new();
+    static CAPTURE_INSTALL: OnceLock<()> = OnceLock::new();
+
+    let _guard = TRACING_CAPTURE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+
+    CAPTURE_INSTALL.get_or_init(|| {
+        let spans = Arc::new(Mutex::new(Vec::new()));
+        CAPTURED_SPANS
+            .set(Arc::clone(&spans))
+            .expect("span capture store should only initialize once");
+        let subscriber = tracing_subscriber::registry::Registry::default().with(CaptureLayer {
+            spans: Arc::clone(&spans),
+        });
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("global tracing subscriber should install");
+        tracing::callsite::rebuild_interest_cache();
     });
-    let result = tracing::subscriber::with_default(subscriber, f);
+
+    let spans = CAPTURED_SPANS
+        .get()
+        .expect("span capture store should be installed");
+    spans.lock().unwrap().clear();
+    tracing::callsite::rebuild_interest_cache();
+    let result = f();
+    tracing::callsite::rebuild_interest_cache();
     let spans = spans.lock().unwrap().clone();
     (result, spans)
 }
 
 fn registry_with_spawn_tool() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(PendingSpawnAgentTool));
+    registry
+        .register(Box::new(PendingSpawnAgentTool))
+        .expect("test tool registration should succeed");
     registry
 }
 
