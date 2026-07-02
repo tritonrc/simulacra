@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use serde_json::json;
 use simulacra_runtime::ActivitySink;
-use simulacra_server::{EngineActivitySink, TaskEventChannel};
+use simulacra_server::{
+    BudgetPoolConfig, EngineActivitySink, TaskEventChannel, TaskManager, TaskState, TenantConfig,
+};
 use simulacra_types::ActivityEvent;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
@@ -22,6 +24,21 @@ fn make_channel(cap: usize) -> (TaskEventChannel, broadcast::Receiver<serde_json
     let chan = TaskEventChannel::new(cap);
     let (_history, rx) = chan.subscribe_with_history();
     (chan, rx)
+}
+
+fn tenant(namespace: &str) -> TenantConfig {
+    TenantConfig {
+        namespace: namespace.to_string(),
+        agent_type: "agent".to_string(),
+        vfs_root: std::path::PathBuf::from("/tmp/simulacra-test"),
+        budget_pool: BudgetPoolConfig {
+            max_tokens: 1000,
+            max_cost: "0".into(),
+        },
+        hooks: vec![],
+        integrations: vec![],
+        mcp_servers: Default::default(),
+    }
 }
 
 #[tokio::test]
@@ -80,6 +97,68 @@ async fn tool_call_delta_events_translate_to_tool_call_delta_with_optional_metad
     assert_eq!(event["tool_name"], "file_read");
     assert_eq!(event["arguments_delta"], "{\"path\"");
     assert!(event["seq"].is_number());
+}
+
+#[tokio::test]
+async fn hitl_activity_events_translate_to_server_events_and_waiting_states() {
+    let manager = TaskManager::new();
+    let handle = manager
+        .create_task(&tenant("hitl"), "needs human", None, json!({}), None)
+        .expect("task should be created");
+    let (history, mut rx) = manager
+        .subscribe_task(&handle.task_id)
+        .expect("task subscription should exist");
+    assert!(
+        history
+            .iter()
+            .any(|event| event["event"] == "task.state_changed")
+    );
+    let sender = manager
+        .get_event_sender(&handle.task_id)
+        .expect("event sender should exist");
+    let sink =
+        EngineActivitySink::with_task_manager(handle.task_id.clone(), sender, manager.clone());
+
+    sink.emit(ActivityEvent::InputRequired {
+        prompt: "Need detail".into(),
+        schema: None,
+    });
+    let state_event = recv_event(&mut rx).await;
+    assert_eq!(state_event["event"], "task.state_changed");
+    assert_eq!(state_event["to"], "waiting_input");
+    let input_event = recv_event(&mut rx).await;
+    assert_eq!(input_event["event"], "input.required");
+    assert_eq!(input_event["prompt"], "Need detail");
+    assert_eq!(
+        manager.get_task(&handle.task_id).unwrap().state,
+        TaskState::WaitingInput
+    );
+
+    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+    let (approval_tx, _approval_rx) = tokio::sync::mpsc::channel(1);
+    manager
+        .set_hitl_senders(&handle.task_id, input_tx, approval_tx)
+        .unwrap();
+    manager
+        .provide_input(&handle.task_id, "resume")
+        .expect("input should resume task");
+    let _running_event = recv_event(&mut rx).await;
+
+    sink.emit(ActivityEvent::ToolApprovalRequired {
+        tool_call_id: "tool-1".into(),
+        name: "shell_exec".into(),
+        arguments: json!({"command": "echo hi"}),
+        reason: Some("tool execution requires approval".into()),
+    });
+    let state_event = recv_event(&mut rx).await;
+    assert_eq!(state_event["to"], "waiting_approval");
+    let approval_event = recv_event(&mut rx).await;
+    assert_eq!(approval_event["event"], "tool.approval_required");
+    assert_eq!(approval_event["tool_call_id"], "tool-1");
+    assert_eq!(
+        manager.get_task(&handle.task_id).unwrap().state,
+        TaskState::WaitingApproval
+    );
 }
 
 #[tokio::test]

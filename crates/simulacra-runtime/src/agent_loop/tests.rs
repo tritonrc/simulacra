@@ -5,4 +5,5 @@ include!("tests/part_03.rs");
 include!("tests/part_04.rs");
 include!("tests/part_05.rs");
 include!("tests/part_06.rs");
+include!("tests/part_07.rs");
 mod otel_span_tests;

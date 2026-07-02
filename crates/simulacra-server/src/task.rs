@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use opentelemetry::KeyValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use simulacra_runtime::ToolApprovalResponse;
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -198,16 +199,25 @@ pub enum TaskManagerError {
     #[error("subscribe failed: task '{task_id}' not found")]
     SubscribeFailed { task_id: String },
 
-    /// Returned by `provide_input` and `respond_approval`. Human-in-the-loop
-    /// continuation requires the engine to pause the agent loop and resume
-    /// with the provided input; that wiring is not yet in place (see S031
-    /// HITL milestone), so instead of silently flipping the task back to
-    /// `Running` with no worker (which silently loses the input), we surface
-    /// a clear error so the client learns the feature is not available.
+    /// Compatibility error for older call sites that need to surface an
+    /// unsupported HITL operation. Live `input.response` and
+    /// `approval.respond` now use response channels and return channel/state
+    /// errors when they cannot resume a task.
     #[error(
         "{op} is not yet implemented — the agent worker cannot yet be resumed with human input"
     )]
     NotImplemented { op: &'static str },
+
+    #[error("{op} response channel is not available for task '{task_id}'")]
+    ResponseChannelUnavailable { task_id: String, op: &'static str },
+
+    #[error("{op} response channel is closed for task '{task_id}'")]
+    ResponseChannelClosed { task_id: String, op: &'static str },
+
+    #[error(
+        "approval response for tool call '{received}' does not match pending tool call '{expected}'"
+    )]
+    ApprovalToolCallMismatch { expected: String, received: String },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -282,12 +292,12 @@ impl TaskEventChannel {
 #[derive(Debug)]
 struct TaskRecord {
     handle: TaskHandle,
-    /// Pending input response, if any.
-    #[allow(dead_code)] // HITL continuation is deferred; field reserved for future wiring
-    pending_input: Option<String>,
-    /// Pending approval response, if any.
-    #[allow(dead_code)] // HITL continuation is deferred; field reserved for future wiring
-    pending_approval: Option<(String, bool, Option<String>)>,
+    /// Channel used by `input.response` to resume a waiting agent loop.
+    input_tx: Option<mpsc::Sender<String>>,
+    /// Channel used by `approval.respond` to resume a waiting tool call.
+    approval_tx: Option<mpsc::Sender<ToolApprovalResponse>>,
+    /// Current approval tool call id, used to reject stale/mismatched responses.
+    pending_approval_tool_call_id: Option<String>,
     /// Per-task event channel (broadcast + history log) for live + replay.
     event_tx: TaskEventChannel,
     /// Cancellation token for cooperative agent loop cancellation.
@@ -496,8 +506,9 @@ impl TaskManager {
 
         let mut record = TaskRecord {
             handle: handle.clone(),
-            pending_input: None,
-            pending_approval: None,
+            input_tx: None,
+            approval_tx: None,
+            pending_approval_tool_call_id: None,
             event_tx: event_tx.clone(),
             cancellation_token: None,
             running_since: None,
@@ -586,8 +597,9 @@ impl TaskManager {
 
         let record = TaskRecord {
             handle: handle.clone(),
-            pending_input: None,
-            pending_approval: None,
+            input_tx: None,
+            approval_tx: None,
+            pending_approval_tool_call_id: None,
             event_tx,
             cancellation_token: None,
             running_since: None,
@@ -683,99 +695,95 @@ impl TaskManager {
 
     /// Provide input for a `waiting_input` task.
     ///
-    /// **Not yet implemented:** resuming an agent with human input requires
-    /// the engine to pause the agent loop on the `input.required` event and
-    /// hand the response back to the waiting turn. That mechanism does not
-    /// exist yet; rather than silently flip the task back to `Running` with
-    /// no worker (and lose the input), this returns
-    /// [`TaskManagerError::NotImplemented`]. Terminal/invalid-state errors
-    /// are still preferred over NotImplemented so clients see the expected
-    /// failure shape.
-    ///
-    /// TODO(S031-HITL): wire real pause/resume through the engine.
+    /// Sends the input into the live agent loop channel and transitions the
+    /// task back to `Running`. If no live channel exists, the task stays
+    /// waiting and the caller receives an explicit channel error.
     pub fn provide_input(
         &self,
         task_id: &str,
-        _content: &str,
+        content: &str,
     ) -> Result<TaskState, TaskManagerError> {
-        let tasks = self
-            .inner
-            .tasks
-            .lock()
-            .map_err(|_| TaskManagerError::LockPoisoned)?;
-        let record = tasks
-            .get(task_id)
-            .ok_or_else(|| TaskManagerError::NotFound {
-                task_id: task_id.to_string(),
-            })?;
-        match &record.handle.state {
+        self.transition_with(task_id, |record| match &record.handle.state {
             state if state.is_terminal() => Err(TaskManagerError::TerminalState {
                 task_id: task_id.to_string(),
                 state: state.clone(),
             }),
-            TaskState::WaitingInput => Err(TaskManagerError::NotImplemented {
-                op: "provide_input",
-            }),
+            TaskState::WaitingInput => {
+                let tx = record.input_tx.as_ref().ok_or_else(|| {
+                    TaskManagerError::ResponseChannelUnavailable {
+                        task_id: task_id.to_string(),
+                        op: "provide_input",
+                    }
+                })?;
+                tx.try_send(content.to_string()).map_err(|_| {
+                    TaskManagerError::ResponseChannelClosed {
+                        task_id: task_id.to_string(),
+                        op: "provide_input",
+                    }
+                })?;
+                record.handle.state = TaskState::Running;
+                Ok(TaskState::Running)
+            }
             other => Err(TaskManagerError::InvalidTransition {
                 task_id: task_id.to_string(),
                 from: other.clone(),
                 to: TaskState::Running,
             }),
-        }
+        })
     }
 
     /// Respond to a tool approval request.
     ///
-    /// **Not yet implemented:** like [`provide_input`], resuming an agent
-    /// after an approval requires engine-level pause/resume. Returns
-    /// [`TaskManagerError::NotImplemented`] when the task is actually in
-    /// `WaitingApproval`; terminal/invalid-state errors still take
-    /// precedence so clients see familiar error shapes. A deny response
-    /// additionally returns [`TaskManagerError::ApprovalDenied`] after the
-    /// NotImplemented check so denial is still observable.
-    ///
-    /// TODO(S031-HITL): wire real pause/resume through the engine.
+    /// Sends the decision into the live agent loop channel and transitions the
+    /// task back to `Running`. Denials are delivered to the loop as normal
+    /// data so the model receives an error tool result.
     pub fn respond_approval(
         &self,
         task_id: &str,
         tool_call_id: &str,
-        _approved: bool,
+        approved: bool,
         reason: Option<&str>,
     ) -> Result<TaskState, TaskManagerError> {
-        let tasks = self
-            .inner
-            .tasks
-            .lock()
-            .map_err(|_| TaskManagerError::LockPoisoned)?;
-        let record = tasks
-            .get(task_id)
-            .ok_or_else(|| TaskManagerError::NotFound {
+        self.transition_with(task_id, |record| match &record.handle.state {
+            state if state.is_terminal() => Err(TaskManagerError::TerminalState {
                 task_id: task_id.to_string(),
-            })?;
-        let state = record.handle.state.clone();
-        drop(tasks);
-        match state {
-            s if s.is_terminal() => Err(TaskManagerError::TerminalState {
-                task_id: task_id.to_string(),
-                state: s,
+                state: state.clone(),
             }),
             TaskState::WaitingApproval => {
-                if !_approved {
-                    return Err(TaskManagerError::ApprovalDenied {
-                        tool_call_id: tool_call_id.to_string(),
-                        reason: reason.unwrap_or("denied by user").to_string(),
+                if let Some(expected) = record.pending_approval_tool_call_id.as_ref()
+                    && expected != tool_call_id
+                {
+                    return Err(TaskManagerError::ApprovalToolCallMismatch {
+                        expected: expected.clone(),
+                        received: tool_call_id.to_string(),
                     });
                 }
-                Err(TaskManagerError::NotImplemented {
-                    op: "respond_approval",
-                })
+                let tx = record.approval_tx.as_ref().ok_or_else(|| {
+                    TaskManagerError::ResponseChannelUnavailable {
+                        task_id: task_id.to_string(),
+                        op: "respond_approval",
+                    }
+                })?;
+                let response = ToolApprovalResponse {
+                    tool_call_id: tool_call_id.to_string(),
+                    approved,
+                    reason: reason.map(ToOwned::to_owned),
+                };
+                tx.try_send(response)
+                    .map_err(|_| TaskManagerError::ResponseChannelClosed {
+                        task_id: task_id.to_string(),
+                        op: "respond_approval",
+                    })?;
+                record.pending_approval_tool_call_id = None;
+                record.handle.state = TaskState::Running;
+                Ok(TaskState::Running)
             }
             other => Err(TaskManagerError::InvalidTransition {
                 task_id: task_id.to_string(),
-                from: other,
+                from: other.clone(),
                 to: TaskState::Running,
             }),
-        }
+        })
     }
 
     /// Get a task handle by ID.
@@ -949,8 +957,11 @@ impl TaskManager {
 
     /// Transition a task to `waiting_input` state.
     pub fn request_input(&self, task_id: &str) -> Result<TaskState, TaskManagerError> {
-        self.transition(task_id, |state| match state {
-            TaskState::Running | TaskState::Streaming => Ok(TaskState::WaitingInput),
+        self.transition_with(task_id, |record| match &record.handle.state {
+            TaskState::Running | TaskState::Streaming => {
+                record.handle.state = TaskState::WaitingInput;
+                Ok(TaskState::WaitingInput)
+            }
             other => Err(TaskManagerError::InvalidTransition {
                 task_id: task_id.to_string(),
                 from: other.clone(),
@@ -961,8 +972,21 @@ impl TaskManager {
 
     /// Transition a task to `waiting_approval` state.
     pub fn request_approval(&self, task_id: &str) -> Result<TaskState, TaskManagerError> {
-        self.transition(task_id, |state| match state {
-            TaskState::Running | TaskState::Streaming => Ok(TaskState::WaitingApproval),
+        self.request_approval_for(task_id, None)
+    }
+
+    /// Transition a task to `waiting_approval` for a specific tool call.
+    pub fn request_approval_for(
+        &self,
+        task_id: &str,
+        tool_call_id: Option<String>,
+    ) -> Result<TaskState, TaskManagerError> {
+        self.transition_with(task_id, |record| match &record.handle.state {
+            TaskState::Running | TaskState::Streaming => {
+                record.pending_approval_tool_call_id = tool_call_id;
+                record.handle.state = TaskState::WaitingApproval;
+                Ok(TaskState::WaitingApproval)
+            }
             other => Err(TaskManagerError::InvalidTransition {
                 task_id: task_id.to_string(),
                 from: other.clone(),
@@ -1042,6 +1066,28 @@ impl TaskManager {
                 task_id: task_id.to_string(),
             })?;
         record.cancellation_token = Some(token);
+        Ok(())
+    }
+
+    /// Store HITL response senders for a live agent loop.
+    pub fn set_hitl_senders(
+        &self,
+        task_id: &str,
+        input_tx: mpsc::Sender<String>,
+        approval_tx: mpsc::Sender<ToolApprovalResponse>,
+    ) -> Result<(), TaskManagerError> {
+        let mut tasks = self
+            .inner
+            .tasks
+            .lock()
+            .map_err(|_| TaskManagerError::LockPoisoned)?;
+        let record = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| TaskManagerError::NotFound {
+                task_id: task_id.to_string(),
+            })?;
+        record.input_tx = Some(input_tx);
+        record.approval_tx = Some(approval_tx);
         Ok(())
     }
 

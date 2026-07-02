@@ -500,6 +500,29 @@ async fn wait_for_terminal(manager: &TaskManager, task_id: &str, timeout: Durati
     }
 }
 
+async fn wait_for_state(
+    manager: &TaskManager,
+    task_id: &str,
+    expected: TaskState,
+    timeout: Duration,
+) -> TaskHandle {
+    let start = tokio::time::Instant::now();
+    loop {
+        let handle = manager
+            .get_task(task_id)
+            .expect("task should remain visible while polling");
+        if handle.state == expected {
+            return handle;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "task {task_id} did not reach state {expected:?} within {timeout:?}; last state: {:?}",
+            handle.state
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn scripted_factory(provider: Arc<ScriptedProvider>) -> ProviderFactory {
     Arc::new(move |_kind, _model| {
         Ok(Box::new(SharedProvider(Arc::clone(&provider))) as Box<dyn Provider>)
@@ -715,6 +738,134 @@ async fn with_provider_factory_sets_the_override_and_is_invoked_on_spawn_task() 
         !recorded.is_empty(),
         "spawn_task should invoke the scripted provider via the override"
     );
+}
+
+#[tokio::test]
+async fn server_task_consumes_input_response_and_resumes_agent_loop() {
+    let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+    let tenant = ensure_tenant(&catalog, "default").await;
+    create_catalog_agent(
+        &catalog,
+        &tenant,
+        "input-agent",
+        "Ask for missing details.",
+        "claude-3-5-sonnet",
+    )
+    .await;
+
+    let provider = Arc::new(ScriptedProvider::new([
+        tool_call_response(
+            "call-input",
+            "request_input",
+            json!({"prompt": "What account should I use?"}),
+            "claude-3-5-sonnet",
+        ),
+        assistant_response("input handled", "claude-3-5-sonnet"),
+    ]));
+    let engine =
+        build_engine(&catalog).with_provider_factory(scripted_factory(Arc::clone(&provider)));
+    let manager = TaskManager::new();
+
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "prepare account report",
+            &tenant_config("default", "input-agent"),
+            None,
+            json!({"enable_human_input": true}),
+            None,
+            None,
+        )
+        .await
+        .expect("server task should spawn");
+
+    wait_for_state(
+        &manager,
+        &handle.task_id,
+        TaskState::WaitingInput,
+        Duration::from_secs(5),
+    )
+    .await;
+    manager
+        .provide_input(&handle.task_id, "Use Acme account")
+        .expect("input.response should resume the task");
+
+    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    assert_eq!(terminal.state, TaskState::Completed);
+
+    let recorded = provider.recorded_messages();
+    let resumed = recorded
+        .get(1)
+        .expect("provider should be called again after input");
+    assert!(resumed.iter().any(|message| {
+        message.role == Role::Tool
+            && message.tool_call_id.as_deref() == Some("call-input")
+            && message.content == "Use Acme account"
+    }));
+}
+
+#[tokio::test]
+async fn server_task_consumes_tool_approval_and_resumes_agent_loop() {
+    let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+    let tenant = ensure_tenant(&catalog, "default").await;
+    create_catalog_agent(
+        &catalog,
+        &tenant,
+        "approval-agent",
+        "Read the task when approved.",
+        "claude-3-5-sonnet",
+    )
+    .await;
+
+    let provider = Arc::new(ScriptedProvider::new([
+        tool_call_response(
+            "call-read",
+            "file_read",
+            json!({"path": "/workspace/task.md"}),
+            "claude-3-5-sonnet",
+        ),
+        assistant_response("approval handled", "claude-3-5-sonnet"),
+    ]));
+    let engine =
+        build_engine(&catalog).with_provider_factory(scripted_factory(Arc::clone(&provider)));
+    let manager = TaskManager::new();
+
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "approved file read task",
+            &tenant_config("default", "approval-agent"),
+            None,
+            json!({"require_tool_approval": true}),
+            None,
+            None,
+        )
+        .await
+        .expect("server task should spawn");
+
+    wait_for_state(
+        &manager,
+        &handle.task_id,
+        TaskState::WaitingApproval,
+        Duration::from_secs(5),
+    )
+    .await;
+    manager
+        .respond_approval(&handle.task_id, "call-read", true, None)
+        .expect("approval.respond should resume the task");
+
+    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    assert_eq!(terminal.state, TaskState::Completed);
+
+    let recorded = provider.recorded_messages();
+    let resumed = recorded
+        .get(1)
+        .expect("provider should be called again after approved tool result");
+    assert!(resumed.iter().any(|message| {
+        message.role == Role::Tool
+            && message.tool_call_id.as_deref() == Some("call-read")
+            && message.content.contains("approved file read task")
+    }));
 }
 
 #[tokio::test]

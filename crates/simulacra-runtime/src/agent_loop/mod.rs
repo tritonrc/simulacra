@@ -5,6 +5,7 @@
 //! ExitReason enum controls termination.
 
 mod construct;
+mod hitl;
 mod journal;
 mod meters;
 mod replay_helpers;
@@ -17,6 +18,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use hitl::{
+    AgentHitlRuntime, AgentHitlSenders, REQUEST_INPUT_TOOL_NAME, RequestInputTool,
+    ToolApprovalResponse,
+};
 pub use types::{
     ActiveTurn, AgentLoopConfig, AgentLoopOutput, StepContext, TurnContext, TurnResult, TurnState,
 };
@@ -95,4 +100,6 @@ pub struct AgentLoop {
     /// Runtime-owned cancellation token shared with supervisors or interactive
     /// sessions.
     cancellation: Option<crate::CancellationToken>,
+    /// Optional human-in-the-loop channels for server-launched resumable waits.
+    hitl: Option<AgentHitlRuntime>,
 }

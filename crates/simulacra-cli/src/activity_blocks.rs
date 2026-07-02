@@ -124,6 +124,10 @@ impl ActivityBlockRenderer {
                 vec![]
             }
 
+            ActivityEvent::ToolApprovalRequired { .. } | ActivityEvent::InputRequired { .. } => {
+                vec![]
+            }
+
             // ToolOutput lines appear in the tail window (last 3 lines visible)
             ActivityEvent::ToolOutput { tool_call_id, line } => {
                 if let Some(block) = self.blocks.get_mut(tool_call_id) {

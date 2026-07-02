@@ -210,8 +210,10 @@ All events from children appear in the parent's event stream with `child_id` and
 | `ThinkDelta { text }` | `{ event: "agent.thinking", task_id, content: text, seq }` |
 | `ThinkEnd { think_duration_ms, think_tokens }` | `{ event: "agent.thinking", task_id, state: "ended", duration_ms, tokens, seq }` |
 | `ToolStart { tool_call_id, name, arguments }` | `{ event: "tool.called", task_id, tool_call_id, tool_name, arguments, seq }` |
+| `ToolApprovalRequired { tool_call_id, name, arguments, reason }` | `{ event: "tool.approval_required", task_id, tool_call_id, tool_name, arguments, reason, seq }` |
 | `ToolCallDelta { index, tool_call_id, name, arguments_delta }` | `{ event: "tool.call_delta", task_id, index, tool_call_id, tool_name, arguments_delta, seq }` |
 | `ToolOutput { tool_call_id, line }` | `{ event: "tool.output", task_id, tool_call_id, line, seq }` |
+| `InputRequired { prompt, schema }` | `{ event: "input.required", task_id, prompt, schema, seq }` |
 | `ToolFinish { tool_call_id, name, is_error, duration_ms, .. }` | `{ event: "tool.result", task_id, tool_call_id, tool_name, is_error, duration_ms, seq }` |
 | `ChildSpawned { child_id, agent_type, task }` | `{ event: "agent.child_spawned", task_id, child_id, agent_type, child_task: task, seq }` |
 | `ChildFinished { child_id, agent_type, exit_reason, duration_ms, .. }` | `{ event: "agent.child_finished", task_id, child_id, agent_type, exit_reason, duration_ms, seq }` |
@@ -233,7 +235,10 @@ All events from children appear in the parent's event stream with `child_id` and
 | `Error(msg)` | `Failed` | `Some(msg)` |
 | `AwaitingApproval` | `WaitingApproval` | `None` (non-terminal; task pauses, awaits `approval.respond`) |
 
-`AwaitingApproval` is special: it is **not terminal**. The agent loop returns `AwaitingApproval` when a tool call needs human approval. The engine transitions the task to `WaitingApproval` and emits a `tool.approval_required` event. When the client responds via `approval.respond`, the TaskManager transitions back to `Running`. Full AgentLoop integration for resuming after approval is a follow-up — for S034, the task reaches `WaitingApproval` and the agent loop future completes. A new agent loop run would need to be spawned on approval (future work).
+`AwaitingApproval` is preserved for compatibility, but S051 implements the
+server-launched HITL path without exiting the loop: the agent emits
+`ToolApprovalRequired`, the engine transitions to `WaitingApproval`, and
+`approval.respond` resumes the same live loop.
 
 ### complete_task extension
 
@@ -360,17 +365,21 @@ impl TaskManager {
 
 `cancel_task` is updated to signal the token before transitioning state. The actual state transition to `Cancelled` happens when the background agent task observes cancellation and exits. S049 owns the shared `AgentLoop` cancellation checks and tool-dispatch cancellation result shape.
 
-### Input and approval channels (interface only)
+### Input and approval channels
 
-For `input.response` and `approval.respond`, the interface is defined but full AgentLoop integration is future work:
+For `input.response` and `approval.respond`, S051 wires live channels into the
+agent task:
 
 ```rust
 // TaskRecord gains:
 // input_tx: Option<tokio::sync::mpsc::Sender<String>>
-// approval_tx: Option<tokio::sync::mpsc::Sender<(String, bool, Option<String>)>>
+// approval_tx: Option<tokio::sync::mpsc::Sender<ToolApprovalResponse>>
 ```
 
-SimulacraEngine creates these channels at spawn time and passes the receivers to the agent task. The existing TaskManager `provide_input` and `respond_approval` methods are extended to send on these channels. The AgentLoop does not yet consume them — S049 adds turn/runtime structure, but full `input.response` and approval-resume consumption remains follow-up work.
+SimulacraEngine creates these channels for HITL-enabled tasks and passes the
+receivers to the agent task. `provide_input` and `respond_approval` validate
+the waiting state, send on the matching channel, and transition the task back
+to `Running`.
 
 ### Budget warnings
 
@@ -548,30 +557,32 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 37. `ThinkDelta` → `agent.thinking` with `content`.
 38. `ThinkEnd` → `agent.thinking` with `state: "ended"`, `duration_ms`, `tokens`.
 39. `ToolStart` → `tool.called` with `tool_call_id`, `tool_name`, `arguments`.
-40. `ToolCallDelta` → `tool.call_delta` with `index`, optional `tool_call_id`, optional `tool_name`, and `arguments_delta`.
-41. `ToolOutput` → `tool.output` with `tool_call_id`, `line`.
-42. `ToolFinish` → `tool.result` with `tool_call_id`, `tool_name`, `is_error`, `duration_ms`.
-43. `ChildSpawned` → `agent.child_spawned` with `child_id`, `agent_type`, `child_task`.
-44. `ChildFinished` → `agent.child_finished` with `child_id`, `agent_type`, `exit_reason`, `duration_ms`.
-45. `TurnComplete` → `agent.turn_complete`.
+40. `ToolApprovalRequired` → `tool.approval_required` with `tool_call_id`, `tool_name`, `arguments`, `reason`.
+41. `ToolCallDelta` → `tool.call_delta` with `index`, optional `tool_call_id`, optional `tool_name`, and `arguments_delta`.
+42. `ToolOutput` → `tool.output` with `tool_call_id`, `line`.
+43. `InputRequired` → `input.required` with `prompt` and optional `schema`.
+44. `ToolFinish` → `tool.result` with `tool_call_id`, `tool_name`, `is_error`, `duration_ms`.
+45. `ChildSpawned` → `agent.child_spawned` with `child_id`, `agent_type`, `child_task`.
+46. `ChildFinished` → `agent.child_finished` with `child_id`, `agent_type`, `exit_reason`, `duration_ms`.
+47. `TurnComplete` → `agent.turn_complete`.
 
 ### TaskManager emit_event
-46. Acquires lock, looks up task, increments seq, calls `event_tx.send(event)` with seq embedded.
-47. Returns `NotFound` for nonexistent task.
-48. Silently drops if no subscribers.
-49. Every event (including activity events, not just state transitions) carries a monotonic seq.
+48. Acquires lock, looks up task, increments seq, calls `event_tx.send(event)` with seq embedded.
+49. Returns `NotFound` for nonexistent task.
+50. Silently drops if no subscribers.
+51. Every event (including activity events, not just state transitions) carries a monotonic seq.
 
 ### Cancellation
-50. `task.cancel` command triggers `CancellationToken::signal()` on the task's token.
-51. The agent loop checks `cancellation.is_cancelled()` each turn and exits with `ExitReason::Cancelled`.
-52. The background task then calls `complete_task(task_id, Cancelled, None)`.
-53. If no cancellation token is stored (shouldn't happen), cancel_task falls back to existing behavior (immediate state transition).
+52. `task.cancel` command triggers `CancellationToken::signal()` on the task's token.
+53. The agent loop checks `cancellation.is_cancelled()` each turn and exits with `ExitReason::Cancelled`.
+54. The background task then calls `complete_task(task_id, Cancelled, None)`.
+55. If no cancellation token is stored (shouldn't happen), cancel_task falls back to existing behavior (immediate state transition).
 
-### Input and approval (interface defined, integration follow-up)
-54. `input.response` sends on the task's `input_tx` channel (if present).
-55. `approval.respond` sends on the task's `approval_tx` channel (if present).
-56. The AgentLoop does not yet consume these channels. Full integration requires AgentLoop changes.
-57. For `AwaitingApproval`: the agent loop exits, the task transitions to `WaitingApproval`. On approval, a new agent loop run would need to be spawned (future work).
+### Input and approval
+56. `input.response` sends on the task's `input_tx` channel (if present).
+57. `approval.respond` sends on the task's `approval_tx` channel (if present).
+58. HITL-enabled AgentLoops consume these channels and resume the same live task.
+59. `enable_human_input` task metadata exposes `request_input`; `require_tool_approval` task metadata pauses tool calls before execution.
 
 ### Budget warnings
 58. Budget warning events emitted at 80% and 95% token/cost thresholds.
@@ -631,8 +642,10 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 ### Event bridging
 - [x] `Token` → `agent.message` with correct `task_id` and `seq`.
 - [x] `ToolStart` → `tool.called` with `tool_call_id`, `tool_name`, `arguments`, `seq`.
+- [x] `ToolApprovalRequired` → `tool.approval_required` with `tool_call_id`, `tool_name`, `arguments`, `reason`, and `seq`. **Tested by `hitl_activity_events_translate_to_server_events_and_waiting_states`.**
 - [x] `ToolCallDelta` → `tool.call_delta` with `index`, optional `tool_call_id`, optional `tool_name`, `arguments_delta`, and `seq`. **Tested by `tool_call_delta_events_translate_to_tool_call_delta_with_optional_metadata_and_seq`.**
 - [x] `ToolOutput` → `tool.output` with `tool_call_id`, `line`, `seq`.
+- [x] `InputRequired` → `input.required` with `prompt`, optional `schema`, and `seq`. **Tested by `hitl_activity_events_translate_to_server_events_and_waiting_states`.**
 - [x] `ToolFinish` → `tool.result` with `duration_ms`, `is_error`, `seq`.
 - [x] `ThinkStart`/`ThinkDelta`/`ThinkEnd` → `agent.thinking` events with `seq`.
 - [x] `ChildSpawned` → `agent.child_spawned` with `seq`.
@@ -642,7 +655,7 @@ rust-decimal = { version = "1", features = ["serde-with-str"] }
 - [x] Nested `ChildActivity` (grandchild) flattened correctly with innermost child_id.
 - [x] All events include `task_id` and monotonic `seq`.
 - [x] Events received by TaskManager broadcast subscribers.
-- [x] `EngineActivitySink::emit` does not acquire any mutex (non-blocking hot path).
+- [x] `EngineActivitySink::emit` avoids TaskManager lock acquisition for ordinary activity events; HITL wait events intentionally call TaskManager to transition waiting state. **Tested by `hitl_activity_events_translate_to_server_events_and_waiting_states`.**
 
 ### Agent completion
 - [x] `Complete` → `Completed` with no reason.

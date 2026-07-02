@@ -32,9 +32,13 @@ AgentLoop (parent or child)
    |      Token("Analyzing...")          → sink.emit(Token)
    |
    +--> Tool call
+   |      ToolApprovalRequired { ... }   → sink.emit(ToolApprovalRequired)
    |      ToolStart { name, args }       → sink.emit(ToolStart)
    |      ToolOutput { line }            → sink.emit(ToolOutput)  (streaming)
    |      ToolFinish { name, stats }     → sink.emit(ToolFinish)
+   |
+   +--> Human input
+   |      InputRequired { prompt }       → sink.emit(InputRequired)
    |
    +--> Sub-agent (child AgentLoop)
           ChildSpawned { id, type, task } → sink.emit(ChildSpawned)
@@ -128,6 +132,14 @@ pub enum ActivityEvent {
         arguments: serde_json::Value,
     },
 
+    /// A tool call is waiting for human approval before execution starts.
+    ToolApprovalRequired {
+        tool_call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+        reason: Option<String>,
+    },
+
     /// A provider streamed part of a tool-call argument payload.
     ///
     /// This is observational only. It does not mean the tool has started.
@@ -142,6 +154,12 @@ pub enum ActivityEvent {
     ToolOutput {
         tool_call_id: String,
         line: String,
+    },
+
+    /// The agent is waiting for user-provided input.
+    InputRequired {
+        prompt: String,
+        schema: Option<serde_json::Value>,
     },
 
     /// A tool call has finished.
@@ -210,14 +228,20 @@ pub trait ActivitySink: Send + Sync + 'static {
 13. Thinking content chunks from the provider stream MUST be emitted as `ThinkDelta { text }` as they arrive.
 14. When the thinking content block ends in the provider stream, the agent loop MUST emit `ThinkEnd`. The `think_duration_ms` is measured by the agent loop from `ThinkStart` to `ThinkEnd`. The `think_tokens` is the approximate character-to-token count of accumulated `ThinkDelta` text (divide character count by 4).
 15. When the provider streams tool-call argument chunks, each chunk MUST be emitted as `ToolCallDelta { index, tool_call_id, name, arguments_delta }`. The event is display-only and MUST NOT be journaled.
-16. Before executing a tool call, the agent loop MUST emit `ToolStart` with the tool's name, call ID, and full parsed arguments.
-17. After a tool call completes, the agent loop MUST emit `ToolFinish` with the tool name, call ID, error status, duration, and optional exit code.
-18. The agent loop MUST emit `ToolOutput` for each line of streaming output from a tool (e.g. shell stdout/stderr). The agent loop — not the tool implementation — owns the sink. Tools return output through existing channels (e.g. streaming stdout); the agent loop captures it and emits `ToolOutput` events.
-19. The agent loop MUST emit `TurnComplete` when `run_single_turn()` returns.
+16. When tool approval is enabled, the agent loop MUST emit `ToolApprovalRequired` before `ToolStart`.
+17. Before executing a tool call, the agent loop MUST emit `ToolStart` with the tool's name, call ID, and full parsed arguments.
+18. `request_input` MUST emit `InputRequired` before waiting for `input.response`.
+19. After a tool call completes, the agent loop MUST emit `ToolFinish` with the tool name, call ID, error status, duration, and optional exit code.
+20. The agent loop MUST emit `ToolOutput` for each line of streaming output from a tool (e.g. shell stdout/stderr). The agent loop — not the tool implementation — owns the sink. Tools return output through existing channels (e.g. streaming stdout); the agent loop captures it and emits `ToolOutput` events.
+21. The agent loop MUST emit `TurnComplete` when `run_single_turn()` returns.
 
 ### Boundary with S015 (approval, retry, cancellation)
 
-18a. Activity events do NOT model approval, retry, or cancellation lifecycles. Those are interactive-layer concerns handled by S015. When the agent loop yields with `ExitReason::AwaitingApproval`, no activity event is emitted — the interactive session handles the approval prompt. When the user approves and the loop resumes, the normal `ToolStart`/`ToolFinish` sequence occurs. Retry indicators (S015 item 40) are rendered by the interactive layer based on provider errors, not activity events.
+21a. Activity events model server-side HITL wait points introduced by S051:
+`ToolApprovalRequired` is emitted before a gated tool starts, and
+`InputRequired` is emitted before `request_input` waits. CLI-specific approval
+rendering remains owned by S015. Retry indicators (S015 item 40) are rendered
+by the interactive layer based on provider errors, not activity events.
 
 ### Sub-agent activity forwarding
 
@@ -270,7 +294,7 @@ pub trait ActivitySink: Send + Sync + 'static {
 
 ### ActivityEvent type
 
-- [x] `ActivityEvent` defines all variants: `Token`, `ThinkStart`, `ThinkDelta`, `ThinkEnd`, `ToolStart`, `ToolCallDelta`, `ToolOutput`, `ToolFinish`, `ChildSpawned`, `ChildActivity`, `ChildFinished`, `TurnComplete`. **All variants defined in `simulacra-types/src/activity.rs`.**
+- [x] `ActivityEvent` defines all variants: `Token`, `ThinkStart`, `ThinkDelta`, `ThinkEnd`, `ToolStart`, `ToolApprovalRequired`, `ToolCallDelta`, `ToolOutput`, `InputRequired`, `ToolFinish`, `ChildSpawned`, `ChildActivity`, `ChildFinished`, `TurnComplete`. **All variants defined in `simulacra-types/src/activity.rs`.**
 - [x] `ActivityEvent` implements `Clone + Send + 'static`. **`#[derive(Debug, Clone, Serialize, Deserialize)]` on the enum; all fields are owned types (`String`, `Box`, `serde_json::Value`).**
 - [x] `ActivityEvent` implements `Serialize + Deserialize`. **`#[derive(Serialize, Deserialize)]` with `#[serde(tag = "type")]` for tagged JSON.**
 - [x] All string fields are owned `String`, not borrowed. **Every string field in every variant is `String`, not `&str`.**
@@ -290,7 +314,9 @@ pub trait ActivitySink: Send + Sync + 'static {
 - [x] Provider streaming tokens emit `Token` events via the sink. **S050 test `streaming_provider_tokens_emit_in_order_and_final_response_is_journaled_once` verifies provider-delta emission.**
 - [x] Extended thinking emits `ThinkStart`, `ThinkDelta` (streaming), and `ThinkEnd` with duration and token count.
 - [x] Tool call start emits `ToolStart` with name, call ID, and arguments. **`self.sink.emit(ActivityEvent::ToolStart { tool_call_id, name, arguments })` before tool execution in `run_single_turn()`.**
+- [x] Tool approval waits emit `ToolApprovalRequired` before `ToolStart`. **S051 test `tool_approval_required_emits_before_tool_start_and_approval_executes` verifies approval event ordering.**
 - [x] Tool-call input streaming emits `ToolCallDelta` before `ToolStart`. **S050 test `provider_tool_call_deltas_map_to_activity_events_without_partial_journal_entries` verifies provider delta emission before any tool execution event.**
+- [x] Human input waits emit `InputRequired`. **S051 test `request_input_tool_waits_for_input_response_and_journals_tool_result` verifies request_input emits and waits.**
 - [x] Tool call completion emits `ToolFinish` with name, call ID, error status, duration, and optional exit code. **`self.sink.emit(ActivityEvent::ToolFinish { tool_call_id, name, is_error, duration_ms, exit_code: None })` after tool execution.**
 - [x] `run_single_turn()` emits `TurnComplete` on return. **`self.sink.emit(ActivityEvent::TurnComplete)` on both the Complete and ToolCallsProcessed return paths.**
 

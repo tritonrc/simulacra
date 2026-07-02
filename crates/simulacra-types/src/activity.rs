@@ -37,6 +37,14 @@ pub enum ActivityEvent {
         arguments: serde_json::Value,
     },
 
+    /// A tool call is waiting for human approval before execution starts.
+    ToolApprovalRequired {
+        tool_call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+        reason: Option<String>,
+    },
+
     /// A provider streamed part of a tool-call argument payload.
     ///
     /// Display-only; the actual tool execution starts at `ToolStart`.
@@ -49,6 +57,12 @@ pub enum ActivityEvent {
 
     /// A line of output from a running tool (e.g. shell stdout/stderr).
     ToolOutput { tool_call_id: String, line: String },
+
+    /// The agent is waiting for user-provided input.
+    InputRequired {
+        prompt: String,
+        schema: Option<serde_json::Value>,
+    },
 
     /// A tool call has finished.
     ToolFinish {
