@@ -9,8 +9,9 @@ S049-S051 make one `AgentLoop` run cancellable, streamable, and resumable
 around HITL waits. S052 adds a separate orchestration layer above individual
 agent runs. A workflow is a persisted, restricted ESM script that coordinates
 many agent workers through phases, fan-out, joins, progress, and cached resume.
-Workflows execute on Simulacra's QuickJS runtime with a restricted host API
-profile; S052 does not introduce a separate workflow parser or interpreter.
+Workflows execute on Simulacra's shared QuickJS runtime with a restricted host
+API profile; S052 does not introduce a separate workflow parser or interpreter.
+S053 owns the shared async QuickJS substrate.
 
 The workflow runtime coordinates only. It does not gain direct filesystem,
 shell, fetch, process, or tool powers. All real side effects still happen inside

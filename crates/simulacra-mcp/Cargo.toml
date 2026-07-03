@@ -15,7 +15,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
-url = "2"
+url.workspace = true
 base64 = "0.22"
 wasmtime = { version = "43", default-features = false, features = ["component-model", "cranelift", "std", "runtime"], optional = true }
 wasmtime-wasi = { version = "43", optional = true }

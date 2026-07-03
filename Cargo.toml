@@ -59,6 +59,7 @@ async-trait = "0.1"
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
 ureq = "3"
+url = "2"
 
 # Database
 rusqlite = { version = "0.34", features = ["bundled"] }
@@ -88,7 +89,8 @@ tracing-opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.31"
 
 # QuickJS
-rquickjs = { version = "0.9", features = ["bindgen", "loader", "macro", "futures"] }
+rquickjs = { version = "0.12", features = ["bindgen", "loader", "macro", "futures"] }
+rquickjs-serde = "0.6.1"
 
 # Internal crates
 simulacra-types = { path = "crates/simulacra-types" }

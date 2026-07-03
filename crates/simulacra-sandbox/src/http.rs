@@ -14,21 +14,11 @@ use std::sync::{Arc, Mutex};
 
 /// Extract host (without port) from a URL string.
 pub(crate) fn extract_host(url: &str) -> Option<String> {
-    // Simple extraction: strip scheme, then take up to first '/' or ':'
-    let without_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let host_port = without_scheme.split('/').next()?;
-    // Strip port if present
-    let host = if host_port.contains(':') {
-        host_port
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(host_port)
-    } else {
-        host_port
-    };
-    Some(host.to_string())
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str().map(ToOwned::to_owned)
 }
 
 /// Core fetch_http logic following the Golden Rule:

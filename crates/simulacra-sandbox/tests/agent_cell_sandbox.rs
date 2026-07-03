@@ -2252,6 +2252,34 @@ fn remote_module_import_triggers_modulefetcher_fetch_which_delegates_to_agent_ce
 }
 
 #[test]
+fn remote_module_stub_uses_parsed_url_authority_for_network_capability_checks() {
+    let harness = Harness::new(
+        capability_with_network(&[], &[], &["net:allowed.example.com"], false, true),
+        unlimited_budget(),
+        Arc::new(FakeJournalStorage::default()),
+    );
+    let stub_url = "https://allowed.example.com@evil.example.com/entry.js";
+    harness
+        .cell
+        .register_module_stub(stub_url, "export default 42;");
+
+    let error = harness
+        .execute_js(&format!(
+            r#"
+            import value from "{stub_url}";
+            value;
+            "#
+        ))
+        .expect_err("module fetch must be denied based on the actual URL host")
+        .to_string();
+
+    assert!(
+        error.contains("capability denied") && error.contains("evil.example.com"),
+        "module fetch capability checks must use the parsed URL authority, got {error}"
+    );
+}
+
+#[test]
 fn remote_module_fetch_with_denied_network_capability_fails_with_a_capability_error_message_surfaced_as_a_js_module_loading_error()
  {
     let harness = Harness::new(
@@ -2323,6 +2351,27 @@ fn fetch_http_to_a_denied_host_returns_sandboxerror_capability_denied() {
     assert!(
         error.contains("capability denied") && error.contains("127.0.0.1"),
         "expected denied host fetch to return CapabilityDenied, got {error}"
+    );
+}
+
+#[test]
+fn fetch_http_uses_parsed_url_authority_for_network_capability_checks() {
+    let harness = Harness::new(
+        capability_with_network(&[], &[], &["net:allowed.example.com"], false, false),
+        unlimited_budget(),
+        Arc::new(FakeJournalStorage::default()),
+    );
+    let url = "https://allowed.example.com:443@evil.example.com/secret";
+
+    let error = harness
+        .cell
+        .fetch_http(url, "GET", &[], None, None)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("capability denied") && error.contains("evil.example.com"),
+        "network capability checks must use the parsed URL authority, got {error}"
     );
 }
 
