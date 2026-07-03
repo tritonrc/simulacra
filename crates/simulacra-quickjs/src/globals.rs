@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
+use crate::formatting::format_js_value;
 use base64::Engine as _;
 use rquickjs::{Function, Object, Value};
 
@@ -205,7 +206,7 @@ fn register_console_levels(
                 let parts: Vec<String> = args
                     .0
                     .iter()
-                    .map(|v| crate::format_js_value(v, 0, &mut HashSet::new()))
+                    .map(|v| format_js_value(v, 0, &mut HashSet::new()))
                     .collect();
                 let line = parts.join(" ");
                 buf.borrow_mut().push_str(&format!("{prefix} {line}\n"));
