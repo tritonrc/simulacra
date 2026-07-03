@@ -105,8 +105,10 @@ These are behavioral constraints that apply across all specs. They are non-negot
 ### QuickJS
 - JS APIs implemented in Rust as host functions (AWS LLRT pattern), not JS polyfills.
 - ESM only. `fs`, `process`, `console`, `fetch` modules.
+- `rquickjs-serde` is allowed for typed Rust/QuickJS value conversion at host
+  boundaries; avoid stringified JSON bridges for new runtime-facing APIs.
 
 ### Dependencies
-- Justified external deps: `rmcp`, `rquickjs`, `reqwest`, `tokio`, `serde`, `schemars`, `rust_decimal`, `ratatui`, `clap`, `toml`, `thiserror`, `anyhow`, `tracing`, `tracing-opentelemetry`, `opentelemetry-otlp`.
+- Justified external deps: `rmcp`, `rquickjs`, `rquickjs-serde`, `reqwest`, `url`, `tokio`, `serde`, `schemars`, `rust_decimal`, `ratatui`, `clap`, `toml`, `thiserror`, `anyhow`, `tracing`, `tracing-opentelemetry`, `opentelemetry-otlp`.
 - We build our own: Provider impls, Tool registry, agent loop, context management, sessions, guardrails.
 - Before adding any dep: is it maintained? >1000 downloads? Could we write it in <200 lines?

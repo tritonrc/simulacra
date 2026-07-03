@@ -167,7 +167,7 @@ This spec defines the **proxy layer** that wraps raw subsystem access so that no
 - [x] `AgentCell` is `Send`.
 - [x] Two `AgentCell` instances with different VFS references do not share filesystem state.
 - [x] `AgentCell` holds a persistent `ShellExecutor` — shell state (CWD, env vars) survives across `execute_shell` calls within the same cell.
-- [x] `AgentCell` holds a persistent `JsRuntime` — JS state (variables, functions) survives across `execute_js` calls within the same cell.
+- [x] `AgentCell` holds a persistent `JsRuntime` wrapper for host configuration and remote source caches. Each `execute_js` call uses a fresh QuickJS runtime/context, so JS globals and module instances do not survive across calls. **S053 owns the async runtime v2 substrate.**
 
 ### JS host function callback routing
 

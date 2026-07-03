@@ -18,9 +18,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rquickjs::context::EvalOptions;
+use rquickjs::loader::ImportAttributes;
 use rquickjs::module::{Declarations, Exports, ModuleDef};
-use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Object, Runtime, Type, Value};
+use rquickjs::promise::MaybePromise;
+use rquickjs::{
+    AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Function, Module, Object, Promise, Type, Value,
+};
 use simulacra_types::VirtualFs;
+use simulacra_vfs::MemoryFs;
+use tracing::Instrument;
 
 /// Maximum nesting depth for recursive value formatting.
 const FORMAT_MAX_DEPTH: usize = 4;
@@ -184,7 +190,7 @@ fn format_value_inner(
 /// The implementation is responsible for capability checks, HTTP fetching,
 /// and error handling. The runtime calls this for `http://` and `https://`
 /// module specifiers.
-pub trait ModuleFetcher {
+pub trait ModuleFetcher: Send + Sync {
     /// Fetch the source text of a remote module.
     ///
     /// Returns `Ok(source)` with the JS source text on success, or
@@ -232,6 +238,10 @@ pub trait FsProxy: Send + Sync {
 
 /// Default execution timeout for JS evaluation (5 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Workflow orchestration may legitimately await long-running agent workers.
+/// S052 cancellation, not the QuickJS wall-clock guard, is the control plane for
+/// those host waits.
+const WORKFLOW_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Host API surface installed into a fresh QuickJS context.
 ///
@@ -493,13 +503,16 @@ impl ModuleDef for ProcessModule {
     }
 }
 
-/// Shared state between the resolver and loader for tracking fetched remote modules.
-type FetchedUrls = Rc<RefCell<HashSet<String>>>;
+type RemoteUrlSet = Rc<RefCell<HashSet<String>>>;
+
+struct PrefetchedRemoteModules {
+    allowed: HashSet<String>,
+    fetched: HashSet<String>,
+    sources: HashMap<String, String>,
+}
 
 /// Resolves `simulacra:*` specifiers; rejects bare specifiers.
-struct SimulacraResolver {
-    fetched_urls: FetchedUrls,
-}
+struct SimulacraResolver;
 
 impl rquickjs::loader::Resolver for SimulacraResolver {
     fn resolve<'js>(
@@ -507,6 +520,7 @@ impl rquickjs::loader::Resolver for SimulacraResolver {
         _ctx: &rquickjs::Ctx<'js>,
         base: &str,
         name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
         // simulacra: built-in modules
         if let Some(mod_name) = name.strip_prefix("simulacra:") {
@@ -521,57 +535,14 @@ impl rquickjs::loader::Resolver for SimulacraResolver {
             ));
         }
 
-        // Remote modules — pass through as-is. Network capability enforcement
-        // happens in the host ModuleFetcher, not in the resolver.
-        if is_remote_module_url(name) {
-            // If already fetched, emit a cache hit event.
-            // rquickjs will not call the loader again for a cached module,
-            // so we emit the observability event here in the resolver.
-            if self.fetched_urls.borrow().contains(name) {
-                tracing::info!(
-                    simulacra.module.cache = "hit",
-                    simulacra.module.url = %name,
-                    "module cache hit"
-                );
-            }
-            return Ok(name.to_string());
-        }
-
-        // Absolute paths — if the base is a remote URL, resolve against the origin
-        if name.starts_with('/') {
-            if is_remote_module_url(base) {
-                // Extract origin (e.g. "https://esm.sh") from the base URL
-                if let Some(origin) = extract_url_origin(base) {
-                    return Ok(format!("{origin}{name}"));
-                }
-            }
-            return Ok(name.to_string());
-        }
-
-        // Relative imports — resolve against base
-        if name.starts_with("./") || name.starts_with("../") {
-            // If the base is a remote URL, resolve relative to it
-            if is_remote_module_url(base) {
-                let base_dir = base.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(base);
-                let resolved = resolve_relative(base_dir, name);
-                return Ok(resolved);
-            }
-            let base_dir = base.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-            let resolved = resolve_relative(base_dir, name);
-            return Ok(resolved);
-        }
-
-        // Bare specifiers are rejected
-        let message = format!(
-            "Bare specifier '{name}' is not allowed. \
-             Use 'simulacra:' for built-in modules or 'http(s)://' for remote modules."
-        );
-        tracing::error!(
-            specifier = %name,
-            reason = %message,
-            "module resolution failed"
-        );
-        Err(rquickjs::Error::new_resolving_message(base, name, message))
+        resolve_module_specifier(base, name).map_err(|message| {
+            tracing::error!(
+                specifier = %name,
+                reason = %message,
+                "module resolution failed"
+            );
+            rquickjs::Error::new_resolving_message(base, name, message)
+        })
     }
 }
 
@@ -594,6 +565,35 @@ fn extract_url_origin(url: &str) -> Option<String> {
     Some(format!("{scheme}{host}"))
 }
 
+fn resolve_module_specifier(base: &str, name: &str) -> Result<String, String> {
+    if is_remote_module_url(name) {
+        return Ok(name.to_string());
+    }
+
+    if name.starts_with('/') {
+        if is_remote_module_url(base)
+            && let Some(origin) = extract_url_origin(base)
+        {
+            return Ok(format!("{origin}{name}"));
+        }
+        return Ok(name.to_string());
+    }
+
+    if name.starts_with("./") || name.starts_with("../") {
+        if is_remote_module_url(base) {
+            let base_dir = base.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(base);
+            return Ok(resolve_relative(base_dir, name));
+        }
+        let base_dir = base.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+        return Ok(resolve_relative(base_dir, name));
+    }
+
+    Err(format!(
+        "Bare specifier '{name}' is not allowed. \
+         Use 'simulacra:' for built-in modules or 'http(s)://' for remote modules."
+    ))
+}
+
 /// Resolve a relative path against a base directory.
 fn resolve_relative(base_dir: &str, relative: &str) -> String {
     let mut parts: Vec<&str> = if base_dir.is_empty() {
@@ -613,20 +613,191 @@ fn resolve_relative(base_dir: &str, relative: &str) -> String {
     parts.join("/")
 }
 
+fn static_import_specifiers(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut specifiers = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                index = skip_quoted(bytes, index).unwrap_or(bytes.len());
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            byte if is_ident_start(byte) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_ident_continue(bytes[index]) {
+                    index += 1;
+                }
+                let ident = &source[start..index];
+                if ident == "import" {
+                    if let Some((specifier, next)) = parse_import_declaration(source, index) {
+                        specifiers.push(specifier);
+                        index = next;
+                    }
+                } else if ident == "export"
+                    && let Some((specifier, next)) = parse_export_declaration(source, index)
+                {
+                    specifiers.push(specifier);
+                    index = next;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+
+    specifiers
+}
+
+fn parse_import_declaration(source: &str, after_import: usize) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let index = skip_ws_and_comments(bytes, after_import);
+    match bytes.get(index).copied() {
+        Some(b'(') => None,
+        Some(b'\'') | Some(b'"') => read_quoted_specifier(source, index),
+        _ => find_from_specifier(source, index),
+    }
+}
+
+fn parse_export_declaration(source: &str, after_export: usize) -> Option<(String, usize)> {
+    find_from_specifier(source, after_export)
+}
+
+fn find_from_specifier(source: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let mut index = start;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b';' => return None,
+            b'\'' | b'"' | b'`' => {
+                index = skip_quoted(bytes, index).unwrap_or(bytes.len());
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            byte if is_ident_start(byte) => {
+                let ident_start = index;
+                index += 1;
+                while index < bytes.len() && is_ident_continue(bytes[index]) {
+                    index += 1;
+                }
+                if &source[ident_start..index] == "from" {
+                    index = skip_ws_and_comments(bytes, index);
+                    return read_quoted_specifier(source, index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+
+    None
+}
+
+fn read_quoted_specifier(source: &str, quote_index: usize) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let quote = *bytes.get(quote_index)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut index = quote_index + 1;
+    let start = index;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => {
+                return Some((source[start..index].to_string(), index + 1));
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_quoted(bytes: &[u8], quote_index: usize) -> Option<usize> {
+    let quote = *bytes.get(quote_index)?;
+    let mut index = quote_index + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            byte if byte == quote => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_ws_and_comments(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes.get(index) == Some(&b'/') && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        return index;
+    }
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_' || byte == b'$'
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    is_ident_start(byte) || byte.is_ascii_digit()
+}
+
 /// Loads `simulacra:*` modules as native `ModuleDef` implementations,
 /// VFS-resident modules by reading source through the filesystem proxy,
 /// and remote `http://` / `https://` modules via a [`ModuleFetcher`].
 struct SimulacraLoader {
-    fetcher: Option<Rc<dyn ModuleFetcher>>,
     /// Optional capability-checking FS proxy for VFS-resident module reads.
     fs_proxy: Option<Arc<dyn FsProxy>>,
     /// Source cache for remote modules across eval calls on the same
     /// JsRuntime wrapper. This avoids preserving JS global/module state while
     /// still avoiding repeated network fetches for identical URLs.
     source_cache: Arc<Mutex<HashMap<String, String>>>,
-    /// URLs that have already been fetched in this runtime's lifetime.
-    /// Shared with `SimulacraResolver` so it can emit cache hit events.
-    fetched_urls: FetchedUrls,
+    /// Remote URLs that static prefetch reached for the current eval.
+    allowed_remote_urls: RemoteUrlSet,
+    /// Remote URLs fetched, rather than cache-hit, during the current eval.
+    fetched_remote_urls: RemoteUrlSet,
 }
 
 impl rquickjs::loader::Loader for SimulacraLoader {
@@ -634,6 +805,7 @@ impl rquickjs::loader::Loader for SimulacraLoader {
         &mut self,
         ctx: &rquickjs::Ctx<'js>,
         name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js, rquickjs::module::Declared>> {
         // Built-in simulacra: modules are pre-registered via
         // Module::declare_def / Module::evaluate_def in JsRuntime::eval.
@@ -651,7 +823,16 @@ impl rquickjs::loader::Loader for SimulacraLoader {
 
         // Non-simulacra modules: remote URLs, VFS paths, etc.
         let source = if is_remote_module_url(name) {
-            if let Some(source) = self
+            if !self.allowed_remote_urls.borrow().contains(name) {
+                return Err(rquickjs::Error::new_loading_message(
+                    name,
+                    format!(
+                        "Remote module '{name}' was not statically prefetched; dynamic remote imports are not allowed"
+                    ),
+                ));
+            }
+
+            let source = self
                 .source_cache
                 .lock()
                 .map_err(|e| {
@@ -662,54 +843,23 @@ impl rquickjs::loader::Loader for SimulacraLoader {
                 })?
                 .get(name)
                 .cloned()
-            {
+                .ok_or_else(|| {
+                    rquickjs::Error::new_loading_message(
+                        name,
+                        format!(
+                            "Prefetched remote module '{name}' was missing from the source cache"
+                        ),
+                    )
+                })?;
+
+            if !self.fetched_remote_urls.borrow().contains(name) {
                 tracing::info!(
                     simulacra.module.cache = "hit",
                     simulacra.module.url = %name,
                     "module cache hit"
                 );
-                self.fetched_urls.borrow_mut().insert(name.to_string());
-                return Module::declare(ctx.clone(), name, source);
             }
-
-            // Remote module — fetch via the ModuleFetcher
-            let _span = tracing::info_span!(
-                "module_fetch",
-                simulacra.operation.name = "module_fetch",
-                simulacra.module.url = %name,
-            )
-            .entered();
-
-            // Note: we don't short-circuit on fetched_urls here.
-            // QuickJS may call the loader again across eval() boundaries
-            // even for previously-fetched modules, so we always re-fetch.
-
-            let fetcher = self.fetcher.as_ref().ok_or_else(|| {
-                rquickjs::Error::new_loading_message(
-                    name,
-                    format!("No module fetcher configured for remote module: '{name}'"),
-                )
-            })?;
-
-            match fetcher.fetch(name) {
-                Ok(source) => {
-                    self.fetched_urls.borrow_mut().insert(name.to_string());
-                    self.source_cache
-                        .lock()
-                        .map_err(|e| {
-                            rquickjs::Error::new_loading_message(
-                                name,
-                                format!("module source cache mutex poisoned: {e}"),
-                            )
-                        })?
-                        .insert(name.to_string(), source.clone());
-                    tracing::info!(simulacra.module.fetches = 1u64, "remote module fetched");
-                    source
-                }
-                Err(msg) => {
-                    return Err(rquickjs::Error::new_loading_message(name, msg));
-                }
-            }
+            source
         } else if name.starts_with('/') {
             // VFS-resident module — route through FsProxy so module loads are
             // subject to the same mediation as ordinary fs reads.
@@ -804,13 +954,14 @@ fn wrap_module_for_result(code: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// A minimal QuickJS sandbox with mediated host functions.
+#[derive(Clone)]
 pub struct JsRuntime {
     /// Maximum wall-clock time allowed for a single JS evaluation.
     timeout: Duration,
     /// Host-controlled environment variables exposed via `process.env`.
     env: HashMap<String, String>,
     /// Optional fetcher for remote ESM module source.
-    module_fetcher: Option<Rc<dyn ModuleFetcher>>,
+    module_fetcher: Option<Arc<dyn ModuleFetcher>>,
     /// Remote module source cache shared by fresh eval contexts owned by this
     /// wrapper. JS module instances are not shared across eval calls.
     module_source_cache: Arc<Mutex<HashMap<String, String>>>,
@@ -930,7 +1081,7 @@ impl JsRuntime {
         Ok(Self {
             timeout,
             env: HashMap::new(),
-            module_fetcher: fetcher.map(|f| Rc::from(f) as Rc<dyn ModuleFetcher>),
+            module_fetcher: fetcher.map(|f| Arc::from(f) as Arc<dyn ModuleFetcher>),
             module_source_cache: Arc::new(Mutex::new(HashMap::new())),
             fs_proxy,
             fetch_proxy,
@@ -949,68 +1100,187 @@ impl JsRuntime {
         Ok(runtime)
     }
 
-    /// Create a fresh QuickJS engine for one eval call and install the module
-    /// loader against this wrapper's mediated host operations.
-    fn fresh_engine(&self) -> Result<(Runtime, Context), JsError> {
-        let rt = Runtime::new().map_err(|e| JsError::Runtime(e.to_string()))?;
-        let ctx = Context::full(&rt).map_err(|e| JsError::Runtime(e.to_string()))?;
+    async fn prefetch_remote_static_imports(
+        &self,
+        root_source: &str,
+        allowed_remote_urls: &RemoteUrlSet,
+        fetched_remote_urls: &RemoteUrlSet,
+    ) -> Result<(), JsError> {
+        let runtime = self.clone();
+        let source = root_source.to_string();
+        let span = tracing::Span::current();
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let handle = tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let _guard = span.enter();
+                runtime.prefetch_remote_static_imports_owned(&source)
+            })
+        });
+        let prefetched = tokio::time::timeout(self.timeout, handle)
+            .await
+            .map_err(|_| JsError::Execution("JavaScript evaluation timed out".into()))?
+            .map_err(|error| JsError::Runtime(format!("module prefetch task failed: {error}")))??;
 
-        let fetched_urls: FetchedUrls = Rc::new(RefCell::new(HashSet::new()));
-        if self.host_api.module_loader || self.host_api.simulacra_modules {
-            rt.set_loader(
-                SimulacraResolver {
-                    fetched_urls: Rc::clone(&fetched_urls),
-                },
-                SimulacraLoader {
-                    fetcher: self.module_fetcher.clone(),
-                    fs_proxy: self.fs_proxy.clone(),
-                    source_cache: Arc::clone(&self.module_source_cache),
-                    fetched_urls,
-                },
-            );
+        if !prefetched.sources.is_empty() {
+            self.module_source_cache
+                .lock()
+                .map_err(|e| JsError::Runtime(format!("module source cache mutex poisoned: {e}")))?
+                .extend(prefetched.sources);
+        }
+        allowed_remote_urls.borrow_mut().extend(prefetched.allowed);
+        fetched_remote_urls.borrow_mut().extend(prefetched.fetched);
+        Ok(())
+    }
+
+    fn prefetch_remote_static_imports_owned(
+        &self,
+        root_source: &str,
+    ) -> Result<PrefetchedRemoteModules, JsError> {
+        let mut stack = vec![("<eval>".to_string(), root_source.to_string())];
+        let mut visited = HashSet::new();
+        let mut allowed_remote_urls = HashSet::new();
+        let mut fetched_remote_urls = HashSet::new();
+        let mut new_sources: HashMap<String, String> = HashMap::new();
+
+        while let Some((base, source)) = stack.pop() {
+            for specifier in static_import_specifiers(&source) {
+                if specifier.starts_with("simulacra:") {
+                    continue;
+                }
+                let resolved = resolve_module_specifier(&base, &specifier).map_err(|message| {
+                    tracing::error!(
+                        specifier = %specifier,
+                        reason = %message,
+                        "module resolution failed"
+                    );
+                    JsError::Execution(message)
+                })?;
+                if !is_remote_module_url(&resolved) {
+                    if resolved.starts_with('/')
+                        && visited.insert(resolved.clone())
+                        && let Some(proxy) = self.fs_proxy.as_ref()
+                    {
+                        let data = proxy.read_file(&resolved).map_err(|e| {
+                            JsError::Execution(format!(
+                                "Failed to load VFS module '{resolved}' during prefetch: {e}"
+                            ))
+                        })?;
+                        let source = String::from_utf8(data).map_err(|e| {
+                            JsError::Execution(format!(
+                                "VFS module '{resolved}' is not valid UTF-8: {e}"
+                            ))
+                        })?;
+                        stack.push((resolved, source));
+                    }
+                    continue;
+                }
+
+                allowed_remote_urls.insert(resolved.clone());
+                if !visited.insert(resolved.clone()) {
+                    continue;
+                }
+
+                let cached = if let Some(source) = new_sources.get(&resolved) {
+                    Some(source.clone())
+                } else {
+                    self.module_source_cache
+                        .lock()
+                        .map_err(|e| {
+                            JsError::Runtime(format!("module source cache mutex poisoned: {e}"))
+                        })?
+                        .get(&resolved)
+                        .cloned()
+                };
+
+                let remote_source = if let Some(source) = cached {
+                    source
+                } else {
+                    let fetcher = self.module_fetcher.as_ref().ok_or_else(|| {
+                        JsError::Execution(format!(
+                            "No module fetcher configured for remote module: '{resolved}'"
+                        ))
+                    })?;
+
+                    let _span = tracing::info_span!(
+                        "module_fetch",
+                        simulacra.operation.name = "module_fetch",
+                        simulacra.module.url = %resolved,
+                    )
+                    .entered();
+
+                    let source = fetcher.fetch(&resolved).map_err(JsError::Execution)?;
+                    new_sources.insert(resolved.clone(), source.clone());
+                    fetched_remote_urls.insert(resolved.clone());
+                    tracing::info!(simulacra.module.fetches = 1u64, "remote module fetched");
+                    source
+                };
+
+                stack.push((resolved, remote_source));
+            }
         }
 
+        Ok(PrefetchedRemoteModules {
+            allowed: allowed_remote_urls,
+            fetched: fetched_remote_urls,
+            sources: new_sources,
+        })
+    }
+    async fn fresh_async_engine(
+        &self,
+        allowed_remote_urls: RemoteUrlSet,
+        fetched_remote_urls: RemoteUrlSet,
+    ) -> Result<(AsyncRuntime, AsyncContext), JsError> {
+        let rt = AsyncRuntime::new().map_err(|e| JsError::Runtime(e.to_string()))?;
+
+        if self.host_api.module_loader || self.host_api.simulacra_modules {
+            rt.set_loader(
+                SimulacraResolver,
+                SimulacraLoader {
+                    fs_proxy: self.fs_proxy.clone(),
+                    source_cache: Arc::clone(&self.module_source_cache),
+                    allowed_remote_urls,
+                    fetched_remote_urls,
+                },
+            )
+            .await;
+        }
+
+        let ctx = AsyncContext::full(&rt)
+            .await
+            .map_err(|e| JsError::Runtime(e.to_string()))?;
         Ok((rt, ctx))
     }
 
-    /// Pre-register native simulacra: modules via declare_def/evaluate_def.
-    ///
-    /// This uses Module::declare_def::<FsModule>, Module::evaluate_def::<FsModule>,
-    /// Module::declare_def::<ConsoleModule>, Module::evaluate_def::<ConsoleModule>,
-    /// Module::declare_def::<ProcessModule>, and Module::evaluate_def::<ProcessModule>
-    /// to register the built-in modules natively rather than as synthetic JS source strings.
-    fn register_native_modules(ctx: &rquickjs::Ctx<'_>) -> Result<(), JsError> {
-        // Use evaluate_def which internally calls declare_def + eval.
-        // We need to call finish() on the promise to ensure evaluation completes.
+    async fn register_native_modules_async(ctx: &rquickjs::Ctx<'_>) -> Result<(), JsError> {
         let (_module, promise) =
             Module::evaluate_def::<FsModule, _>(ctx.clone(), "simulacra:fs")
                 .map_err(|e| JsError::Runtime(format!("failed to register simulacra:fs: {e}")))?;
-        let _: () = promise
-            .finish()
-            .map_err(|e| JsError::Runtime(format!("failed to evaluate simulacra:fs: {e}")))?;
+        let _: Value<'_> = promise.into_future().await.catch(ctx).map_err(|caught| {
+            JsError::Runtime(format!("failed to evaluate simulacra:fs: {caught}"))
+        })?;
 
         let (_module, promise) =
             Module::evaluate_def::<ConsoleModule, _>(ctx.clone(), "simulacra:console").map_err(
                 |e| JsError::Runtime(format!("failed to register simulacra:console: {e}")),
             )?;
-        let _: () = promise
-            .finish()
-            .map_err(|e| JsError::Runtime(format!("failed to evaluate simulacra:console: {e}")))?;
+        let _: Value<'_> = promise.into_future().await.catch(ctx).map_err(|caught| {
+            JsError::Runtime(format!("failed to evaluate simulacra:console: {caught}"))
+        })?;
 
         let (_module, promise) =
             Module::evaluate_def::<ProcessModule, _>(ctx.clone(), "simulacra:process").map_err(
                 |e| JsError::Runtime(format!("failed to register simulacra:process: {e}")),
             )?;
-        let _: () = promise
-            .finish()
-            .map_err(|e| JsError::Runtime(format!("failed to evaluate simulacra:process: {e}")))?;
+        let _: Value<'_> = promise.into_future().await.catch(ctx).map_err(|caught| {
+            JsError::Runtime(format!("failed to evaluate simulacra:process: {caught}"))
+        })?;
 
         let (_module, promise) =
             Module::evaluate_def::<path_module::PathModule, _>(ctx.clone(), "simulacra:path")
                 .map_err(|e| JsError::Runtime(format!("failed to register simulacra:path: {e}")))?;
-        let _: () = promise
-            .finish()
-            .map_err(|e| JsError::Runtime(format!("failed to evaluate simulacra:path: {e}")))?;
+        let _: Value<'_> = promise.into_future().await.catch(ctx).map_err(|caught| {
+            JsError::Runtime(format!("failed to evaluate simulacra:path: {caught}"))
+        })?;
         tracing::debug!("simulacra:path module loaded");
 
         let (_module, promise) =
@@ -1018,9 +1288,9 @@ impl JsRuntime {
                 .map_err(|e| {
                     JsError::Runtime(format!("failed to register simulacra:crypto: {e}"))
                 })?;
-        let _: () = promise
-            .finish()
-            .map_err(|e| JsError::Runtime(format!("failed to evaluate simulacra:crypto: {e}")))?;
+        let _: Value<'_> = promise.into_future().await.catch(ctx).map_err(|caught| {
+            JsError::Runtime(format!("failed to evaluate simulacra:crypto: {caught}"))
+        })?;
         tracing::debug!("simulacra:crypto module loaded");
 
         Ok(())
@@ -1409,6 +1679,33 @@ impl JsRuntime {
     /// If the code contains `import` statements, it is automatically
     /// evaluated as an ESM module. Otherwise it runs as a plain script.
     pub fn eval(&self, code: &str) -> Result<JsOutput, JsError> {
+        let runtime = self.clone();
+        let code = code.to_string();
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        let parent_span = tracing::Span::current();
+        std::thread::spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let _parent_guard = parent_span.enter();
+                let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .map_err(|e| {
+                        JsError::Runtime(format!("failed to create JS async runtime: {e}"))
+                    })?;
+                let result = tokio_runtime.block_on(runtime.eval_async(&code));
+                tokio_runtime.shutdown_timeout(Duration::from_millis(0));
+                result
+            })
+        })
+        .join()
+        .map_err(|_| JsError::Runtime("JS eval thread panicked".into()))?
+    }
+
+    /// Evaluate `code` asynchronously and return captured output.
+    ///
+    /// Each call creates a fresh QuickJS runtime/context. Host configuration and
+    /// remote source caches remain on the `JsRuntime` wrapper.
+    pub async fn eval_async(&self, code: &str) -> Result<JsOutput, JsError> {
         let code = code.to_string();
 
         let span = tracing::info_span!(
@@ -1416,33 +1713,123 @@ impl JsRuntime {
             simulacra.operation.name = "js_execute",
             simulacra.js.module = "<eval>",
         );
-        let _guard = span.enter();
 
-        let deadline = Instant::now() + self.timeout;
-        let (rt, ctx) = self.fresh_engine()?;
-        rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
-
-        // Detect whether the code uses ESM imports.
-        let is_module = code.contains("import ") || code.contains("export ");
-
-        ctx.with(|ctx| {
-            let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
-
-            if self.host_api.simulacra_modules {
-                // Pre-register native simulacra: modules so imports resolve without
-                // hitting the loader. Uses declare_def + evaluate_def pattern.
-                Self::register_native_modules(&ctx)?;
-            }
-
-            if is_module {
-                self.eval_as_module(&ctx, &code, &stdout_buf, &exit_code_cell)
-            } else {
-                self.eval_as_script(&ctx, &code, &stdout_buf, &exit_code_cell)
-            }
-        })
+        async move {
+            tokio::time::timeout(self.timeout, self.eval_async_inner(&code))
+                .await
+                .map_err(|_| JsError::Execution("JavaScript evaluation timed out".into()))?
+        }
+        .instrument(span)
+        .await
     }
 
-    fn eval_as_script(
+    /// Evaluate a restricted workflow ESM module using the shared async
+    /// QuickJS substrate.
+    pub async fn eval_workflow_module_with_setup<F>(
+        source: &str,
+        setup: F,
+    ) -> Result<String, JsError>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>) -> Result<(), JsError> + Send + 'static,
+    {
+        let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+        let runtime = Self::with_host_api_profile(
+            vfs,
+            WORKFLOW_TIMEOUT,
+            None,
+            None,
+            None,
+            JsHostApiProfile::workflow(),
+        )?;
+        runtime.eval_workflow_module_inner(source, setup).await
+    }
+
+    async fn eval_async_inner(&self, code: &str) -> Result<JsOutput, JsError> {
+        let allowed_remote_urls: RemoteUrlSet = Rc::new(RefCell::new(HashSet::new()));
+        let fetched_remote_urls: RemoteUrlSet = Rc::new(RefCell::new(HashSet::new()));
+        if self.host_api.module_loader {
+            self.prefetch_remote_static_imports(code, &allowed_remote_urls, &fetched_remote_urls)
+                .await?;
+        }
+
+        let deadline = Instant::now() + self.timeout;
+        let (rt, ctx) = self
+            .fresh_async_engine(allowed_remote_urls, fetched_remote_urls)
+            .await?;
+        rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)))
+            .await;
+
+        let is_module = code.contains("import ") || code.contains("export ");
+        ctx.async_with(async |ctx| {
+            let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
+            if self.host_api == JsHostApiProfile::workflow() {
+                install_workflow_api_restrictions(&ctx)
+                    .map_err(|e| JsError::Runtime(e.to_string()))?;
+            }
+            if self.host_api.simulacra_modules {
+                Self::register_native_modules_async(&ctx).await?;
+            }
+            if is_module {
+                self.eval_as_module_async(&ctx, code, &stdout_buf, &exit_code_cell)
+                    .await
+            } else {
+                self.eval_as_script_async(&ctx, code, &stdout_buf, &exit_code_cell)
+                    .await
+            }
+        })
+        .await
+    }
+
+    async fn eval_workflow_module_inner<F>(&self, source: &str, setup: F) -> Result<String, JsError>
+    where
+        F: for<'js> FnOnce(&Ctx<'js>) -> Result<(), JsError> + Send + 'static,
+    {
+        let source = source.to_string();
+        tokio::time::timeout(self.timeout, async move {
+            let allowed_remote_urls: RemoteUrlSet = Rc::new(RefCell::new(HashSet::new()));
+            let fetched_remote_urls: RemoteUrlSet = Rc::new(RefCell::new(HashSet::new()));
+            let deadline = Instant::now() + self.timeout;
+            let (rt, ctx) = self
+                .fresh_async_engine(allowed_remote_urls, fetched_remote_urls)
+                .await?;
+            rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)))
+                .await;
+
+            let mut setup = Some(setup);
+            ctx.async_with(async move |ctx| {
+                install_workflow_api_restrictions(&ctx)
+                    .map_err(|e| JsError::Runtime(e.to_string()))?;
+                let setup = setup
+                    .take()
+                    .ok_or_else(|| JsError::Runtime("workflow setup already consumed".into()))?;
+                setup(&ctx)?;
+
+                let mut opts = EvalOptions::default();
+                opts.global = false;
+                opts.promise = true;
+                let promise: Promise<'_> = ctx
+                    .eval_with_options(source, opts)
+                    .catch(&ctx)
+                    .map_err(|caught| JsError::Execution(format!("{caught}")))?;
+                let _: Value<'_> = promise
+                    .into_future()
+                    .await
+                    .catch(&ctx)
+                    .map_err(|caught| JsError::Execution(format!("{caught}")))?;
+                let result: Value<'_> = ctx
+                    .eval("globalThis.__simulacraWorkflowResult__")
+                    .catch(&ctx)
+                    .map_err(|caught| JsError::Execution(format!("{caught}")))?;
+                rquickjs_serde::from_value(result)
+                    .map_err(|error| JsError::Execution(error.to_string()))
+            })
+            .await
+        })
+        .await
+        .map_err(|_| JsError::Execution("JavaScript evaluation timed out".into()))?
+    }
+
+    async fn eval_as_script_async(
         &self,
         ctx: &rquickjs::Ctx<'_>,
         code: &str,
@@ -1450,22 +1837,17 @@ impl JsRuntime {
         exit_code_cell: &Rc<RefCell<Option<i32>>>,
     ) -> Result<JsOutput, JsError> {
         let res: rquickjs::Result<rquickjs::Value<'_>> = ctx.eval(code.to_string());
-
         match res.catch(ctx) {
             Ok(val) => {
-                // If the eval result is a Promise (e.g. from an async IIFE),
-                // drain the microtask queue so the Promise resolves before we
-                // extract the result. Without this, `(async () => { ... })()`
-                // returns `"Promise(0x...)"` instead of the resolved value.
-                let resolved = if let Some(promise) = val.as_promise() {
-                    match promise.finish::<Value<'_>>().catch(ctx) {
-                        Ok(v) => v,
-                        Err(caught) => {
-                            return Self::handle_error(caught, stdout_buf, exit_code_cell);
-                        }
+                let resolved = match MaybePromise::from_value(val)
+                    .into_future::<Value<'_>>()
+                    .await
+                    .catch(ctx)
+                {
+                    Ok(value) => value,
+                    Err(caught) => {
+                        return Self::handle_error(caught, stdout_buf, exit_code_cell);
                     }
-                } else {
-                    val
                 };
 
                 let exit_code = exit_code_cell.borrow_mut().take();
@@ -1479,31 +1861,43 @@ impl JsRuntime {
         }
     }
 
-    fn eval_as_module(
+    async fn eval_as_module_async(
         &self,
         ctx: &rquickjs::Ctx<'_>,
         code: &str,
         stdout_buf: &Rc<RefCell<String>>,
         exit_code_cell: &Rc<RefCell<Option<i32>>>,
     ) -> Result<JsOutput, JsError> {
-        // ESM modules don't return the last expression's value. To capture it,
-        // we wrap the code: the last non-import/export statement is assigned
-        // to `globalThis.__simulacraResult__`, which we read back after evaluation.
         let wrapped = wrap_module_for_result(code);
 
         let mut opts = EvalOptions::default();
-        opts.global = false; // JS_EVAL_TYPE_MODULE
+        opts.global = false;
         opts.promise = true;
-        let res: rquickjs::Result<rquickjs::Promise<'_>> = ctx.eval_with_options(wrapped, opts);
+        let res: rquickjs::Result<Promise<'_>> = ctx.eval_with_options(wrapped, opts);
 
         match res.catch(ctx) {
-            Ok(promise) => match promise.finish::<rquickjs::Value<'_>>().catch(ctx) {
+            Ok(promise) => match promise.into_future::<Value<'_>>().await.catch(ctx) {
                 Ok(_) => {
                     let exit_code = exit_code_cell.borrow_mut().take();
-                    // Read the captured result from globalThis.__simulacraResult__
                     let result_val: rquickjs::Result<rquickjs::Value<'_>> =
                         ctx.eval("globalThis.__simulacraResult__");
-                    let result = result_val.ok().and_then(|v| Self::extract_result(&v));
+                    let result_val = match result_val.catch(ctx) {
+                        Ok(value) => value,
+                        Err(caught) => {
+                            return Self::handle_error(caught, stdout_buf, exit_code_cell);
+                        }
+                    };
+                    let resolved = match MaybePromise::from_value(result_val)
+                        .into_future::<Value<'_>>()
+                        .await
+                        .catch(ctx)
+                    {
+                        Ok(value) => value,
+                        Err(caught) => {
+                            return Self::handle_error(caught, stdout_buf, exit_code_cell);
+                        }
+                    };
+                    let result = Self::extract_result(&resolved);
                     Ok(JsOutput {
                         stdout: stdout_buf.borrow().clone(),
                         result,

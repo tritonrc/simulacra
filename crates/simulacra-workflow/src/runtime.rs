@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rquickjs::context::EvalOptions;
 use rquickjs::function::Async;
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Function, Promise};
+use rquickjs::{Ctx, Function};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use simulacra_quickjs::{JsError, JsRuntime};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -383,9 +383,6 @@ impl Clone for JsWorkflowHost {
 }
 
 fn setup_workflow_globals(ctx: &Ctx<'_>, host: JsWorkflowHost) -> Result<(), WorkflowError> {
-    simulacra_quickjs::install_workflow_api_restrictions(ctx)
-        .map_err(|e| WorkflowError::InvalidScript(e.to_string()))?;
-
     let globals = ctx.globals();
 
     let agent_host = host.clone();
@@ -568,13 +565,12 @@ async fn host_agent_call_inner(
     };
 
     let worker = Arc::clone(&host.worker);
-    let mut worker_task = tokio::spawn(async move { worker.call(call).await });
+    let mut worker_call = worker.call(call);
     let result = tokio::select! {
         _ = host.cancellation.cancelled() => {
-            worker_task.abort();
             return Err(WorkflowError::Cancelled);
         }
-        result = &mut worker_task => result??,
+        result = &mut worker_call => result?,
     };
     drop(permit);
 
@@ -608,41 +604,15 @@ where
                 WorkflowError::Internal(format!("failed to create workflow JS runtime: {e}"))
             })?;
         let local = tokio::task::LocalSet::new();
-        rt.block_on(local.run_until(eval_workflow_module_local(source, setup)))
+        rt.block_on(local.run_until(async move {
+            JsRuntime::eval_workflow_module_with_setup(&source, move |ctx| {
+                setup(ctx).map_err(|e| JsError::Execution(e.to_string()))
+            })
+            .await
+            .map_err(|e| WorkflowError::InvalidScript(e.to_string()))
+        }))
     })
     .await?
-}
-
-async fn eval_workflow_module_local<F>(source: String, setup: F) -> Result<String, WorkflowError>
-where
-    F: for<'js> FnOnce(&Ctx<'js>) -> Result<(), WorkflowError>,
-{
-    let rt = AsyncRuntime::new().map_err(|e| WorkflowError::InvalidScript(e.to_string()))?;
-    let ctx = AsyncContext::full(&rt)
-        .await
-        .map_err(|e| WorkflowError::InvalidScript(e.to_string()))?;
-    rquickjs::async_with!(ctx => |ctx| {
-        simulacra_quickjs::install_workflow_api_restrictions(&ctx)
-            .map_err(|e| WorkflowError::InvalidScript(e.to_string()))?;
-        setup(&ctx)?;
-        let mut opts = EvalOptions::default();
-        opts.global = false;
-        opts.promise = true;
-        let promise: Promise<'_> = ctx
-            .eval_with_options(source, opts)
-            .catch(&ctx)
-            .map_err(|caught| WorkflowError::InvalidScript(format!("{caught}")))?;
-        promise
-            .into_future::<()>()
-            .await
-            .map_err(|e| WorkflowError::InvalidScript(e.to_string()))?;
-        let result: String = ctx
-            .eval("globalThis.__simulacraWorkflowResult__")
-            .catch(&ctx)
-            .map_err(|caught| WorkflowError::InvalidScript(format!("{caught}")))?;
-        Ok(result)
-    })
-    .await
 }
 
 fn push_event(
