@@ -1,4 +1,6 @@
-include!("tests/support.rs");
+include!("tests/fakes.rs");
+include!("tests/memory_fakes.rs");
+include!("tests/test_builders.rs");
 include!("tests/basic_loop.rs");
 include!("tests/budget_context_errors.rs");
 include!("tests/clock_and_replay.rs");

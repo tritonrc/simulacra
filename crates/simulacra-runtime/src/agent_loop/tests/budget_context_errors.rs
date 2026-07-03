@@ -413,11 +413,3 @@ async fn memory_read_chunk_error_payload_is_journaled_as_tool_error() {
             && message.content.contains("hit_not_found")
     }));
 }
-
-struct FixedClock(u64);
-
-impl Clock for FixedClock {
-    fn now_ms(&self) -> u64 {
-        self.0
-    }
-}

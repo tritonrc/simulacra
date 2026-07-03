@@ -17,6 +17,7 @@ mod session_file;
 mod session_sqlite;
 #[cfg(feature = "spawn")]
 mod spawn_tool;
+mod sqlite_util;
 mod supervisor;
 #[cfg(test)]
 mod tests;

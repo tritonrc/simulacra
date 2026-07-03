@@ -8,6 +8,22 @@ use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+const SESSION_SCHEMA_SQL: &str = "PRAGMA journal_mode = WAL;
+     PRAGMA synchronous = NORMAL;
+     CREATE TABLE IF NOT EXISTS sessions (
+         id TEXT PRIMARY KEY,
+         agent_id TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         session_json TEXT NOT NULL
+     );";
+
+const SESSION_IN_MEMORY_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sessions (
+         id TEXT PRIMARY KEY,
+         agent_id TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         session_json TEXT NOT NULL
+     );";
+
 /// SQLite-backed session storage.
 ///
 /// Sessions are stored as JSON blobs keyed by session id.
@@ -22,19 +38,8 @@ impl SqliteSessionStorage {
     /// Create a new SQLite-backed session store at the given path.
     /// Creates the database and table if they don't exist.
     pub fn new(path: PathBuf) -> Result<Self, RuntimeError> {
-        let conn = Connection::open(&path).map_err(|e| RuntimeError::Session(e.to_string()))?;
-
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS sessions (
-                 id TEXT PRIMARY KEY,
-                 agent_id TEXT NOT NULL,
-                 created_at INTEGER NOT NULL,
-                 session_json TEXT NOT NULL
-             );",
-        )
-        .map_err(|e| RuntimeError::Session(e.to_string()))?;
+        let conn = crate::sqlite_util::open_sqlite(&path, SESSION_SCHEMA_SQL)
+            .map_err(RuntimeError::Session)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -43,18 +48,8 @@ impl SqliteSessionStorage {
 
     /// Create an in-memory SQLite session store (useful for testing).
     pub fn in_memory() -> Result<Self, RuntimeError> {
-        let conn =
-            Connection::open_in_memory().map_err(|e| RuntimeError::Session(e.to_string()))?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                 id TEXT PRIMARY KEY,
-                 agent_id TEXT NOT NULL,
-                 created_at INTEGER NOT NULL,
-                 session_json TEXT NOT NULL
-             );",
-        )
-        .map_err(|e| RuntimeError::Session(e.to_string()))?;
+        let conn = crate::sqlite_util::open_in_memory_sqlite(SESSION_IN_MEMORY_SCHEMA_SQL)
+            .map_err(RuntimeError::Session)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -67,10 +62,7 @@ impl SessionStorage for SqliteSessionStorage {
         let session_json =
             serde_json::to_string(session).map_err(|e| RuntimeError::Session(e.to_string()))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| RuntimeError::Session(format!("lock poisoned: {e}")))?;
+        let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(RuntimeError::Session)?;
 
         conn.execute(
             "INSERT OR REPLACE INTO sessions (id, agent_id, created_at, session_json)
@@ -88,10 +80,7 @@ impl SessionStorage for SqliteSessionStorage {
     }
 
     fn load(&self, id: &str) -> Result<Option<Session>, RuntimeError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| RuntimeError::Session(format!("lock poisoned: {e}")))?;
+        let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(RuntimeError::Session)?;
 
         let mut stmt = conn
             .prepare("SELECT session_json FROM sessions WHERE id = ?1")
