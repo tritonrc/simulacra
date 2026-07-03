@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use rquickjs::context::EvalOptions;
 use rquickjs::module::{Declarations, Exports, ModuleDef};
-use rquickjs::{CatchResultExt, Context, Function, Module, Object, Runtime, Type, Value};
+use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Object, Runtime, Type, Value};
 use simulacra_types::VirtualFs;
 
 /// Maximum nesting depth for recursive value formatting.
@@ -232,6 +232,78 @@ pub trait FsProxy: Send + Sync {
 
 /// Default execution timeout for JS evaluation (5 seconds).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Host API surface installed into a fresh QuickJS context.
+///
+/// The default profile preserves the regular `JsRuntime` behavior. Embedders
+/// that need a narrower surface, such as workflow orchestration, can select a
+/// profile that disables host globals and module exposure while keeping normal
+/// QuickJS language semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsHostApiProfile {
+    pub console: bool,
+    pub fs: bool,
+    pub process: bool,
+    pub fetch: bool,
+    pub web_globals: bool,
+    pub module_loader: bool,
+    pub simulacra_modules: bool,
+}
+
+impl JsHostApiProfile {
+    /// Full Simulacra JS host surface.
+    pub const fn full() -> Self {
+        Self {
+            console: true,
+            fs: true,
+            process: true,
+            fetch: true,
+            web_globals: true,
+            module_loader: true,
+            simulacra_modules: true,
+        }
+    }
+
+    /// Restricted host surface for workflow orchestration scripts.
+    pub const fn workflow() -> Self {
+        Self {
+            console: false,
+            fs: false,
+            process: false,
+            fetch: false,
+            web_globals: false,
+            module_loader: false,
+            simulacra_modules: false,
+        }
+    }
+}
+
+impl Default for JsHostApiProfile {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
+/// Remove QuickJS ambient APIs that are not deterministic enough for workflow
+/// orchestration.
+///
+/// This function does not parse or reinterpret workflow JavaScript. It mutates
+/// the host context before user code runs so the normal QuickJS evaluator sees
+/// a restricted global surface.
+pub fn install_workflow_api_restrictions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    ctx.eval::<(), _>(
+        r#"
+        globalThis.console = undefined;
+        globalThis.fs = undefined;
+        globalThis.process = undefined;
+        globalThis.fetch = undefined;
+        globalThis.require = undefined;
+        globalThis.performance = undefined;
+        globalThis.Date = undefined;
+        Math.random = undefined;
+        "#,
+    )
+}
 
 /// Output captured from a JS evaluation.
 #[derive(Debug, Clone, Default)]
@@ -748,6 +820,8 @@ pub struct JsRuntime {
     fetch_proxy: Option<Arc<dyn simulacra_fetch::FetchProxy>>,
     /// Timestamp when the runtime was created, for `performance.now()`.
     runtime_start: Instant,
+    /// Host API surface to install into fresh eval contexts.
+    host_api: JsHostApiProfile,
 }
 
 impl JsRuntime {
@@ -761,7 +835,7 @@ impl JsRuntime {
 
     /// Create a new runtime with a custom execution timeout.
     pub fn with_timeout(vfs: Arc<dyn VirtualFs>, timeout: Duration) -> Result<Self, JsError> {
-        Self::build(vfs, timeout, None, None, None)
+        Self::build(vfs, timeout, None, None, None, JsHostApiProfile::full())
     }
 
     /// Create a new runtime with a remote module fetcher.
@@ -769,7 +843,14 @@ impl JsRuntime {
         vfs: Arc<dyn VirtualFs>,
         fetcher: Box<dyn ModuleFetcher>,
     ) -> Result<Self, JsError> {
-        Self::build(vfs, DEFAULT_TIMEOUT, Some(fetcher), None, None)
+        Self::build(
+            vfs,
+            DEFAULT_TIMEOUT,
+            Some(fetcher),
+            None,
+            None,
+            JsHostApiProfile::full(),
+        )
     }
 
     /// Create a new runtime with a custom timeout and a remote module fetcher.
@@ -778,7 +859,14 @@ impl JsRuntime {
         timeout: Duration,
         fetcher: Box<dyn ModuleFetcher>,
     ) -> Result<Self, JsError> {
-        Self::build(vfs, timeout, Some(fetcher), None, None)
+        Self::build(
+            vfs,
+            timeout,
+            Some(fetcher),
+            None,
+            None,
+            JsHostApiProfile::full(),
+        )
     }
 
     /// Create a new runtime with a custom timeout, optional fetcher, and optional fs proxy.
@@ -788,7 +876,14 @@ impl JsRuntime {
         fetcher: Option<Box<dyn ModuleFetcher>>,
         fs_proxy: Option<Arc<dyn FsProxy>>,
     ) -> Result<Self, JsError> {
-        Self::build(vfs, timeout, fetcher, fs_proxy, None)
+        Self::build(
+            vfs,
+            timeout,
+            fetcher,
+            fs_proxy,
+            None,
+            JsHostApiProfile::full(),
+        )
     }
 
     /// Create a new runtime with all optional components.
@@ -799,7 +894,26 @@ impl JsRuntime {
         fs_proxy: Option<Arc<dyn FsProxy>>,
         fetch_proxy: Option<Arc<dyn simulacra_fetch::FetchProxy>>,
     ) -> Result<Self, JsError> {
-        Self::build(vfs, timeout, fetcher, fs_proxy, fetch_proxy)
+        Self::build(
+            vfs,
+            timeout,
+            fetcher,
+            fs_proxy,
+            fetch_proxy,
+            JsHostApiProfile::full(),
+        )
+    }
+
+    /// Create a new runtime with an explicit host API profile.
+    pub fn with_host_api_profile(
+        vfs: Arc<dyn VirtualFs>,
+        timeout: Duration,
+        fetcher: Option<Box<dyn ModuleFetcher>>,
+        fs_proxy: Option<Arc<dyn FsProxy>>,
+        fetch_proxy: Option<Arc<dyn simulacra_fetch::FetchProxy>>,
+        host_api: JsHostApiProfile,
+    ) -> Result<Self, JsError> {
+        Self::build(vfs, timeout, fetcher, fs_proxy, fetch_proxy, host_api)
     }
 
     /// Internal builder that records host configuration. A fresh QuickJS
@@ -811,6 +925,7 @@ impl JsRuntime {
         fetcher: Option<Box<dyn ModuleFetcher>>,
         fs_proxy: Option<Arc<dyn FsProxy>>,
         fetch_proxy: Option<Arc<dyn simulacra_fetch::FetchProxy>>,
+        host_api: JsHostApiProfile,
     ) -> Result<Self, JsError> {
         Ok(Self {
             timeout,
@@ -820,6 +935,7 @@ impl JsRuntime {
             fs_proxy,
             fetch_proxy,
             runtime_start: Instant::now(),
+            host_api,
         })
     }
 
@@ -840,17 +956,19 @@ impl JsRuntime {
         let ctx = Context::full(&rt).map_err(|e| JsError::Runtime(e.to_string()))?;
 
         let fetched_urls: FetchedUrls = Rc::new(RefCell::new(HashSet::new()));
-        rt.set_loader(
-            SimulacraResolver {
-                fetched_urls: Rc::clone(&fetched_urls),
-            },
-            SimulacraLoader {
-                fetcher: self.module_fetcher.clone(),
-                fs_proxy: self.fs_proxy.clone(),
-                source_cache: Arc::clone(&self.module_source_cache),
-                fetched_urls,
-            },
-        );
+        if self.host_api.module_loader || self.host_api.simulacra_modules {
+            rt.set_loader(
+                SimulacraResolver {
+                    fetched_urls: Rc::clone(&fetched_urls),
+                },
+                SimulacraLoader {
+                    fetcher: self.module_fetcher.clone(),
+                    fs_proxy: self.fs_proxy.clone(),
+                    source_cache: Arc::clone(&self.module_source_cache),
+                    fetched_urls,
+                },
+            );
+        }
 
         Ok((rt, ctx))
     }
@@ -918,181 +1036,189 @@ impl JsRuntime {
         let stdout_buf: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         let exit_code_cell: Rc<RefCell<Option<i32>>> = Rc::new(RefCell::new(None));
 
-        // --- console object ---
-        let console = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
-
-        let buf = Rc::clone(&stdout_buf);
-        let log_fn = Function::new(
-            ctx.clone(),
-            move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
-                let parts: Vec<String> = args
-                    .0
-                    .iter()
-                    .map(|v| format_js_value(v, 0, &mut HashSet::new()))
-                    .collect();
-                let line = parts.join(" ");
-                buf.borrow_mut().push_str(&line);
-                buf.borrow_mut().push('\n');
-            },
-        )
-        .map_err(|e| JsError::Runtime(e.to_string()))?;
-
-        console
-            .set("log", log_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-
         let globals = ctx.globals();
-        globals
-            .set("console", console)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        // --- fs object ---
-        let fs = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
+        if self.host_api.console {
+            // --- console object ---
+            let console = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        let read_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(
+            let buf = Rc::clone(&stdout_buf);
+            let log_fn = Function::new(
                 ctx.clone(),
-                move |path: String| -> rquickjs::Result<String> {
-                    let data = proxy.read_file(&path).map_err(|e| {
-                        rquickjs::Error::new_from_js_message("string", "string", &e)
-                    })?;
-                    String::from_utf8(data).map_err(|e| {
-                        rquickjs::Error::new_from_js_message("string", "string", &e.to_string())
-                    })
+                move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
+                    let parts: Vec<String> = args
+                        .0
+                        .iter()
+                        .map(|v| format_js_value(v, 0, &mut HashSet::new()))
+                        .collect();
+                    let line = parts.join(" ");
+                    buf.borrow_mut().push_str(&line);
+                    buf.borrow_mut().push('\n');
                 },
             )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_path: String| -> rquickjs::Result<String> { Err(fs_proxy_required_error()) },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-
-        fs.set("readFileSync", read_fn)
             .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        let write_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(
-                ctx.clone(),
-                move |path: String, data: String| -> rquickjs::Result<()> {
+            console
+                .set("log", log_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            globals
+                .set("console", console)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+        }
+
+        if self.host_api.fs {
+            // --- fs object ---
+            let fs = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            let read_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(
+                    ctx.clone(),
+                    move |path: String| -> rquickjs::Result<String> {
+                        let data = proxy.read_file(&path).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e)
+                        })?;
+                        String::from_utf8(data).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e.to_string())
+                        })
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_path: String| -> rquickjs::Result<String> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+
+            fs.set("readFileSync", read_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            let write_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(
+                    ctx.clone(),
+                    move |path: String, data: String| -> rquickjs::Result<()> {
+                        proxy.write_file(&path, data.as_bytes()).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e)
+                        })
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_path: String, _data: String| -> rquickjs::Result<()> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+
+            fs.set("writeFileSync", write_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            // existsSync — check if a path exists (via proxy when available)
+            let exists_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<bool> {
                     proxy
-                        .write_file(&path, data.as_bytes())
+                        .exists(&path)
                         .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_path: String, _data: String| -> rquickjs::Result<()> {
-                    Err(fs_proxy_required_error())
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
+                })
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_path: String| -> rquickjs::Result<bool> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
 
-        fs.set("writeFileSync", write_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+            fs.set("existsSync", exists_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        // existsSync — check if a path exists (via proxy when available)
-        let exists_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<bool> {
-                proxy
-                    .exists(&path)
-                    .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-            })
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_path: String| -> rquickjs::Result<bool> { Err(fs_proxy_required_error()) },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-
-        fs.set("existsSync", exists_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-
-        // mkdirSync — create a directory (via proxy when available)
-        let mkdir_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<()> {
-                proxy
-                    .mkdir(&path)
-                    .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-            })
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(ctx.clone(), move |_path: String| -> rquickjs::Result<()> {
-                Err(fs_proxy_required_error())
-            })
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-
-        fs.set("mkdirSync", mkdir_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-
-        // readdirSync(path) -> string[]
-        let readdir_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(
-                ctx.clone(),
-                move |path: String| -> rquickjs::Result<Vec<String>> {
+            // mkdirSync — create a directory (via proxy when available)
+            let mkdir_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<()> {
                     proxy
-                        .list_dir(&path)
+                        .mkdir(&path)
                         .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_path: String| -> rquickjs::Result<Vec<String>> {
+                })
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(ctx.clone(), move |_path: String| -> rquickjs::Result<()> {
                     Err(fs_proxy_required_error())
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-        fs.set("readdirSync", readdir_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+                })
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
 
-        // statSync(path) -> { isFile, isDirectory, size }
-        // Rust helper returns a Vec<String>, JS wrapper converts to an object.
-        let stat_helper_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(
-                ctx.clone(),
-                move |path: String| -> rquickjs::Result<Vec<String>> {
-                    let (is_file, is_dir, size) = proxy.stat(&path).map_err(|e| {
-                        rquickjs::Error::new_from_js_message("string", "string", &e)
-                    })?;
-                    Ok(vec![
-                        is_file.to_string(),
-                        is_dir.to_string(),
-                        size.to_string(),
-                    ])
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_path: String| -> rquickjs::Result<Vec<String>> {
-                    Err(fs_proxy_required_error())
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-        ctx.globals()
-            .set("__simulacra_fs_stat", stat_helper_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-        ctx.eval::<(), _>(
-            r#"globalThis.__simulacra_fs_statSync = function(path) {
+            fs.set("mkdirSync", mkdir_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            // readdirSync(path) -> string[]
+            let readdir_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(
+                    ctx.clone(),
+                    move |path: String| -> rquickjs::Result<Vec<String>> {
+                        proxy.list_dir(&path).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e)
+                        })
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_path: String| -> rquickjs::Result<Vec<String>> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+            fs.set("readdirSync", readdir_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            // statSync(path) -> { isFile, isDirectory, size }
+            // Rust helper returns a Vec<String>, JS wrapper converts to an object.
+            let stat_helper_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(
+                    ctx.clone(),
+                    move |path: String| -> rquickjs::Result<Vec<String>> {
+                        let (is_file, is_dir, size) = proxy.stat(&path).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e)
+                        })?;
+                        Ok(vec![
+                            is_file.to_string(),
+                            is_dir.to_string(),
+                            size.to_string(),
+                        ])
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_path: String| -> rquickjs::Result<Vec<String>> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+            ctx.globals()
+                .set("__simulacra_fs_stat", stat_helper_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+            ctx.eval::<(), _>(
+                r#"globalThis.__simulacra_fs_statSync = function(path) {
                 const parts = __simulacra_fs_stat(path);
                 return {
                     isFile: parts[0] === 'true',
@@ -1100,133 +1226,140 @@ impl JsRuntime {
                     size: Number(parts[2])
                 };
             };"#,
-        )
-        .map_err(|e| JsError::Runtime(format!("statSync wrapper: {e}")))?;
-        let stat_fn: Function<'_> = ctx
-            .globals()
-            .get("__simulacra_fs_statSync")
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-        fs.set("statSync", stat_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+            )
+            .map_err(|e| JsError::Runtime(format!("statSync wrapper: {e}")))?;
+            let stat_fn: Function<'_> = ctx
+                .globals()
+                .get("__simulacra_fs_statSync")
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+            fs.set("statSync", stat_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        // unlinkSync(path) -> void
-        let unlink_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<()> {
-                proxy
-                    .remove(&path)
-                    .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-            })
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(ctx.clone(), move |_path: String| -> rquickjs::Result<()> {
-                Err(fs_proxy_required_error())
-            })
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-        fs.set("unlinkSync", unlink_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-
-        // renameSync(oldPath, newPath) -> void
-        let rename_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(
-                ctx.clone(),
-                move |old_path: String, new_path: String| -> rquickjs::Result<()> {
+            // unlinkSync(path) -> void
+            let unlink_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(ctx.clone(), move |path: String| -> rquickjs::Result<()> {
                     proxy
-                        .rename(&old_path, &new_path)
+                        .remove(&path)
                         .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_old_path: String, _new_path: String| -> rquickjs::Result<()> {
+                })
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(ctx.clone(), move |_path: String| -> rquickjs::Result<()> {
                     Err(fs_proxy_required_error())
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-        fs.set("renameSync", rename_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+                })
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+            fs.set("unlinkSync", unlink_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        // appendFileSync(path, data) -> void
-        let append_fn = if let Some(ref proxy) = self.fs_proxy {
-            let proxy = Arc::clone(proxy);
-            Function::new(
-                ctx.clone(),
-                move |path: String, data: String| -> rquickjs::Result<()> {
-                    proxy
-                        .append_file(&path, data.as_bytes())
-                        .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        } else {
-            Function::new(
-                ctx.clone(),
-                move |_path: String, _data: String| -> rquickjs::Result<()> {
-                    Err(fs_proxy_required_error())
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?
-        };
-        fs.set("appendFileSync", append_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+            // renameSync(oldPath, newPath) -> void
+            let rename_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(
+                    ctx.clone(),
+                    move |old_path: String, new_path: String| -> rquickjs::Result<()> {
+                        proxy.rename(&old_path, &new_path).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e)
+                        })
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_old_path: String, _new_path: String| -> rquickjs::Result<()> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+            fs.set("renameSync", rename_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        globals
-            .set("fs", fs)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+            // appendFileSync(path, data) -> void
+            let append_fn = if let Some(ref proxy) = self.fs_proxy {
+                let proxy = Arc::clone(proxy);
+                Function::new(
+                    ctx.clone(),
+                    move |path: String, data: String| -> rquickjs::Result<()> {
+                        proxy.append_file(&path, data.as_bytes()).map_err(|e| {
+                            rquickjs::Error::new_from_js_message("string", "string", &e)
+                        })
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            } else {
+                Function::new(
+                    ctx.clone(),
+                    move |_path: String, _data: String| -> rquickjs::Result<()> {
+                        Err(fs_proxy_required_error())
+                    },
+                )
+                .map_err(|e| JsError::Runtime(e.to_string()))?
+            };
+            fs.set("appendFileSync", append_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        // --- process object ---
-        let process = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
-
-        let env_obj = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
-        for (key, value) in &self.env {
-            env_obj
-                .set(key.as_str(), value.as_str())
+            globals
+                .set("fs", fs)
                 .map_err(|e| JsError::Runtime(e.to_string()))?;
         }
-        process
-            .set("env", env_obj)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        let cwd_fn = Function::new(ctx.clone(), || -> String { "/workspace".to_string() })
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
-        process
-            .set("cwd", cwd_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+        if self.host_api.process {
+            // --- process object ---
+            let process = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        let exit_code_writer = Rc::clone(&exit_code_cell);
-        let exit_fn = Function::new(
-            ctx.clone(),
-            move |code: rquickjs::function::Opt<i32>| -> rquickjs::Result<()> {
-                *exit_code_writer.borrow_mut() = Some(code.0.unwrap_or(0));
-                Err(rquickjs::Error::new_from_js_message(
-                    "string",
-                    "string",
-                    "__SIMULACRA_PROCESS_EXIT__",
-                ))
-            },
-        )
-        .map_err(|e| JsError::Runtime(e.to_string()))?;
-        process
-            .set("exit", exit_fn)
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+            let env_obj = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
+            for (key, value) in &self.env {
+                env_obj
+                    .set(key.as_str(), value.as_str())
+                    .map_err(|e| JsError::Runtime(e.to_string()))?;
+            }
+            process
+                .set("env", env_obj)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
-        globals
-            .set("process", process)
+            let cwd_fn = Function::new(ctx.clone(), || -> String { "/workspace".to_string() })
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+            process
+                .set("cwd", cwd_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            let exit_code_writer = Rc::clone(&exit_code_cell);
+            let exit_fn = Function::new(
+                ctx.clone(),
+                move |code: rquickjs::function::Opt<i32>| -> rquickjs::Result<()> {
+                    *exit_code_writer.borrow_mut() = Some(code.0.unwrap_or(0));
+                    Err(rquickjs::Error::new_from_js_message(
+                        "string",
+                        "string",
+                        "__SIMULACRA_PROCESS_EXIT__",
+                    ))
+                },
+            )
             .map_err(|e| JsError::Runtime(e.to_string()))?;
+            process
+                .set("exit", exit_fn)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+
+            globals
+                .set("process", process)
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
+        }
 
         // --- fetch global (WHATWG Fetch API via simulacra-fetch) ---
-        if let Some(ref fetch_proxy) = self.fetch_proxy {
+        if self.host_api.fetch
+            && let Some(ref fetch_proxy) = self.fetch_proxy
+        {
             simulacra_fetch::register_globals(ctx, Arc::clone(fetch_proxy))
                 .map_err(|e| JsError::Runtime(e.to_string()))?;
         }
 
         // --- Tier 1 web-standard globals ---
-        globals::register_web_globals(ctx, &stdout_buf, self.runtime_start)?;
+        if self.host_api.web_globals {
+            globals::register_web_globals(ctx, &stdout_buf, self.runtime_start)?;
+        }
 
         Ok((stdout_buf, exit_code_cell))
     }
@@ -1295,9 +1428,11 @@ impl JsRuntime {
         ctx.with(|ctx| {
             let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
 
-            // Pre-register native simulacra: modules so imports resolve without
-            // hitting the loader. Uses declare_def + evaluate_def pattern.
-            Self::register_native_modules(&ctx)?;
+            if self.host_api.simulacra_modules {
+                // Pre-register native simulacra: modules so imports resolve without
+                // hitting the loader. Uses declare_def + evaluate_def pattern.
+                Self::register_native_modules(&ctx)?;
+            }
 
             if is_module {
                 self.eval_as_module(&ctx, &code, &stdout_buf, &exit_code_cell)

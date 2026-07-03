@@ -27,3 +27,5 @@
 | [S023](S023-generic-subagents.md) | Generic sub-agent spawning with runtime-defined system prompts and tiers | Active | `simulacra-runtime` |
 | [S049](S049-agent-turn-runtime.md) | Agent Turn Runtime Foundation | Active | `simulacra-runtime` |
 | [S050](S050-agent-streaming-runtime.md) | Agent Streaming Runtime | Active | `simulacra-types`, `simulacra-provider`, `simulacra-runtime` |
+| [S051](S051-agent-hitl-resume-runtime.md) | Agent HITL Resume Runtime | Active | `simulacra-runtime`, `simulacra-server` |
+| [S052](S052-workflow-runtime.md) | Workflow Runtime | Active | `simulacra-types`, `simulacra-runtime`, `simulacra-workflow`, `simulacra-server` |

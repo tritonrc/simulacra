@@ -4556,6 +4556,7 @@ dependencies = [
  "simulacra-tool",
  "simulacra-types",
  "simulacra-vfs",
+ "simulacra-workflow",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4649,6 +4650,23 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "simulacra-workflow"
+version = "0.1.0"
+dependencies = [
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "simulacra-quickjs",
+ "simulacra-types",
+ "simulacra-vfs",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]

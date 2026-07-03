@@ -33,6 +33,7 @@ use simulacra_vfs::{
     HookLister, IntegrationLister, MailboxFs, MemoryFs, MemoryStoreFs, ProcFs, ProcState,
     ReadOnlyPathGuard, ServiceFs, ToolLister,
 };
+use simulacra_workflow::{WorkflowRuntime, WorkflowTool};
 use thiserror::Error;
 use tracing::info;
 
@@ -288,6 +289,86 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "agent_type": agent_type,
             "exit_reason": exit_reason,
             "duration_ms": duration_ms,
+        }),
+        ActivityEvent::WorkflowStarted {
+            run_id,
+            script_path,
+            name,
+        } => json!({
+            "event": "workflow.started",
+            "task_id": task_id,
+            "run_id": run_id,
+            "script_path": script_path,
+            "name": name,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowProgress { run_id, message } => json!({
+            "event": "workflow.progress",
+            "task_id": task_id,
+            "run_id": run_id,
+            "message": message,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowPhaseStarted { run_id, name } => json!({
+            "event": "workflow.phase_start",
+            "task_id": task_id,
+            "run_id": run_id,
+            "phase": name,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowPhaseCompleted { run_id, name } => json!({
+            "event": "workflow.phase_finish",
+            "task_id": task_id,
+            "run_id": run_id,
+            "phase": name,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowAgentStarted {
+            run_id,
+            key,
+            agent,
+            task,
+        } => json!({
+            "event": "workflow.agent_start",
+            "task_id": task_id,
+            "run_id": run_id,
+            "agent_label": key,
+            "agent_type": agent,
+            "child_task": task,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowAgentCompleted {
+            run_id,
+            key,
+            cached,
+            is_error,
+        } => json!({
+            "event": "workflow.agent_finish",
+            "task_id": task_id,
+            "run_id": run_id,
+            "agent_label": key,
+            "cached": cached,
+            "is_error": is_error,
+            "status": if *is_error { "failed" } else { "running" },
+        }),
+        ActivityEvent::WorkflowCompleted { run_id } => json!({
+            "event": "workflow.completed",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": "completed",
+        }),
+        ActivityEvent::WorkflowFailed { run_id, error } => json!({
+            "event": "workflow.failed",
+            "task_id": task_id,
+            "run_id": run_id,
+            "error": error,
+            "status": "failed",
+        }),
+        ActivityEvent::WorkflowCancelled { run_id } => json!({
+            "event": "workflow.cancelled",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": "cancelled",
         }),
         ActivityEvent::TurnComplete => json!({
             "event": "agent.turn_complete",
@@ -572,6 +653,9 @@ pub struct SimulacraEngine {
     /// outlive a transient store misconfig, and the agent shouldn't be
     /// blocked from running on data it can fetch via REST.
     agent_file_store: Option<Arc<dyn simulacra_catalog::AgentFileStore>>,
+    /// Optional workflow runtime. When present, agents with the `workflow`
+    /// capability receive the model-visible `Workflow` tool.
+    workflow_runtime: Option<Arc<WorkflowRuntime>>,
 }
 
 /// S043 — Test-only provider factory closure. The factory receives the
@@ -681,6 +765,7 @@ impl SimulacraEngine {
             hook_pipeline: Arc::new(simulacra_hooks::HookPipeline::new()),
             provider_factory: None,
             agent_file_store: None,
+            workflow_runtime: None,
         })
     }
 
@@ -720,6 +805,7 @@ impl SimulacraEngine {
             hook_pipeline: Arc::new(simulacra_hooks::HookPipeline::new()),
             provider_factory: None,
             agent_file_store: None,
+            workflow_runtime: None,
         })
     }
 
@@ -767,6 +853,12 @@ impl SimulacraEngine {
         store: Arc<dyn simulacra_catalog::AgentFileStore>,
     ) -> Self {
         self.agent_file_store = Some(store);
+        self
+    }
+
+    /// Wire a workflow runtime for agents granted the `workflow` capability.
+    pub fn with_workflow_runtime(mut self, runtime: Arc<WorkflowRuntime>) -> Self {
+        self.workflow_runtime = Some(runtime);
         self
     }
 
@@ -871,6 +963,11 @@ impl SimulacraEngine {
     /// Return the embedder if configured.
     pub fn embedder(&self) -> Option<&Arc<dyn Embedder>> {
         self.embedder.as_ref()
+    }
+
+    /// Return the workflow runtime if configured.
+    pub fn workflow_runtime(&self) -> Option<&Arc<WorkflowRuntime>> {
+        self.workflow_runtime.as_ref()
     }
 
     /// Returns a reference to the worker pool.
@@ -1285,6 +1382,15 @@ impl SimulacraEngine {
         // `None` in production; `Some(...)` only when a test installed an
         // override via `with_provider_factory`.
         let provider_factory_for_worker = self.provider_factory.clone();
+        let workflow_runtime_for_worker = if resolved
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability.as_str(), "workflow" | "workflow:run"))
+        {
+            self.workflow_runtime.as_ref().map(Arc::clone)
+        } else {
+            None
+        };
 
         self.pool.submit(Box::new(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -1464,6 +1570,12 @@ impl SimulacraEngine {
                             Arc::clone(&sink) as Arc<dyn ActivitySink>,
                         )))
                         .map_err(|e| format!("failed to register request_input tool: {e}"))?;
+                }
+
+                if let Some(workflow_runtime) = workflow_runtime_for_worker.as_ref() {
+                    registry
+                        .register(Box::new(WorkflowTool::new(Arc::clone(workflow_runtime))))
+                        .map_err(|e| format!("failed to register Workflow tool: {e}"))?;
                 }
 
                 // 7a. Register py_exec when the `python` Cargo feature is

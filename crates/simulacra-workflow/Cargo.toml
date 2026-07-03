@@ -1,0 +1,20 @@
+[package]
+name = "simulacra-workflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
+rquickjs.workspace = true
+simulacra-types.workspace = true
+simulacra-quickjs.workspace = true
+
+[dev-dependencies]
+simulacra-vfs.workspace = true

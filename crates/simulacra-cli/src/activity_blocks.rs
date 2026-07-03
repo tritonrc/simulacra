@@ -273,6 +273,62 @@ impl ActivityBlockRenderer {
                 }
             }
 
+            ActivityEvent::WorkflowStarted {
+                run_id,
+                script_path,
+                name,
+            } => vec![format!(
+                "◐ Workflow {name} started ({run_id}) · {script_path}"
+            )],
+
+            ActivityEvent::WorkflowProgress { run_id, message } => {
+                vec![format!("◐ Workflow {run_id}: {message}")]
+            }
+
+            ActivityEvent::WorkflowPhaseStarted { run_id, name } => {
+                vec![format!("◐ Workflow {run_id} phase {name} started")]
+            }
+
+            ActivityEvent::WorkflowPhaseCompleted { run_id, name } => {
+                vec![format!("● Workflow {run_id} phase {name} completed")]
+            }
+
+            ActivityEvent::WorkflowAgentStarted {
+                run_id,
+                key,
+                agent,
+                task,
+            } => {
+                let agent = agent.as_deref().unwrap_or("agent");
+                let task = task.as_deref().unwrap_or("");
+                vec![format!("◐ Workflow {run_id} {agent}:{key} {task}")]
+            }
+
+            ActivityEvent::WorkflowAgentCompleted {
+                run_id,
+                key,
+                cached,
+                is_error,
+            } => {
+                let indicator = if *is_error { "✗" } else { "●" };
+                let cached = if *cached { " cached" } else { "" };
+                vec![format!(
+                    "{indicator} Workflow {run_id} {key} finished{cached}"
+                )]
+            }
+
+            ActivityEvent::WorkflowCompleted { run_id } => {
+                vec![format!("● Workflow {run_id} completed")]
+            }
+
+            ActivityEvent::WorkflowFailed { run_id, error } => {
+                vec![format!("✗ Workflow {run_id} failed: {error}")]
+            }
+
+            ActivityEvent::WorkflowCancelled { run_id } => {
+                vec![format!("✗ Workflow {run_id} cancelled")]
+            }
+
             // Token and TurnComplete don't produce activity blocks
             ActivityEvent::Token { .. } | ActivityEvent::TurnComplete => vec![],
         }

@@ -98,6 +98,47 @@ pub enum ActivityEvent {
         token_count: u64,
     },
 
+    /// A workflow run has started.
+    WorkflowStarted {
+        run_id: String,
+        script_path: String,
+        name: String,
+    },
+
+    /// A workflow emitted progress.
+    WorkflowProgress { run_id: String, message: String },
+
+    /// A workflow phase has started.
+    WorkflowPhaseStarted { run_id: String, name: String },
+
+    /// A workflow phase has completed.
+    WorkflowPhaseCompleted { run_id: String, name: String },
+
+    /// A workflow worker call has started.
+    WorkflowAgentStarted {
+        run_id: String,
+        key: String,
+        agent: Option<String>,
+        task: Option<String>,
+    },
+
+    /// A workflow worker call has completed.
+    WorkflowAgentCompleted {
+        run_id: String,
+        key: String,
+        cached: bool,
+        is_error: bool,
+    },
+
+    /// A workflow run completed successfully.
+    WorkflowCompleted { run_id: String },
+
+    /// A workflow run failed.
+    WorkflowFailed { run_id: String, error: String },
+
+    /// A workflow run was cancelled.
+    WorkflowCancelled { run_id: String },
+
     /// The agent turn has completed.
     TurnComplete,
 }
