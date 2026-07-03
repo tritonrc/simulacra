@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -78,6 +78,7 @@ use simulacra_catalog::repo::AgentFileRepository;
 use simulacra_catalog::{AgentFileStore, ids::AgentFileId, ids::AgentId as CatalogAgentId};
 use simulacra_memory::{Embedder, HitIdCache, MemoryStore, VectorIndex};
 use simulacra_types::{ArtifactStore, MemoryPath, TenantId};
+use simulacra_workflow::{WorkflowRunOptions, WorkflowRuntime};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Config
@@ -135,6 +136,10 @@ pub struct AppState {
     /// The actual Scheduler runs separately as a background task; this
     /// list is the source of truth for what schedules exist.
     pub schedules: Vec<crate::scheduler::ScheduleConfig>,
+    /// Optional workflow runtime. When unset, workflow endpoints return 503.
+    pub workflow_runtime: Option<Arc<WorkflowRuntime>>,
+    /// Workflow run ownership by run id, populated by workflow start/resume routes.
+    pub workflow_owners: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -163,6 +168,7 @@ impl AppState {
         let memory_store = engine.memory_store().cloned();
         let vector_index = engine.vector_index().cloned();
         let embedder = engine.embedder().cloned();
+        let workflow_runtime = engine.workflow_runtime().cloned();
         Self {
             task_manager,
             resolver,
@@ -178,6 +184,8 @@ impl AppState {
             agent_file_repo: None,
             agent_file_store: None,
             schedules: vec![],
+            workflow_runtime,
+            workflow_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -199,6 +207,7 @@ impl AppState {
     ) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         let artifact_store = Arc::clone(engine.artifact_store());
+        let workflow_runtime = engine.workflow_runtime().cloned();
         Self {
             task_manager,
             resolver,
@@ -214,6 +223,8 @@ impl AppState {
             agent_file_repo: None,
             agent_file_store: None,
             schedules: vec![],
+            workflow_runtime,
+            workflow_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -274,6 +285,8 @@ impl AppState {
             agent_file_repo: None,
             agent_file_store: None,
             schedules: vec![],
+            workflow_runtime: None,
+            workflow_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -305,6 +318,12 @@ impl AppState {
     ) -> Self {
         self.agent_file_repo = Some(repo);
         self.agent_file_store = Some(store);
+        self
+    }
+
+    /// Wire an optional workflow runtime for `/api/v1/workflows/*` routes.
+    pub fn with_workflow_runtime(mut self, runtime: Arc<WorkflowRuntime>) -> Self {
+        self.workflow_runtime = Some(runtime);
         self
     }
 }
@@ -747,6 +766,230 @@ async fn cancel_task(
             .into_response(),
         Err(e) => task_manager_err_response(e),
     }
+}
+
+/// POST /api/v1/workflows/start
+async fn workflow_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(options): Json<WorkflowRunOptions>,
+) -> Response {
+    let tenant = match resolve_tenant_namespace(&state, &headers).await {
+        Ok(tenant) => tenant,
+        Err(resp) => return resp,
+    };
+    let runtime = match workflow_runtime(&state) {
+        Some(runtime) => runtime,
+        None => return workflow_unavailable_response(),
+    };
+    match runtime.start(options).await {
+        Ok(handle) => {
+            if let Ok(mut owners) = state.workflow_owners.lock() {
+                owners.insert(handle.run_id().to_string(), tenant);
+            }
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "data": {
+                        "run_id": handle.run_id(),
+                        "status": handle.status(),
+                        "script_path": handle.script_path(),
+                        "transcript_dir": handle.transcript_dir(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => workflow_err_response(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// GET /api/v1/workflows/{run_id}/status
+async fn workflow_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    let runtime = match resolve_workflow_runtime_and_owner(&state, &headers, &run_id).await {
+        Ok(runtime) => runtime,
+        Err(resp) => return resp,
+    };
+    match runtime.store().read_run(&run_id) {
+        Ok(run) => (StatusCode::OK, Json(json!({"ok": true, "data": run}))).into_response(),
+        Err(e) => workflow_err_response(StatusCode::NOT_FOUND, e.to_string()),
+    }
+}
+
+/// GET /api/v1/workflows/{run_id}/events
+async fn workflow_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    let runtime = match resolve_workflow_runtime_and_owner(&state, &headers, &run_id).await {
+        Ok(runtime) => runtime,
+        Err(resp) => return resp,
+    };
+    let events = match runtime.events(&run_id).await {
+        Ok(events) => events,
+        Err(e) => return workflow_err_response(StatusCode::NOT_FOUND, e.to_string()),
+    };
+    let stream = futures::stream::iter(events.into_iter().enumerate().map(|(idx, event)| {
+        let data = serde_json::to_string(&event.to_sse_json(idx as u64 + 1)).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    }));
+    Sse::new(SseTracked::new(stream))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// POST /api/v1/workflows/{run_id}/cancel
+async fn workflow_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    let runtime = match resolve_workflow_runtime_and_owner(&state, &headers, &run_id).await {
+        Ok(runtime) => runtime,
+        Err(resp) => return resp,
+    };
+    match runtime.cancel(&run_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "data": {"run_id": run_id, "status": "cancelling"}})),
+        )
+            .into_response(),
+        Err(e) => workflow_err_response(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// POST /api/v1/workflows/{run_id}/resume
+async fn workflow_resume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(mut options): Json<WorkflowRunOptions>,
+) -> Response {
+    let tenant = match resolve_tenant_namespace(&state, &headers).await {
+        Ok(tenant) => tenant,
+        Err(resp) => return resp,
+    };
+    let runtime = match resolve_workflow_runtime_and_owner(&state, &headers, &run_id).await {
+        Ok(runtime) => runtime,
+        Err(resp) => return resp,
+    };
+    options.resume_from_run_id = Some(run_id);
+    match runtime.start(options).await {
+        Ok(handle) => {
+            if let Ok(mut owners) = state.workflow_owners.lock() {
+                owners.insert(handle.run_id().to_string(), tenant);
+            }
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "data": {
+                        "run_id": handle.run_id(),
+                        "status": handle.status(),
+                        "script_path": handle.script_path(),
+                        "transcript_dir": handle.transcript_dir(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => workflow_err_response(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+async fn resolve_tenant_namespace(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, Response> {
+    let creds = extract_credentials(headers);
+    let identity = state.auth.authenticate(&creds).await.map_err(|e| {
+        warn!(error = %e, "auth failure on workflow endpoint");
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"ok": false, "error": {"code": "unauthorized", "message": e.to_string()}})),
+        )
+            .into_response()
+    })?;
+    let tenant = state.resolver.resolve(&identity).map_err(|e| {
+        warn!(error = %e, "tenant resolution failure on workflow endpoint");
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({"ok": false, "error": {"code": "forbidden", "message": e.to_string()}})),
+        )
+            .into_response()
+    })?;
+    Ok(tenant.namespace.clone())
+}
+
+fn workflow_runtime(state: &AppState) -> Option<Arc<WorkflowRuntime>> {
+    state.workflow_runtime.clone()
+}
+
+fn workflow_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "ok": false,
+            "error": {
+                "code": "workflow_unavailable",
+                "message": "workflow runtime is not configured"
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn resolve_workflow_runtime_and_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    run_id: &str,
+) -> Result<Arc<WorkflowRuntime>, Response> {
+    let tenant = resolve_tenant_namespace(state, headers).await?;
+    let runtime = workflow_runtime(state).ok_or_else(workflow_unavailable_response)?;
+    let owner = state
+        .workflow_owners
+        .lock()
+        .map_err(|_| {
+            workflow_err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "workflow owner lock poisoned",
+            )
+        })?
+        .get(run_id)
+        .cloned()
+        .ok_or_else(|| {
+            workflow_err_response(
+                StatusCode::NOT_FOUND,
+                format!("workflow run `{run_id}` was not found"),
+            )
+        })?;
+    if owner != tenant {
+        return Err(workflow_err_response(
+            StatusCode::FORBIDDEN,
+            "workflow run does not belong to authenticated tenant",
+        ));
+    }
+    Ok(runtime)
+}
+
+fn workflow_err_response(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({
+            "ok": false,
+            "error": {
+                "code": "workflow_error",
+                "message": message.into(),
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// POST /api/v1/tasks/{task_id}/pause
@@ -2224,6 +2467,11 @@ pub fn build_router(
         .route("/api/v1/tasks/:task_id/cancel", post(cancel_task))
         .route("/api/v1/tasks/:task_id/pause", post(pause_task))
         .route("/api/v1/tasks/:task_id/resume", post(resume_task))
+        .route("/api/v1/workflows/start", post(workflow_start))
+        .route("/api/v1/workflows/:run_id/status", get(workflow_status))
+        .route("/api/v1/workflows/:run_id/events", get(workflow_events))
+        .route("/api/v1/workflows/:run_id/cancel", post(workflow_cancel))
+        .route("/api/v1/workflows/:run_id/resume", post(workflow_resume))
         .route("/api/v1/tasks/:task_id/artifacts", get(list_artifacts))
         .route("/api/v1/tasks/:task_id/artifacts/*path", get(get_artifact))
         .route("/api/v1/ingestion", post(ingest))

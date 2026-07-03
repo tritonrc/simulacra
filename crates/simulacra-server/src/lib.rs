@@ -150,6 +150,17 @@ pub fn api_schema() -> Value {
                         "approved": "bool",
                         "reason": "string?"
                     }
+                },
+                {
+                    "name": "workflow.start",
+                    "description": "Start a workflow run",
+                    "payload": {
+                        "script": "string?",
+                        "name": "string?",
+                        "script_path": "string?",
+                        "args": "object?",
+                        "resume_from_run_id": "string?"
+                    }
                 }
             ],
             "rest_endpoints": [
@@ -167,6 +178,16 @@ pub fn api_schema() -> Value {
                     "method": "GET",
                     "path": "/api/v1/triggers",
                     "description": "List webhook + schedule triggers for the caller's tenant (optional ?agent= filter)"
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/v1/workflows/start",
+                    "description": "Start a workflow run"
+                },
+                {
+                    "method": "GET",
+                    "path": "/api/v1/workflows/{run_id}/events",
+                    "description": "Replay workflow events as SSE"
                 }
             ],
             "events": [
@@ -182,6 +203,15 @@ pub fn api_schema() -> Value {
                 {"name": "tool.result"},
                 {"name": "tool.approval_required"},
                 {"name": "input.required"},
+                {"name": "workflow.started"},
+                {"name": "workflow.progress"},
+                {"name": "workflow.phase_start"},
+                {"name": "workflow.phase_finish"},
+                {"name": "workflow.agent_start"},
+                {"name": "workflow.agent_finish"},
+                {"name": "workflow.completed"},
+                {"name": "workflow.failed"},
+                {"name": "workflow.cancelled"},
                 {"name": "artifact.created"},
                 {"name": "payment.required"},
                 {"name": "hook.fired"},

@@ -12,6 +12,7 @@ members = [
     "crates/simulacra-vfs",
     "crates/simulacra-shell",
     "crates/simulacra-quickjs",
+    "crates/simulacra-workflow",
     "crates/simulacra-sandbox",
     "crates/simulacra-mcp",
     "crates/simulacra-mcp-server-sdk",
@@ -97,6 +98,7 @@ simulacra-context = { path = "crates/simulacra-context" }
 simulacra-vfs = { path = "crates/simulacra-vfs" }
 simulacra-shell = { path = "crates/simulacra-shell" }
 simulacra-quickjs = { path = "crates/simulacra-quickjs" }
+simulacra-workflow = { path = "crates/simulacra-workflow" }
 simulacra-sandbox = { path = "crates/simulacra-sandbox" }
 simulacra-mcp = { path = "crates/simulacra-mcp" }
 simulacra-runtime = { path = "crates/simulacra-runtime" }
