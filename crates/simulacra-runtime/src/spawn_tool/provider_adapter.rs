@@ -1,5 +1,5 @@
 use super::*;
-use simulacra_provider::{AnthropicProvider, OpenAiProvider};
+use simulacra_provider::{AnthropicProvider, BedrockProvider, OpenAiProvider};
 
 pub(super) fn build_provider(
     provider_kind: &ProviderKind,
@@ -17,5 +17,15 @@ pub(super) fn build_provider(
             Ok(Box::new(OpenAiProvider::new(api_key, model)))
         }
         ProviderKind::Ollama => Ok(Box::new(OpenAiProvider::new("ollama", model))),
+        ProviderKind::Bedrock => {
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .map_err(|_| {
+                    RuntimeError::Session(
+                        "AWS_REGION or AWS_DEFAULT_REGION not set for bedrock model".into(),
+                    )
+                })?;
+            Ok(Box::new(BedrockProvider::new(region, model)))
+        }
     }
 }
