@@ -4400,11 +4400,15 @@ dependencies = [
 name = "simulacra-provider"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "hmac",
  "opentelemetry",
+ "percent-encoding",
  "reqwest",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
  "simulacra-types",
  "thiserror 2.0.18",
  "tokio",

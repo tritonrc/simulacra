@@ -17,7 +17,7 @@ use simulacra_catalog::{Catalog, CatalogError, CatalogSkillFs, NewAgent, Resolve
 use simulacra_config::SimulacraConfig;
 use simulacra_context::ObservationMaskingStrategy;
 use simulacra_memory::{Embedder, HitIdCache, MemoryStore, VectorIndex};
-use simulacra_provider::{AnthropicProvider, OpenAiProvider};
+use simulacra_provider::{AnthropicProvider, BedrockProvider, OpenAiProvider};
 use simulacra_runtime::{
     ActivitySink, AgentHitlRuntime, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor,
     AgentTaskFactory, CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool,
@@ -106,6 +106,7 @@ pub enum ProviderKind {
     Anthropic,
     OpenAI,
     Ollama,
+    Bedrock,
 }
 
 /// Infer the provider kind from the model string.
@@ -118,6 +119,8 @@ pub fn infer_provider_kind(model: &str) -> Result<ProviderKind, EngineError> {
         Ok(ProviderKind::Anthropic)
     } else if model.starts_with("ollama:") {
         Ok(ProviderKind::Ollama)
+    } else if model.starts_with("bedrock:") {
+        Ok(ProviderKind::Bedrock)
     } else {
         Ok(ProviderKind::OpenAI)
     }
@@ -141,6 +144,13 @@ pub fn build_provider(model: &str) -> Result<ProviderKind, EngineError> {
         }
         ProviderKind::Ollama => {
             // Ollama doesn't require an API key.
+        }
+        ProviderKind::Bedrock => {
+            // Bedrock reads AWS credentials from the standard AWS_* env vars;
+            // region is required for endpoint resolution.
+            std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .map_err(|_| EngineError::MissingEnvVar("AWS_REGION".into()))?;
         }
     }
     Ok(kind)
@@ -1848,6 +1858,7 @@ impl SimulacraEngine {
                             ProviderKind::OpenAI => std::env::var("OPENAI_API_KEY")
                                 .map_err(|_| "OPENAI_API_KEY not set".to_string())?,
                             ProviderKind::Ollama => "ollama".to_string(),
+                            ProviderKind::Bedrock => String::new(),
                         };
                         match provider_kind {
                             ProviderKind::Anthropic => {
@@ -1856,6 +1867,20 @@ impl SimulacraEngine {
                             }
                             ProviderKind::OpenAI | ProviderKind::Ollama => {
                                 Box::new(OpenAiProvider::new(&api_key, &model_clone))
+                                    as Box<dyn simulacra_types::Provider>
+                            }
+                            ProviderKind::Bedrock => {
+                                let region = std::env::var("AWS_REGION")
+                                    .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                                    .map_err(|_| {
+                                        "AWS_REGION or AWS_DEFAULT_REGION not set".to_string()
+                                    })?;
+                                // Strip the `bedrock:` routing prefix so the
+                                // model id passed to Bedrock is the native id.
+                                let model_id = model_clone
+                                    .strip_prefix("bedrock:")
+                                    .unwrap_or(&model_clone);
+                                Box::new(BedrockProvider::new(region, model_id))
                                     as Box<dyn simulacra_types::Provider>
                             }
                         }
@@ -2039,6 +2064,7 @@ fn runtime_provider_kind(kind: ProviderKind) -> simulacra_runtime::ProviderKind 
         ProviderKind::Anthropic => simulacra_runtime::ProviderKind::Anthropic,
         ProviderKind::OpenAI => simulacra_runtime::ProviderKind::OpenAI,
         ProviderKind::Ollama => simulacra_runtime::ProviderKind::Ollama,
+        ProviderKind::Bedrock => simulacra_runtime::ProviderKind::Bedrock,
     }
 }
 
