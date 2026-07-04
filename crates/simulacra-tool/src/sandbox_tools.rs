@@ -326,18 +326,7 @@ impl Tool for JsExecTool {
         Box::pin(async move {
             let code = require_str(&args, "code")?;
 
-            // Acquire a script executor permit for backpressure.
-            // JS runtime is !Send so we can't use spawn_blocking —
-            // we execute inline but the permit limits concurrency.
-            let _permit = if let Some(executor) = self.cell.script_executor() {
-                Some(executor.acquire_permit().await.map_err(|e| {
-                    ToolError::ExecutionFailed(format!("script executor error: {e}"))
-                })?)
-            } else {
-                None
-            };
-
-            match self.cell.execute_js(&code) {
+            match self.cell.execute_js_async(&code).await {
                 Ok(output) => {
                     let value_str = output.result.unwrap_or_else(|| output.stdout.clone());
                     Ok(ToolOutput::success(value_str).to_value())

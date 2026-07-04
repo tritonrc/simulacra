@@ -35,6 +35,7 @@ use simulacra_types::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use tracing::Instrument;
 
 // ── Capability denial attribution ────────────────────────────────
 //
@@ -173,9 +174,9 @@ pub struct AgentCell {
     /// remote source caches. Each eval creates a fresh QuickJS context.
     js_runtime: SendableJsRuntime,
     /// Optional bounded executor for script concurrency control.
-    /// When present, `execute_js` acquires a permit before running. JS runtime
-    /// execution is synchronous and `!Send`, so direct `execute_js` callers use
-    /// a non-blocking permit check while async tool wrappers can await.
+    /// When present, `execute_js` acquires a permit before running. Direct sync
+    /// callers use a non-blocking permit check; async callers should use
+    /// `execute_js_async` so the permit is awaited once at the cell boundary.
     script_executor: Option<ScriptExecutor>,
     /// S033: Integration registry for credential injection into fetch().
     pub integration_registry: Option<Arc<simulacra_integration::IntegrationRegistry>>,
@@ -1044,6 +1045,99 @@ impl AgentCell {
         self.finish_shell_command(command, shell_start, result)
     }
 
+    fn prepare_js_runtime(&self) -> Result<JsRuntime, SandboxError> {
+        let mut rt_slot = self.js_runtime.lock()?;
+        if rt_slot.is_none() {
+            // Build an FsProxy that routes through the full Golden Rule chain
+            let fs_proxy: Arc<dyn FsProxy> = Arc::new(AgentCellFsProxy {
+                vfs: Arc::clone(&self.vfs),
+                capability: self.capability.clone(),
+                budget: Arc::clone(&self.budget),
+                journal: Arc::clone(&self.journal),
+                agent_id: self.agent_id.clone(),
+            });
+
+            // Build a ModuleFetcher that routes through this AgentCell's fetch_http
+            let stubs = self
+                .module_stubs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let fetcher: Box<dyn ModuleFetcher> = Box::new(AgentCellModuleFetcher {
+                capability: self.capability.clone(),
+                budget: Arc::clone(&self.budget),
+                journal: Arc::clone(&self.journal),
+                agent_id: self.agent_id.clone(),
+                http_client: Arc::clone(&self.http_client),
+                stubs,
+            });
+
+            // Build a FetchProxy that routes through the full Golden Rule chain
+            let fetch_proxy: Arc<dyn simulacra_fetch::FetchProxy> = Arc::new(AgentCellFetchProxy {
+                capability: self.capability.clone(),
+                budget: Arc::clone(&self.budget),
+                journal: Arc::clone(&self.journal),
+                agent_id: self.agent_id.clone(),
+                http_client: Arc::clone(&self.http_client),
+                integration_registry: self.integration_registry.clone(),
+                tenant_integrations: self.tenant_integrations.clone(),
+            });
+
+            let runtime = JsRuntime::with_all_options(
+                Arc::clone(&self.vfs),
+                std::time::Duration::from_secs(5),
+                Some(fetcher),
+                Some(fs_proxy),
+                Some(fetch_proxy),
+            )
+            .map_err(|e| SandboxError::Js(e.to_string()))?;
+            *rt_slot = Some(runtime);
+        }
+
+        rt_slot
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| SandboxError::Internal("JS runtime not initialized".into()))
+    }
+
+    fn map_js_execution_error(&self, error: simulacra_quickjs::JsError) -> SandboxError {
+        // If execution failed due to budget exhaustion (e.g. a module fetch hit
+        // the turns limit), surface it as BudgetExhausted so callers get a
+        // structured error instead of a generic JS error string.
+        let budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
+        if budget.max_turns > 0 && budget.used_turns >= budget.max_turns {
+            SandboxError::BudgetExhausted(BudgetExhausted {
+                resource: "turns".into(),
+                used: budget.used_turns.to_string(),
+                limit: budget.max_turns.to_string(),
+            })
+        } else {
+            SandboxError::Js(error.to_string())
+        }
+    }
+
+    fn finish_js_execution(&self, js_start: std::time::Instant) {
+        // Journal the code execution BEFORE returning (even on failure)
+        if let Err(err) = self.journal.append(JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: self.agent_id.clone(),
+            timestamp_ms: 0,
+            entry: JournalEntryKind::CodeExecution {
+                language: "javascript".to_string(),
+            },
+        }) {
+            tracing::error!(error = %err, "journal append failed for execute_js");
+        }
+
+        // S010: Record OTel meter observations for JS execution
+        let meters = SandboxMeters::get();
+        let attrs = &[KeyValue::new("simulacra.agent.id", self.agent_id.0.clone())];
+        meters
+            .js_duration
+            .record(js_start.elapsed().as_secs_f64() * 1000.0, attrs);
+        meters.js_requests.add(1, attrs);
+    }
+
     /// Execute JavaScript code, checking javascript capability and turns budget.
     ///
     /// The JS runtime's `fs.readFileSync`/`fs.writeFileSync` and `simulacra:fs`
@@ -1085,121 +1179,49 @@ impl AgentCell {
 
         let js_start = std::time::Instant::now();
 
-        // Get or create the JS runtime wrapper. The wrapper persists mediated
-        // host configuration and remote source caches; each eval uses a fresh
-        // QuickJS runtime/context.
-        let mut rt_slot = self.js_runtime.lock()?;
-        if rt_slot.is_none() {
-            // Build an FsProxy that routes through the full Golden Rule chain
-            let fs_proxy: Arc<dyn FsProxy> = Arc::new(AgentCellFsProxy {
-                vfs: Arc::clone(&self.vfs),
-                capability: self.capability.clone(),
-                budget: Arc::clone(&self.budget),
-                journal: Arc::clone(&self.journal),
-                agent_id: self.agent_id.clone(),
-            });
-
-            // Build a ModuleFetcher that routes through this AgentCell's fetch_http
-            let stubs = self
-                .module_stubs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let fetcher: Box<dyn ModuleFetcher> = Box::new(AgentCellModuleFetcher {
-                capability: self.capability.clone(),
-                budget: Arc::clone(&self.budget),
-                journal: Arc::clone(&self.journal),
-                agent_id: self.agent_id.clone(),
-                http_client: Arc::clone(&self.http_client),
-                stubs,
-            });
-
-            // Build a FetchProxy that routes through the full Golden Rule chain
-            let fetch_proxy: Arc<dyn simulacra_fetch::FetchProxy> = Arc::new(AgentCellFetchProxy {
-                capability: self.capability.clone(),
-                budget: Arc::clone(&self.budget),
-                journal: Arc::clone(&self.journal),
-                agent_id: self.agent_id.clone(),
-                http_client: Arc::clone(&self.http_client),
-                integration_registry: self.integration_registry.clone(),
-                tenant_integrations: self.tenant_integrations.clone(),
-            });
-
-            match JsRuntime::with_all_options(
-                Arc::clone(&self.vfs),
-                std::time::Duration::from_secs(5),
-                Some(fetcher),
-                Some(fs_proxy),
-                Some(fetch_proxy),
-            ) {
-                Ok(rt) => {
-                    *rt_slot = Some(rt);
-                }
-                Err(e) => {
-                    // Journal the code execution even on init failure
-                    if let Err(err) = self.journal.append(JournalEntry {
-                        schema_version: JOURNAL_SCHEMA_VERSION,
-                        agent_id: self.agent_id.clone(),
-                        timestamp_ms: 0,
-                        entry: JournalEntryKind::CodeExecution {
-                            language: "javascript".to_string(),
-                        },
-                    }) {
-                        tracing::error!(error = %err, "journal append failed for execute_js");
-                    }
-                    // Record meters on early-return error path
-                    let meters = SandboxMeters::get();
-                    let attrs = &[KeyValue::new("simulacra.agent.id", self.agent_id.0.clone())];
-                    meters
-                        .js_duration
-                        .record(js_start.elapsed().as_secs_f64() * 1000.0, attrs);
-                    meters.js_requests.add(1, attrs);
-                    return Err(SandboxError::Js(e.to_string()));
-                }
-            }
-        }
-
-        // Execute through the wrapper.
-        let rt = rt_slot
-            .as_ref()
-            .ok_or_else(|| SandboxError::Internal("JS runtime not initialized".into()))?;
-        let output = rt.eval(code).map_err(|e| {
-            // If execution failed due to budget exhaustion (e.g. a module fetch
-            // hit the turns limit), surface it as BudgetExhausted so callers get
-            // a structured error instead of a generic JS error string.
-            let budget = self.budget.lock().unwrap_or_else(|e| e.into_inner());
-            if budget.max_turns > 0 && budget.used_turns >= budget.max_turns {
-                SandboxError::BudgetExhausted(BudgetExhausted {
-                    resource: "turns".into(),
-                    used: budget.used_turns.to_string(),
-                    limit: budget.max_turns.to_string(),
-                })
-            } else {
-                SandboxError::Js(e.to_string())
-            }
-        });
-
-        // Journal the code execution BEFORE returning (even on failure)
-        if let Err(err) = self.journal.append(JournalEntry {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            agent_id: self.agent_id.clone(),
-            timestamp_ms: 0,
-            entry: JournalEntryKind::CodeExecution {
-                language: "javascript".to_string(),
-            },
-        }) {
-            tracing::error!(error = %err, "journal append failed for execute_js");
-        }
-
-        // S010: Record OTel meter observations for JS execution
-        let meters = SandboxMeters::get();
-        let attrs = &[KeyValue::new("simulacra.agent.id", self.agent_id.0.clone())];
-        meters
-            .js_duration
-            .record(js_start.elapsed().as_secs_f64() * 1000.0, attrs);
-        meters.js_requests.add(1, attrs);
-
+        let runtime = self.prepare_js_runtime();
+        let output =
+            runtime.and_then(|rt| rt.eval(code).map_err(|e| self.map_js_execution_error(e)));
+        self.finish_js_execution(js_start);
         output
+    }
+
+    /// Async entry point for JavaScript execution.
+    ///
+    /// This awaits script-executor backpressure once at the `AgentCell`
+    /// boundary, then executes through the same mediated JS runtime wrapper.
+    pub async fn execute_js_async(&self, code: &str) -> Result<JsOutput, SandboxError> {
+        tracing::callsite::rebuild_interest_cache();
+        async move {
+            check_and_journal_capability(
+                || self.capability.check_javascript(),
+                "execute_js",
+                "javascript",
+                &self.journal,
+                &self.agent_id,
+            )?;
+            reserve_turn(&self.budget, &self.journal, &self.agent_id)?;
+
+            let _script_permit =
+                match self.script_executor.as_ref() {
+                    Some(executor) => Some(executor.acquire_permit().await.map_err(|e| {
+                        SandboxError::Internal(format!("script executor error: {e}"))
+                    })?),
+                    None => None,
+                };
+
+            let js_start = std::time::Instant::now();
+            let runtime = self.prepare_js_runtime();
+            let output =
+                runtime.and_then(|rt| rt.eval(code).map_err(|e| self.map_js_execution_error(e)));
+            self.finish_js_execution(js_start);
+            output
+        }
+        .instrument(tracing::info_span!(
+            "sandbox_js_exec",
+            simulacra.operation.name = "sandbox_js_exec",
+        ))
+        .await
     }
 
     /// Make an HTTP request, checking network capability and turns budget.

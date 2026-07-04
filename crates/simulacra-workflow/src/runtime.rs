@@ -7,8 +7,7 @@ use rquickjs::{Ctx, Function};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use simulacra_quickjs::{JsError, JsRuntime};
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 
@@ -39,6 +38,7 @@ pub struct WorkflowRuntime {
     store: WorkflowStore,
     worker: Arc<dyn WorkflowWorker>,
     runs: Arc<Mutex<HashMap<String, WorkflowRunControl>>>,
+    executor: WorkflowLocalExecutor,
 }
 
 #[derive(Clone)]
@@ -51,7 +51,7 @@ pub struct WorkflowRunHandle {
     run_id: String,
     script_path: String,
     transcript_dir: String,
-    join: JoinHandle<Result<WorkflowRun, WorkflowError>>,
+    result_rx: oneshot::Receiver<Result<WorkflowRun, WorkflowError>>,
 }
 
 impl WorkflowRunHandle {
@@ -72,8 +72,88 @@ impl WorkflowRunHandle {
     }
 
     pub async fn wait(self) -> Result<WorkflowRun, WorkflowError> {
-        self.join.await?
+        self.result_rx
+            .await
+            .map_err(|_| WorkflowError::Internal("workflow local executor stopped".into()))?
     }
+}
+
+#[derive(Clone)]
+struct WorkflowLocalExecutor {
+    sender: mpsc::UnboundedSender<WorkflowCommand>,
+}
+
+enum WorkflowCommand {
+    EvaluateMetadata {
+        source: String,
+        reply: oneshot::Sender<Result<WorkflowScriptMeta, WorkflowError>>,
+    },
+    Run {
+        context: Box<ExecutionContext>,
+        reply: oneshot::Sender<Result<WorkflowRun, WorkflowError>>,
+    },
+}
+
+impl WorkflowLocalExecutor {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        std::thread::spawn(move || run_workflow_executor(receiver));
+        Self { sender }
+    }
+
+    async fn evaluate_metadata(&self, source: String) -> Result<WorkflowScriptMeta, WorkflowError> {
+        let (reply, result) = oneshot::channel();
+        self.sender
+            .send(WorkflowCommand::EvaluateMetadata { source, reply })
+            .map_err(|_| WorkflowError::Internal("workflow local executor stopped".into()))?;
+        result
+            .await
+            .map_err(|_| WorkflowError::Internal("workflow metadata task was dropped".into()))?
+    }
+
+    fn spawn_workflow(
+        &self,
+        context: ExecutionContext,
+    ) -> Result<oneshot::Receiver<Result<WorkflowRun, WorkflowError>>, WorkflowError> {
+        let (reply, result) = oneshot::channel();
+        self.sender
+            .send(WorkflowCommand::Run {
+                context: Box::new(context),
+                reply,
+            })
+            .map_err(|_| WorkflowError::Internal("workflow local executor stopped".into()))?;
+        Ok(result)
+    }
+}
+
+fn run_workflow_executor(mut receiver: mpsc::UnboundedReceiver<WorkflowCommand>) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to create workflow local executor");
+            return;
+        }
+    };
+    let local = tokio::task::LocalSet::new();
+    runtime.block_on(local.run_until(async move {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                WorkflowCommand::EvaluateMetadata { source, reply } => {
+                    tokio::task::spawn_local(async move {
+                        let _ = reply.send(evaluate_metadata_local(&source).await);
+                    });
+                }
+                WorkflowCommand::Run { context, reply } => {
+                    tokio::task::spawn_local(async move {
+                        let _ = reply.send(execute_workflow(*context).await);
+                    });
+                }
+            }
+        }
+    }));
 }
 
 impl WorkflowRuntime {
@@ -82,6 +162,7 @@ impl WorkflowRuntime {
             store,
             worker,
             runs: Arc::new(Mutex::new(HashMap::new())),
+            executor: WorkflowLocalExecutor::new(),
         }
     }
 
@@ -94,7 +175,7 @@ impl WorkflowRuntime {
             .clone()
             .unwrap_or_else(|| Ulid::new().to_string());
         let (script_path, source) = self.resolve_script(&run_id, &options)?;
-        let meta = evaluate_metadata(&source).await?;
+        let meta = self.executor.evaluate_metadata(source.clone()).await?;
         let script = self
             .store
             .load_script(script_path.clone(), source.clone(), meta);
@@ -135,14 +216,14 @@ impl WorkflowRuntime {
             concurrency_limit: options.concurrency_limit.max(1),
             resume_from_run_id: options.resume_from_run_id,
         };
-        let join = tokio::spawn(async move { execute_workflow(context).await });
+        let result_rx = self.executor.spawn_workflow(context)?;
         tokio::task::yield_now().await;
 
         Ok(WorkflowRunHandle {
             run_id: run_id.clone(),
             script_path,
             transcript_dir: WorkflowStore::transcript_dir(&run_id),
-            join,
+            result_rx,
         })
     }
 
@@ -218,7 +299,7 @@ struct ExecutionContext {
     resume_from_run_id: Option<String>,
 }
 
-async fn evaluate_metadata(source: &str) -> Result<WorkflowScriptMeta, WorkflowError> {
+async fn evaluate_metadata_local(source: &str) -> Result<WorkflowScriptMeta, WorkflowError> {
     let result = eval_workflow_module(
         &format!(
             "{source}\nglobalThis.__simulacraWorkflowResult__ = JSON.stringify(typeof meta === 'undefined' ? null : meta);"
@@ -595,24 +676,11 @@ async fn eval_workflow_module<F>(source: &str, setup: F) -> Result<String, Workf
 where
     F: for<'js> FnOnce(&Ctx<'js>) -> Result<(), WorkflowError> + Send + 'static,
 {
-    let source = source.to_string();
-    tokio::task::spawn_blocking(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                WorkflowError::Internal(format!("failed to create workflow JS runtime: {e}"))
-            })?;
-        let local = tokio::task::LocalSet::new();
-        rt.block_on(local.run_until(async move {
-            JsRuntime::eval_workflow_module_with_setup(&source, move |ctx| {
-                setup(ctx).map_err(|e| JsError::Execution(e.to_string()))
-            })
-            .await
-            .map_err(|e| WorkflowError::InvalidScript(e.to_string()))
-        }))
+    JsRuntime::eval_workflow_module_with_setup(source, move |ctx| {
+        setup(ctx).map_err(|e| JsError::Execution(e.to_string()))
     })
-    .await?
+    .await
+    .map_err(|e| WorkflowError::InvalidScript(e.to_string()))
 }
 
 fn push_event(
