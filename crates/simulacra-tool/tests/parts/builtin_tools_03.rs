@@ -74,6 +74,17 @@ fn js_exec_with_a_syntax_error_returns_tool_result_is_error_true_with_the_error_
 }
 
 #[test]
+fn js_exec_with_a_configured_script_executor_acquires_only_one_permit() {
+    let capability = full_capability();
+    let harness = Harness::with_script_executor(capability.clone(), unlimited_budget(), ScriptExecutor::new(1));
+
+    let result = call_tool(&harness, "js_exec", json!({ "code": "1 + 1" }), &capability)
+        .expect("js_exec should succeed with a single available executor permit");
+
+    assert_eq!(tool_content(&result), "2");
+}
+
+#[test]
 fn js_exec_without_code_argument_returns_tool_error_invalid_arguments() {
     let capability = full_capability();
     let harness = Harness::new(capability.clone(), unlimited_budget());
