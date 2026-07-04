@@ -18,7 +18,7 @@ mod tests;
 
 pub use factory::AgentTaskFactory;
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
-pub use tool::SpawnAgentTool;
+pub use tool::{CancelChildAgentTool, JoinChildAgentTool, SpawnAgentTool};
 pub use types::{ChildCellConfigurator, ChildToolRegistrar, NoopContextStrategy, ProviderKind};
 
 use std::sync::atomic::AtomicU64;
@@ -28,8 +28,8 @@ use std::time::Instant;
 use rust_decimal::Decimal;
 use simulacra_config::{SimulacraConfig, TierMap, build_capability_token};
 use simulacra_types::{
-    ActivityEvent, AgentId, CapabilityToken, ContextStrategy, JournalStorage, Message,
-    NetworkPermission, PathPattern, Provider, ResourceBudget, ToolDefinition, VirtualFs,
+    AgentId, CapabilityToken, ContextStrategy, JournalStorage, Message, NetworkPermission,
+    PathPattern, Provider, ResourceBudget, ToolDefinition, VirtualFs,
 };
 use simulacra_vfs::{HookLister, ProcFs, ProcState, ToolLister};
 

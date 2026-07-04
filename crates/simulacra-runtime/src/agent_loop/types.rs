@@ -11,7 +11,7 @@ pub struct AgentLoopConfig {
 }
 
 /// Output from the agent loop.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AgentLoopOutput {
     pub exit_reason: ExitReason,
     pub messages: Vec<Message>,

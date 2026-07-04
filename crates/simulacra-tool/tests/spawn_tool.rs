@@ -11,7 +11,7 @@ impl Tool for PendingSpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "spawn_agent".into(),
-            description: "Spawn a supervised child agent to handle a delegated task and return its terminal summary.".into(),
+            description: "Spawn a supervised child agent to handle a delegated task and return a live child handle.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -106,12 +106,7 @@ impl Tool for PendingSpawnAgentTool {
                 Ok(json!({
                     "child_id": child_id,
                     "agent_type": agent_type,
-                    "exit_reason": "budget_exhausted",
-                    "message": "",
-                    "token_usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0
-                    }
+                    "status": "running"
                 }))
             }
         })
@@ -223,7 +218,7 @@ fn spawn_agent_definition_uses_the_documented_name_and_description() {
     assert_eq!(definition.name, "spawn_agent");
     assert_eq!(
         definition.description,
-        "Spawn a supervised child agent to handle a delegated task and return its terminal summary."
+        "Spawn a supervised child agent to handle a delegated task and return a live child handle."
     );
 }
 
@@ -296,8 +291,7 @@ fn spawn_agent_capabilities_schema_matches_the_spec_shape() {
 }
 
 #[test]
-fn successful_spawn_agent_result_includes_child_id_agent_type_exit_reason_message_and_token_usage()
-{
+fn successful_spawn_agent_result_includes_child_id_agent_type_and_running_status() {
     let value = call_spawn_tool(json!({
         "agent_type": "researcher",
         "task": "Investigate",
@@ -309,18 +303,13 @@ fn successful_spawn_agent_result_includes_child_id_agent_type_exit_reason_messag
         }
     }));
 
-    for field in [
-        "child_id",
-        "agent_type",
-        "exit_reason",
-        "message",
-        "token_usage",
-    ] {
+    for field in ["child_id", "agent_type", "status"] {
         assert!(
             value.get(field).is_some(),
             "successful spawn_agent results should include {field}"
         );
     }
+    assert_eq!(value.get("status").and_then(Value::as_str), Some("running"));
 }
 
 #[test]
@@ -350,54 +339,10 @@ fn failed_spawn_agent_result_has_error_shape_with_child_id_agent_type_and_error(
 // spawn_agent_tool_child_runtime_failures_return_toolerror_execution_failed,
 // which tests the real SpawnAgentTool with an mpsc channel.
 
-#[test]
-fn budget_exhausted_exit_reason_is_a_success_result_with_partial_output_not_an_error_result() {
-    let value = call_spawn_tool(json!({
-        "agent_type": "researcher",
-        "task": "Investigate",
-        "budget": {
-            "max_tokens": 10,
-            "max_turns": 2,
-            "max_cost": "0",
-            "max_sub_agents": 0
-        }
-    }));
-
-    assert_eq!(
-        value.get("exit_reason").and_then(Value::as_str),
-        Some("budget_exhausted"),
-        "partial child exits should surface exit_reason = budget_exhausted in a success payload"
-    );
-    assert!(
-        value.get("error").is_none(),
-        "budget_exhausted should not be encoded as a true error result"
-    );
-}
-
 // NOTE: auto_approved and restart_strategy tests for the real SpawnAgentTool
 // are in crates/simulacra-runtime/tests/s018_subagent_red.rs. The Tool trait has
 // no auto_approved() method, so those properties are tested at the runtime
 // layer where they are enforced.
-
-#[test]
-fn spawn_agent_returns_empty_message_when_the_child_has_no_final_assistant_message() {
-    let value = call_spawn_tool(json!({
-        "agent_type": "researcher",
-        "task": "Investigate",
-        "budget": {
-            "max_tokens": 10,
-            "max_turns": 2,
-            "max_cost": "0",
-            "max_sub_agents": 0
-        }
-    }));
-
-    assert_eq!(
-        value.get("message").and_then(Value::as_str),
-        Some(""),
-        "spawn_agent should return an empty string rather than fabricate a child summary"
-    );
-}
 
 #[test]
 fn spawn_agent_tool_invocation_emits_the_normal_tool_span_with_gen_ai_tool_name() {

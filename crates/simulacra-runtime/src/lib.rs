@@ -43,12 +43,13 @@ pub use session_file::FileSessionStorage;
 pub use session_sqlite::SqliteSessionStorage;
 #[cfg(feature = "spawn")]
 pub use spawn_tool::{
-    AgentTaskFactory, ChildCellConfigurator, ChildToolRegistrar, DEFAULT_SYSTEM_PROMPT,
-    NoopContextStrategy, ProviderKind, SpawnAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, ChildCellConfigurator, ChildToolRegistrar,
+    DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, NoopContextStrategy, ProviderKind, SpawnAgentTool,
 };
 pub use supervisor::{
-    AgentSupervisor, BoxTaskFuture, CancellationToken, MessagePriority, RestartStrategy,
-    SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory,
+    AgentSupervisor, BoxTaskFuture, CancellationToken, ChildTerminalResult, MessagePriority,
+    RestartStrategy, SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload,
+    TaskFactory,
 };
 #[cfg(feature = "spawn")]
 pub use vfs_hook::HookedVfsLayer;

@@ -72,7 +72,7 @@ Full design: `docs/superpowers/specs/2026-03-28-generic-subagents-design.md`
 
 ### What does not change (S018 regression gates)
 
-- [x] Configured-mode spawn (`agent_type` present) follows the existing S018 path with no behavioural change.
+- [x] Configured-mode spawn (`agent_type` present) follows the same S018 live-handle path as generic spawn.
 - [x] `capabilities` override JSON parses into `SpawnConfig` identically for both configured and generic modes.
 - [x] Supervisor actor loop message flow is unchanged.
 - [x] `ChildSpawned` / `ChildFinished` activity events continue to fire for generic children.

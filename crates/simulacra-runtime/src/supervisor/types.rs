@@ -59,8 +59,23 @@ pub struct SupervisorMessage {
     pub payload: SupervisorPayload,
 }
 
-/// Result sent back to the spawn_agent caller when a child completes.
+/// Terminal child result retained for direct supervisor callers and join handling.
 pub type SpawnResult = Result<AgentLoopOutput, RuntimeError>;
+
+/// Immediate acknowledgement returned once a child spawn is accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnAck {
+    pub child_id: AgentId,
+    pub agent_type: String,
+}
+
+/// Cached terminal child result returned by join_child_agent.
+#[derive(Debug, Clone)]
+pub struct ChildTerminalResult {
+    pub child_id: AgentId,
+    pub agent_type: String,
+    pub result: Result<AgentLoopOutput, String>,
+}
 
 /// Payload variants for supervisor messages.
 #[derive(Debug)]
@@ -69,9 +84,19 @@ pub enum SupervisorPayload {
     Completed,
     /// Agent failed with the given reason.
     Failed(String),
-    /// Spawn a new child agent. The oneshot sender receives the child result
-    /// so the parent can await it synchronously (S018: spawn_agent is blocking).
-    Spawn(Box<SpawnConfig>, tokio::sync::oneshot::Sender<SpawnResult>),
+    /// Spawn a new child agent. The oneshot sender receives an accepted-spawn
+    /// acknowledgement; terminal results are collected later via JoinChild.
+    Spawn(
+        Box<SpawnConfig>,
+        tokio::sync::oneshot::Sender<Result<SpawnAck, RuntimeError>>,
+    ),
+    /// Join a live or completed child agent by id.
+    JoinChild(
+        AgentId,
+        tokio::sync::oneshot::Sender<Result<ChildTerminalResult, String>>,
+    ),
+    /// Cancel a live child agent by id.
+    CancelChild(AgentId, tokio::sync::oneshot::Sender<Result<(), String>>),
     /// Cancel a running agent.
     Cancel,
 }

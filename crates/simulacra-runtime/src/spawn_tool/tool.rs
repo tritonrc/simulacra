@@ -7,9 +7,8 @@ use super::*;
 /// Tool that spawns a supervised child agent via the supervisor's mpsc channel.
 ///
 /// When the LLM calls `spawn_agent`, this tool sends a `SupervisorPayload::Spawn`
-/// message and awaits the result via a oneshot channel. The call is synchronous
-/// from the parent's perspective (S018). The child's system_prompt is resolved
-/// from the agent_type config (e.g. a "researcher" agent_type in simulacra.toml).
+/// message and returns after the supervisor accepts the child. Terminal results
+/// are collected later with `join_child_agent`.
 pub struct SpawnAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
     pub can_spawn: Vec<String>,
@@ -37,7 +36,7 @@ impl simulacra_types::Tool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "spawn_agent".to_string(),
-            description: "Spawn a supervised child agent to handle a delegated task and return its terminal summary.".to_string(),
+            description: "Spawn a supervised child agent to handle a delegated task and return a live child handle.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -94,7 +93,7 @@ impl simulacra_types::Tool for SpawnAgentTool {
     fn call(
         &self,
         arguments: serde_json::Value,
-        _capability: &CapabilityToken,
+        capability: &CapabilityToken,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
@@ -120,6 +119,7 @@ impl simulacra_types::Tool for SpawnAgentTool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let caller_spawn_types = capability.spawn_types.clone();
 
         Box::pin(async move {
             // Validate mutual exclusivity: agent_type XOR system_prompt
@@ -167,6 +167,15 @@ impl simulacra_types::Tool for SpawnAgentTool {
                 return Err(simulacra_types::ToolError::ExecutionFailed(format!(
                     "agent_type '{}' is not in can_spawn config",
                     at
+                )));
+            }
+            if let Some(ref at) = agent_type
+                && !caller_spawn_types.is_empty()
+                && !caller_spawn_types.contains(at)
+            {
+                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "agent_type '{}' is not in caller spawn_types {:?}",
+                    at, caller_spawn_types
                 )));
             }
 
@@ -305,7 +314,6 @@ impl simulacra_types::Tool for SpawnAgentTool {
             // Note: ChildSpawned is emitted by the supervisor (spawn_agent),
             // not here, to avoid duplicate emissions.
 
-            let spawn_start = std::time::Instant::now();
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
             let msg = SupervisorMessage {
@@ -318,73 +326,196 @@ impl simulacra_types::Tool for SpawnAgentTool {
                 simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
             })?;
 
-            // Wait for the child to complete
             match result_rx.await {
-                Ok(Ok(output)) => {
-                    let duration_ms = spawn_start.elapsed().as_millis() as u64;
-                    let tool_uses = output.used_turns;
-                    let token_count = output.token_usage.total();
-
-                    let exit_reason_str = exit_reason_to_snake_case(&output.exit_reason);
-
-                    // S019: Emit ActivityEvent::ChildFinished with aggregated stats
-                    self.activity_sink.emit(ActivityEvent::ChildFinished {
-                        child_id: child_id.clone(),
-                        agent_type: agent_type_label.clone(),
-                        exit_reason: exit_reason_str.clone(),
-                        duration_ms,
-                        tool_uses,
-                        token_count,
-                    });
-
-                    let message = output
-                        .messages
-                        .last()
-                        .filter(|m| m.role == simulacra_types::Role::Assistant)
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
-
-                    Ok(serde_json::json!({
-                        "child_id": child_id,
-                        "agent_type": agent_type_label,
-                        "exit_reason": exit_reason_str,
-                        "message": message,
-                        "token_usage": {
-                            "input_tokens": output.token_usage.input_tokens,
-                            "output_tokens": output.token_usage.output_tokens
-                        }
-                    }))
-                }
-                Ok(Err(err)) => {
-                    let duration_ms = spawn_start.elapsed().as_millis() as u64;
-                    // S019: Emit ChildFinished on error too
-                    self.activity_sink.emit(ActivityEvent::ChildFinished {
-                        child_id: child_id.clone(),
-                        agent_type: agent_type_label.clone(),
-                        exit_reason: format!("Error: {err}"),
-                        duration_ms,
-                        tool_uses: 0,
-                        token_count: 0,
-                    });
-                    Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                        "child {child_id} (agent_type={agent_type_label}) failed: {err}"
-                    )))
-                }
-                Err(_) => {
-                    let duration_ms = spawn_start.elapsed().as_millis() as u64;
-                    self.activity_sink.emit(ActivityEvent::ChildFinished {
-                        child_id: child_id.clone(),
-                        agent_type: agent_type_label.clone(),
-                        exit_reason: "supervisor dropped result channel".into(),
-                        duration_ms,
-                        tool_uses: 0,
-                        token_count: 0,
-                    });
-                    Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                        "child {child_id} (agent_type={agent_type_label}): supervisor dropped result channel"
-                    )))
-                }
+                Ok(Ok(ack)) => Ok(serde_json::json!({
+                    "child_id": ack.child_id.0,
+                    "agent_type": ack.agent_type,
+                    "status": "running"
+                })),
+                Ok(Err(err)) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "child {child_id} (agent_type={agent_type_label}) failed: {err}"
+                ))),
+                Err(_) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "child {child_id} (agent_type={agent_type_label}): supervisor dropped spawn acknowledgement channel"
+                ))),
             }
         })
     }
+}
+
+pub struct JoinChildAgentTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for JoinChildAgentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "join_child_agent".to_string(),
+            description: "Wait for a live child agent to finish and return its terminal summary."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "child_id": {
+                        "type": "string",
+                        "description": "Child agent id returned by spawn_agent"
+                    }
+                },
+                "required": ["child_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let child_id = arguments
+                .get("child_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    simulacra_types::ToolError::InvalidArguments(
+                        "missing required field: child_id".into(),
+                    )
+                })?
+                .to_string();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId(child_id.clone()),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::JoinChild(AgentId(child_id.clone()), result_tx),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let terminal = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped join response channel".into(),
+                )
+            })?;
+            let terminal = terminal.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            match terminal.result {
+                Ok(output) => Ok(child_success_json(
+                    terminal.child_id.0,
+                    terminal.agent_type,
+                    output,
+                )),
+                Err(error) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "child {} (agent_type={}) failed: {error}",
+                    terminal.child_id.0, terminal.agent_type
+                ))),
+            }
+        })
+    }
+}
+
+pub struct CancelChildAgentTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for CancelChildAgentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cancel_child_agent".to_string(),
+            description: "Request cancellation for a live child agent.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "child_id": {
+                        "type": "string",
+                        "description": "Child agent id returned by spawn_agent"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional cancellation reason"
+                    }
+                },
+                "required": ["child_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let child_id = arguments
+                .get("child_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    simulacra_types::ToolError::InvalidArguments(
+                        "missing required field: child_id".into(),
+                    )
+                })?
+                .to_string();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId(child_id.clone()),
+                    priority: MessagePriority::Signal,
+                    payload: SupervisorPayload::CancelChild(AgentId(child_id.clone()), result_tx),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let result = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped cancel response channel".into(),
+                )
+            })?;
+            result.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            Ok(serde_json::json!({
+                "child_id": child_id,
+                "status": "cancel_requested"
+            }))
+        })
+    }
+}
+
+fn child_success_json(
+    child_id: String,
+    agent_type: String,
+    output: AgentLoopOutput,
+) -> serde_json::Value {
+    let exit_reason_str = exit_reason_to_snake_case(&output.exit_reason);
+    let message = output
+        .messages
+        .last()
+        .filter(|m| m.role == simulacra_types::Role::Assistant)
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "child_id": child_id,
+        "agent_type": agent_type,
+        "exit_reason": exit_reason_str,
+        "message": message,
+        "token_usage": {
+            "input_tokens": output.token_usage.input_tokens,
+            "output_tokens": output.token_usage.output_tokens
+        }
+    })
 }

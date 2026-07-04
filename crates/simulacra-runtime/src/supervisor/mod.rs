@@ -5,8 +5,8 @@ mod spawn;
 mod types;
 
 pub use types::{
-    BoxTaskFuture, CancellationToken, MessagePriority, RestartStrategy, SpawnConfig, SpawnResult,
-    SupervisorMessage, SupervisorPayload, TaskFactory,
+    BoxTaskFuture, CancellationToken, ChildTerminalResult, MessagePriority, RestartStrategy,
+    SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory,
 };
 
 use std::collections::HashMap;
@@ -21,6 +21,13 @@ use crate::exit_reason::exit_reason_to_snake_case;
 use crate::{ActivitySink, AgentLoopOutput, NoopActivitySink, RuntimeError};
 use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ResourceBudget};
 use tokio::task::JoinHandle;
+
+type ChildJoinSender = tokio::sync::oneshot::Sender<Result<ChildTerminalResult, String>>;
+
+struct ChildRunState {
+    result: Option<ChildTerminalResult>,
+    waiters: Vec<ChildJoinSender>,
+}
 
 fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> std::sync::MutexGuard<'a, T> {
     match mutex.lock() {
@@ -50,7 +57,8 @@ pub struct AgentSupervisor {
     /// Shared retry counts accessible from spawned tasks.
     retry_counts_shared: Arc<Mutex<HashMap<AgentId, usize>>>,
     children: Mutex<HashMap<AgentId, JoinHandle<()>>>,
-    cancellation_tokens: Mutex<HashMap<AgentId, CancellationToken>>,
+    cancellation_tokens: Arc<Mutex<HashMap<AgentId, CancellationToken>>>,
+    child_results: Arc<Mutex<HashMap<AgentId, ChildRunState>>>,
     task_factory: Option<Arc<dyn TaskFactory>>,
     #[allow(dead_code)]
     spawn_configs: Mutex<HashMap<AgentId, SpawnConfig>>,
@@ -84,7 +92,8 @@ impl AgentSupervisor {
             retry_counts: Mutex::new(HashMap::new()),
             retry_counts_shared: Arc::new(Mutex::new(HashMap::new())),
             children: Mutex::new(HashMap::new()),
-            cancellation_tokens: Mutex::new(HashMap::new()),
+            cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
+            child_results: Arc::new(Mutex::new(HashMap::new())),
             task_factory: None,
             spawn_configs: Mutex::new(HashMap::new()),
             journal_storage: None,
@@ -104,7 +113,8 @@ impl AgentSupervisor {
             retry_counts: Mutex::new(HashMap::new()),
             retry_counts_shared: Arc::new(Mutex::new(HashMap::new())),
             children: Mutex::new(HashMap::new()),
-            cancellation_tokens: Mutex::new(HashMap::new()),
+            cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
+            child_results: Arc::new(Mutex::new(HashMap::new())),
             task_factory: Some(task_factory),
             spawn_configs: Mutex::new(HashMap::new()),
             journal_storage: None,

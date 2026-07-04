@@ -33,25 +33,11 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
         used_cost: Decimal::ZERO,
     };
 
-    let (result, _captured) = run_spawn_tool_call(
-        serde_json::json!({
-            "agent_type": "researcher",
-            "task": "check",
-            "budget": {
-                "max_tokens": 10,
-                "max_turns": 1,
-                "max_cost": "0",
-                "max_sub_agents": 0
-            }
-        }),
-        &["researcher"],
-        Ok(child_output),
-    )
-    .await;
+    let result = run_join_tool_call(Ok(child_output)).await;
 
-    // The real SpawnAgentTool returns a single JSON value. The child's internal
+    // The real JoinChildAgentTool returns a single JSON value. The child's internal
     // System/User/Assistant messages are NOT surfaced — only the terminal summary.
-    let value = result.expect("spawn should succeed");
+    let value = result.expect("join should succeed");
     assert_eq!(
         value.get("message").and_then(serde_json::Value::as_str),
         Some("child result"),
@@ -60,7 +46,7 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
     // Verify the result is a single flat JSON object, not a list of messages.
     assert!(
         value.is_object() && !value.is_array(),
-        "spawn_agent should return a single JSON object, not an array of child messages"
+        "join_child_agent should return a single JSON object, not an array of child messages"
     );
 }
 

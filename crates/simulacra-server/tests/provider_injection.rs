@@ -153,6 +153,93 @@ impl Provider for SharedProvider {
     }
 }
 
+struct GenericHandoffProvider {
+    recorded_messages: Mutex<Vec<Vec<Message>>>,
+    recorded_tools: Mutex<Vec<Vec<ToolDefinition>>>,
+}
+
+impl GenericHandoffProvider {
+    fn new() -> Self {
+        Self {
+            recorded_messages: Mutex::new(Vec::new()),
+            recorded_tools: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn recorded_messages(&self) -> Vec<Vec<Message>> {
+        self.recorded_messages
+            .lock()
+            .expect("recorded_messages lock should not be poisoned")
+            .clone()
+    }
+
+    fn next_response(messages: &[Message]) -> ProviderResponse {
+        let spawn_result = messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("call-spawn-generic"));
+
+        if spawn_result.is_some() {
+            return assistant_response("master synthesis: child handle accepted", "gpt-4o-mini");
+        }
+
+        tool_call_response(
+            "call-spawn-generic",
+            "spawn_agent",
+            json!({
+                "system_prompt": "You are a focused specialist sub-agent.",
+                "task": "Analyze the delegated part and return a concise finding.",
+                "budget": {
+                    "max_tokens": 64,
+                    "max_turns": 1,
+                    "max_cost": "0",
+                    "max_sub_agents": 0
+                }
+            }),
+            "gpt-4o-mini",
+        )
+    }
+}
+
+impl Provider for GenericHandoffProvider {
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        _budget: &'a mut ResourceBudget,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+    > {
+        let recorded = messages.to_vec();
+        let recorded_tools = tools.to_vec();
+        Box::pin(async move {
+            self.recorded_messages
+                .lock()
+                .expect("recorded_messages lock should not be poisoned")
+                .push(recorded);
+            self.recorded_tools
+                .lock()
+                .expect("recorded_tools lock should not be poisoned")
+                .push(recorded_tools);
+            Ok(Self::next_response(messages))
+        })
+    }
+}
+
+struct SharedGenericHandoffProvider(Arc<GenericHandoffProvider>);
+
+impl Provider for SharedGenericHandoffProvider {
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        budget: &'a mut ResourceBudget,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+    > {
+        self.0.chat(messages, tools, budget)
+    }
+}
+
 fn empty_config() -> SimulacraConfig {
     SimulacraConfig {
         project: ProjectConfig {
@@ -374,12 +461,14 @@ async fn spawn_minimal_mcp_server() -> (String, Arc<AtomicUsize>) {
     (format!("http://{addr}/mcp"), call_count)
 }
 
+#[allow(dead_code)]
 struct FakeOpenAiServer {
     base_url: String,
     requests: Arc<AsyncMutex<Vec<String>>>,
 }
 
 impl FakeOpenAiServer {
+    #[allow(dead_code)]
     async fn first_request_json(&self) -> Value {
         let start = std::time::Instant::now();
         loop {
@@ -400,6 +489,7 @@ impl FakeOpenAiServer {
     }
 }
 
+#[allow(dead_code)]
 async fn spawn_fake_openai_server(response: Value) -> FakeOpenAiServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -837,7 +927,28 @@ async fn server_task_consumes_input_response_and_resumes_agent_loop() {
         .provide_input(&handle.task_id, "Use Acme account")
         .expect("input.response should resume the task");
 
-    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    let terminal = {
+        let start = tokio::time::Instant::now();
+        loop {
+            let current = manager
+                .get_task(&handle.task_id)
+                .expect("task should remain visible while polling");
+            if current.state.is_terminal() {
+                break current;
+            }
+            if start.elapsed() >= Duration::from_secs(5) {
+                let (events, _) = manager
+                    .subscribe_task(&handle.task_id)
+                    .expect("task event history should be readable");
+                panic!(
+                    "task did not reach terminal state; last={:?}; parent_calls={:?}; events={events:?}",
+                    current.state,
+                    provider.recorded_messages()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
     assert_eq!(terminal.state, TaskState::Completed);
 
     let recorded = provider.recorded_messages();
@@ -986,7 +1097,7 @@ async fn catalog_spawn_capability_registers_spawn_agent_for_server_runs() {
 }
 
 #[tokio::test]
-async fn server_task_fluidly_hands_off_to_generic_subagent_and_resumes_parent() {
+async fn server_task_returns_live_generic_subagent_handle_and_resumes_parent() {
     let _env_guard = env_lock().lock().await;
     let catalog = Catalog::open_in_memory().expect("in-memory catalog");
     let tenant = ensure_tenant(&catalog, "default").await;
@@ -1000,43 +1111,15 @@ async fn server_task_fluidly_hands_off_to_generic_subagent_and_resumes_parent() 
     )
     .await;
 
-    let child_server = spawn_fake_openai_server(json!({
-        "id": "child-response",
-        "model": "gpt-4o-mini",
-        "choices": [{
-            "message": { "role": "assistant", "content": "child analysis: handoff complete" },
-            "finish_reason": "stop"
-        }],
-        "usage": { "prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12 }
-    }))
-    .await;
     let _openai_key = EnvGuard::set("OPENAI_API_KEY", Some("test-key"));
-    let _openai_base = EnvGuard::set("OPENAI_BASE_URL", Some(&child_server.base_url));
-    let _openai_api_base = EnvGuard::set("OPENAI_API_BASE", Some(&child_server.base_url));
 
-    let provider = Arc::new(ScriptedProvider::new([
-        tool_call_response(
-            "call-spawn-generic",
-            "spawn_agent",
-            json!({
-                "system_prompt": "You are a focused specialist sub-agent.",
-                "task": "Analyze the delegated part and return a concise finding.",
-                "budget": {
-                    "max_tokens": 64,
-                    "max_turns": 1,
-                    "max_cost": "0",
-                    "max_sub_agents": 0
-                }
-            }),
-            "gpt-4o-mini",
-        ),
-        assistant_response(
-            "master synthesis: child analysis incorporated",
-            "gpt-4o-mini",
-        ),
-    ]));
-    let engine =
-        build_engine(&catalog).with_provider_factory(scripted_factory(Arc::clone(&provider)));
+    let provider = Arc::new(GenericHandoffProvider::new());
+    let provider_for_factory = Arc::clone(&provider);
+    let engine = build_engine(&catalog).with_provider_factory(Arc::new(move |_kind, _model| {
+        Ok(Box::new(SharedGenericHandoffProvider(Arc::clone(
+            &provider_for_factory,
+        ))) as Box<dyn Provider>)
+    }));
     let manager = TaskManager::new();
 
     let handle = engine
@@ -1052,11 +1135,32 @@ async fn server_task_fluidly_hands_off_to_generic_subagent_and_resumes_parent() 
         .await
         .expect("server task should start");
 
-    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    let terminal = {
+        let start = tokio::time::Instant::now();
+        loop {
+            let current = manager
+                .get_task(&handle.task_id)
+                .expect("task should remain visible while polling");
+            if current.state.is_terminal() {
+                break current;
+            }
+            if start.elapsed() >= Duration::from_secs(5) {
+                let (events, _) = manager
+                    .subscribe_task(&handle.task_id)
+                    .expect("task event history should be readable");
+                panic!(
+                    "task did not reach terminal state; last={:?}; parent_calls={:?}; events={events:?}",
+                    current.state,
+                    provider.recorded_messages()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    };
     assert_eq!(
         terminal.state,
         TaskState::Completed,
-        "master task should complete after the child hand-off returns"
+        "master task should complete after receiving the live child handle"
     );
     let (events, _) = manager
         .subscribe_task(&handle.task_id)
@@ -1072,29 +1176,24 @@ async fn server_task_fluidly_hands_off_to_generic_subagent_and_resumes_parent() 
     assert_eq!(
         parent_calls.len(),
         2,
-        "master provider should be called once to delegate and once to synthesize after the child result"
+        "master provider should spawn, then synthesize after receiving the live child handle"
     );
     let resumed_messages = parent_calls
         .get(1)
-        .expect("second parent call should exist after child hand-off");
+        .expect("second parent call should exist after spawn hand-off");
     assert!(
         resumed_messages.iter().any(|message| {
             message.role == Role::Tool
                 && message.tool_call_id.as_deref() == Some("call-spawn-generic")
-                && message.content.contains("child analysis: handoff complete")
+                && message.content.contains("\"status\":\"running\"")
         }),
-        "master's second turn should include the spawn_agent tool result with child output; messages were: {resumed_messages:?}"
+        "master's second turn should include the spawn_agent live handle; messages were: {resumed_messages:?}"
     );
-
-    let child_request = child_server.first_request_json().await;
-    assert_eq!(
-        child_request["messages"][0]["content"], "You are a focused specialist sub-agent.",
-        "child request should use the runtime-supplied generic system prompt"
-    );
-    assert_eq!(
-        child_request["messages"][1]["content"],
-        "Analyze the delegated part and return a concise finding.",
-        "child request should receive the delegated task, not the whole parent transcript"
+    assert!(
+        resumed_messages
+            .iter()
+            .any(|message| message.content.contains("child-generic-")),
+        "live handle should include the generated child id; messages were: {resumed_messages:?}"
     );
 }
 

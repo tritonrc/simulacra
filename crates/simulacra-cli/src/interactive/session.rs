@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
 use simulacra_runtime::{
-    AgentLoop, AgentSupervisor, MessagePriority, Session, SessionStorage, SupervisorPayload,
-    TurnResult,
+    AgentLoop, AgentSupervisor, CancellationToken, MessagePriority, Session, SessionStorage,
+    SupervisorPayload, TurnResult,
 };
 use simulacra_types::{
     ActivityEvent, AgentId, ExitReason, Message, Provider, ResourceBudget, Role, ToolCallMessage,
@@ -75,7 +75,7 @@ where
     /// The AgentSupervisor for this session. One supervisor is created at session
     /// init and reused across turns via `run_actor_loop`. The supervisor handles
     /// spawn_agent requests sent as SupervisorPayload::Spawn with
-    /// MessagePriority::Command, and cancellation via SupervisorPayload::Cancel.
+    /// MessagePriority::Command, and live child control via join/cancel payloads.
     #[allow(dead_code)]
     supervisor: Option<AgentSupervisor>,
     /// The currently active child agent_type (set when a spawn_agent call is in flight).
@@ -561,7 +561,9 @@ where
     ) -> Result<
         (
             simulacra_runtime::SupervisorMessage,
-            tokio::sync::oneshot::Receiver<simulacra_runtime::SpawnResult>,
+            tokio::sync::oneshot::Receiver<
+                Result<simulacra_runtime::SpawnAck, simulacra_runtime::RuntimeError>,
+            >,
         ),
         String,
     > {
@@ -602,13 +604,20 @@ where
     fn build_cancel_message(
         &self,
         child_agent_id: &AgentId,
-    ) -> simulacra_runtime::SupervisorMessage {
+    ) -> (
+        simulacra_runtime::SupervisorMessage,
+        tokio::sync::oneshot::Receiver<Result<(), String>>,
+    ) {
         tracing::info!("child cancelled");
-        simulacra_runtime::SupervisorMessage {
-            agent_id: child_agent_id.clone(),
-            priority: MessagePriority::Signal,
-            payload: SupervisorPayload::Cancel,
-        }
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        (
+            simulacra_runtime::SupervisorMessage {
+                agent_id: child_agent_id.clone(),
+                priority: MessagePriority::Signal,
+                payload: SupervisorPayload::CancelChild(child_agent_id.clone(), result_tx),
+            },
+            result_rx,
+        )
     }
 
     /// Drive the full interactive REPL loop using an AgentLoop.
@@ -820,8 +829,11 @@ where
                 let think_start = std::time::Instant::now();
                 let mut spinner = Some(start_spinner());
 
+                let cancellation = CancellationToken::new(std::time::Duration::from_secs(1));
+                agent_loop.set_cancellation_token(cancellation.clone());
                 let turn_fut = agent_loop.run_single_turn(messages);
                 tokio::pin!(turn_fut);
+                let mut interrupt_sent = false;
                 let result = loop {
                     tokio::select! {
                         result = &mut turn_fut => break Some(result),
@@ -840,8 +852,11 @@ where
                                 stop_spinner(s);
                                 clear_spinner_line();
                             }
-                            self.io.write_line("^C — interrupted");
-                            break None;
+                            if !interrupt_sent {
+                                self.io.write_line("^C — interrupted");
+                                cancellation.signal();
+                                interrupt_sent = true;
+                            }
                         }
                     }
                 };
@@ -864,6 +879,8 @@ where
             } else {
                 // No activity events — fall back to plain spinner
                 let spinner = start_spinner();
+                let cancellation = CancellationToken::new(std::time::Duration::from_secs(1));
+                agent_loop.set_cancellation_token(cancellation.clone());
                 let turn_fut = agent_loop.run_single_turn(messages);
                 tokio::pin!(turn_fut);
                 let interrupted = tokio::select! {
@@ -876,7 +893,8 @@ where
                         stop_spinner(spinner);
                         clear_spinner_line();
                         self.io.write_line("^C — interrupted");
-                        None
+                        cancellation.signal();
+                        Some((&mut turn_fut).await)
                     }
                 };
                 if let Some(result) = interrupted {

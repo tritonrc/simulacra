@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn actor_spawn_journals_completion_before_result_channel_resolves() {
+async fn actor_join_journals_completion_before_terminal_result_resolves() {
     let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
     let parent_id = AgentId("parent-agent".into());
     let factory = FakeTaskFactory::new();
@@ -44,8 +44,24 @@ async fn actor_spawn_journals_completion_before_result_channel_resolves() {
 
     tokio::time::timeout(Duration::from_secs(1), result_rx)
         .await
-        .expect("actor should resolve the spawn result")
-        .expect("supervisor should keep the result channel open")
+        .expect("actor should resolve the spawn ack")
+        .expect("supervisor should keep the ack channel open")
+        .expect("child spawn should be accepted");
+
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: parent_id.clone(),
+        payload: SupervisorPayload::JoinChild(AgentId("journaled-child".into()), join_tx),
+    })
+    .await
+    .expect("join message should send");
+    tokio::time::timeout(Duration::from_secs(1), join_rx)
+        .await
+        .expect("actor should resolve the join result")
+        .expect("supervisor should keep the join channel open")
+        .expect("join should find the child")
+        .result
         .expect("child should complete successfully");
 
     let entries = journal
@@ -70,7 +86,7 @@ async fn actor_spawn_journals_completion_before_result_channel_resolves() {
                 if child_id.0 == "journaled-child" && *success
             )
         })
-        .expect("actor path should journal SubAgentCompleted before returning");
+        .expect("actor path should journal SubAgentCompleted before join returns");
     assert!(spawned < completed);
 
     drop(tx);
@@ -126,13 +142,30 @@ async fn actor_retry_returns_successful_retry_to_original_caller() {
     .await
     .expect("spawn message should send");
 
-    let output = tokio::time::timeout(Duration::from_secs(1), result_rx)
+    let ack = tokio::time::timeout(Duration::from_secs(1), result_rx)
         .await
-        .expect("actor should resolve the retried spawn result")
-        .expect("supervisor should keep the result channel open")
-        .expect("successful retry should satisfy the original caller");
+        .expect("actor should resolve the spawn acknowledgement")
+        .expect("supervisor should keep the ack channel open")
+        .expect("successful spawn should satisfy the original caller");
 
-    assert_eq!(output.exit_reason, ExitReason::Complete);
+    assert_eq!(ack.child_id, AgentId("flaky-agent".into()));
+
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("flaky-agent".into()),
+        payload: SupervisorPayload::JoinChild(AgentId("flaky-agent".into()), join_tx),
+    })
+    .await
+    .expect("join message should send");
+
+    let terminal = tokio::time::timeout(Duration::from_secs(1), join_rx)
+        .await
+        .expect("actor should resolve the joined child result")
+        .expect("supervisor should keep the join channel open")
+        .expect("successful retry should satisfy the join caller");
+
+    assert_eq!(terminal.result.unwrap().exit_reason, ExitReason::Complete);
     assert_eq!(
         factory
             .started_order()

@@ -159,6 +159,9 @@ async fn supervisor_actor_loop_processes_messages_by_priority() {
         "expected the actor loop to dispatch simultaneously queued messages in priority order"
     );
 
+    drop(signal_tx);
+    drop(command_tx);
+    drop(work_tx);
     drop(tx);
     tokio::time::timeout(Duration::from_secs(1), actor)
         .await
@@ -272,6 +275,163 @@ async fn supervisor_manages_multiple_concurrent_agents() {
         1,
         "expected the third child to complete normally"
     );
+}
+
+#[tokio::test]
+async fn cancel_child_payload_signals_only_the_target_child_token() {
+    #[derive(Clone)]
+    struct TokenRecordingFactory {
+        tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+        notify: Arc<Notify>,
+    }
+
+    impl TaskFactory for TokenRecordingFactory {
+        fn create_task(&self, config: SpawnConfig, token: CancellationToken) -> BoxTaskFuture {
+            self.tokens
+                .lock()
+                .unwrap()
+                .insert(config.agent_id.0.clone(), token.clone());
+            self.notify.notify_waiters();
+            Box::pin(async move {
+                while !token.is_cancelled() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Ok(AgentLoopOutput {
+                    exit_reason: ExitReason::Cancelled,
+                    messages: vec![],
+                    token_usage: TokenUsage::default(),
+                    used_turns: 0,
+                    used_cost: Decimal::ZERO,
+                })
+            })
+        }
+    }
+
+    let tokens = Arc::new(Mutex::new(HashMap::new()));
+    let notify = Arc::new(Notify::new());
+    let factory = TokenRecordingFactory {
+        tokens: Arc::clone(&tokens),
+        notify: Arc::clone(&notify),
+    };
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    for child_id in ["child-a", "child-b"] {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId(child_id.into()),
+            payload: SupervisorPayload::Spawn(
+                Box::new(spawn_config(
+                    child_id,
+                    "parent-agent",
+                    CapabilityToken::default(),
+                    default_budget(),
+                    RestartStrategy::LetCrash,
+                )),
+                ack_tx,
+            ),
+        })
+        .await
+        .expect("spawn message should send");
+        ack_rx
+            .await
+            .expect("spawn ack channel should stay open")
+            .expect("spawn should be accepted");
+    }
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if tokens.lock().unwrap().len() == 2 {
+                break;
+            }
+            notify.notified().await;
+        }
+    })
+    .await
+    .expect("both child tokens should be recorded");
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Signal,
+        agent_id: AgentId("child-b".into()),
+        payload: SupervisorPayload::CancelChild(AgentId("child-b".into()), cancel_tx),
+    })
+    .await
+    .expect("cancel message should send");
+    cancel_rx
+        .await
+        .expect("cancel response channel should stay open")
+        .expect("targeted cancel should succeed");
+
+    {
+        let snapshot = tokens.lock().unwrap();
+        assert!(
+            !snapshot.get("child-a").unwrap().is_cancelled(),
+            "cancel_child_agent must not cancel sibling children"
+        );
+        assert!(
+            snapshot.get("child-b").unwrap().is_cancelled(),
+            "cancel_child_agent must signal the targeted child"
+        );
+    }
+
+    let (join_b_tx, join_b_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::JoinChild(AgentId("child-b".into()), join_b_tx),
+    })
+    .await
+    .expect("join message should send");
+    tokio::time::timeout(Duration::from_secs(1), join_b_rx)
+        .await
+        .expect("join should finish after cancellation")
+        .expect("join response channel should stay open")
+        .expect("join should return the cancelled child result");
+
+    let (cancel_completed_tx, cancel_completed_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Signal,
+        agent_id: AgentId("child-b".into()),
+        payload: SupervisorPayload::CancelChild(AgentId("child-b".into()), cancel_completed_tx),
+    })
+    .await
+    .expect("cancel-completed message should send");
+    let cancel_completed = cancel_completed_rx
+        .await
+        .expect("cancel-completed response channel should stay open");
+    assert!(
+        matches!(cancel_completed, Err(ref msg) if msg.contains("already completed")),
+        "completed children should no longer accept cancellation: {cancel_completed:?}"
+    );
+
+    let (cancel_a_tx, cancel_a_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Signal,
+        agent_id: AgentId("child-a".into()),
+        payload: SupervisorPayload::CancelChild(AgentId("child-a".into()), cancel_a_tx),
+    })
+    .await
+    .expect("second cancel message should send");
+    cancel_a_rx
+        .await
+        .expect("second cancel response channel should stay open")
+        .expect("second targeted cancel should succeed");
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor loop should exit after cancelled children finish and channel closes")
+        .expect("actor loop task should shut down cleanly");
 }
 
 // S009 RED Assertion: a failed child should be restarted by the actor loop per strategy.

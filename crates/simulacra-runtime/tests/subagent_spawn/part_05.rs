@@ -16,21 +16,7 @@ async fn spawn_agent_tool_exit_reason_max_turns_uses_snake_case_format_per_spec(
         used_cost: Decimal::ZERO,
     };
 
-    let (result, _captured) = run_spawn_tool_call(
-        serde_json::json!({
-            "agent_type": "researcher",
-            "task": "check",
-            "budget": {
-                "max_tokens": 10,
-                "max_turns": 3,
-                "max_cost": "0",
-                "max_sub_agents": 0
-            }
-        }),
-        &["researcher"],
-        Ok(max_turns_output),
-    )
-    .await;
+    let result = run_join_tool_call(Ok(max_turns_output)).await;
 
     let value = result
         .expect("max_turns child should return a success payload (partial success, not error)");
@@ -271,28 +257,14 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_has_no_assista
         used_cost: Decimal::ZERO,
     };
 
-    let (result, _captured) = run_spawn_tool_call(
-        serde_json::json!({
-            "agent_type": "researcher",
-            "task": "check",
-            "budget": {
-                "max_tokens": 10,
-                "max_turns": 1,
-                "max_cost": "0",
-                "max_sub_agents": 0
-            }
-        }),
-        &["researcher"],
-        Ok(output_with_no_assistant),
-    )
-    .await;
+    let result = run_join_tool_call(Ok(output_with_no_assistant)).await;
 
     let value =
         result.expect("child with no assistant message should still return a success payload");
     assert_eq!(
         value.get("message").and_then(serde_json::Value::as_str),
         Some(""),
-        "spawn_agent should return empty string for message when the child has no final assistant message"
+        "join_child_agent should return empty string for message when the child has no final assistant message"
     );
 }
 
@@ -306,27 +278,13 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_messages_list_
         used_cost: Decimal::ZERO,
     };
 
-    let (result, _captured) = run_spawn_tool_call(
-        serde_json::json!({
-            "agent_type": "researcher",
-            "task": "check",
-            "budget": {
-                "max_tokens": 10,
-                "max_turns": 1,
-                "max_cost": "0",
-                "max_sub_agents": 0
-            }
-        }),
-        &["researcher"],
-        Ok(output_with_empty_messages),
-    )
-    .await;
+    let result = run_join_tool_call(Ok(output_with_empty_messages)).await;
 
     let value = result.expect("child with empty messages should still return a success payload");
     assert_eq!(
         value.get("message").and_then(serde_json::Value::as_str),
         Some(""),
-        "spawn_agent should return empty string for message when the child messages list is empty"
+        "join_child_agent should return empty string for message when the child messages list is empty"
     );
 }
 
@@ -411,7 +369,7 @@ fn real_spawn_agent_tool_definition_uses_the_documented_name_and_description() {
     assert_eq!(definition.name, "spawn_agent");
     assert_eq!(
         definition.description,
-        "Spawn a supervised child agent to handle a delegated task and return its terminal summary."
+        "Spawn a supervised child agent to handle a delegated task and return a live child handle."
     );
 }
 
@@ -487,4 +445,3 @@ fn real_spawn_agent_tool_capabilities_schema_matches_spec_shape() {
 }
 
 // ── S023: Generic sub-agent tests ──────────────────────────────────────
-

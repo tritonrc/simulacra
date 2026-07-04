@@ -234,6 +234,15 @@ impl AgentSupervisor {
         let result_context = self.child_result_context(&config, spawn_start);
         let retry_config = config.clone();
         let mut task_future = factory.create_task(config, token.clone());
+        lock_mutex(&self.cancellation_tokens, "cancellation_tokens")
+            .insert(agent_id.clone(), token.clone());
+        lock_mutex(&self.child_results, "child_results").insert(
+            agent_id.clone(),
+            ChildRunState {
+                result: None,
+                waiters: Vec::new(),
+            },
+        );
 
         // Try polling the future once synchronously. If the task factory
         // resolves immediately (as in tests or simple delegation), we
@@ -260,15 +269,15 @@ impl AgentSupervisor {
                 ))),
             };
             let finalized = Self::process_child_result(result, &result_context);
+            let terminal = ChildTerminalResult {
+                child_id: result_context.agent_id.clone(),
+                agent_type: result_context.agent_type.clone(),
+                result: finalized.map_err(|err| err.to_string()),
+            };
+            Self::record_child_terminal_result(&self.child_results, terminal);
+            lock_mutex(&self.cancellation_tokens, "cancellation_tokens").remove(&agent_id);
             let handle: JoinHandle<()> = tokio::spawn(async {});
             lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
-            if let Err(err) = finalized {
-                match err {
-                    RuntimeError::JournalAppendFailed { .. } => return Err(err),
-                    other if !was_err => return Err(other),
-                    _ => {}
-                }
-            }
             if was_err && let Some(err) = err_for_return {
                 return Err(err);
             }
@@ -278,6 +287,8 @@ impl AgentSupervisor {
         // Future is pending — spawn it as a background task.
         let dispatch = tracing::dispatcher::get_default(|d| d.clone());
         let retry_counts = Arc::clone(&self.retry_counts_shared);
+        let child_results = Arc::clone(&self.child_results);
+        let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
         let handle: JoinHandle<()> = tokio::spawn(async move {
             let _guard = tracing::dispatcher::set_default(&dispatch);
             let result = super::restart::run_task_with_retries(
@@ -287,7 +298,15 @@ impl AgentSupervisor {
                 retry_counts,
             )
             .await;
-            let _ = Self::process_child_result(result, &result_context);
+            let result = Self::process_child_result(result, &result_context);
+            let terminal = ChildTerminalResult {
+                child_id: result_context.agent_id.clone(),
+                agent_type: result_context.agent_type.clone(),
+                result: result.map_err(|err| err.to_string()),
+            };
+            Self::record_child_terminal_result(&child_results, terminal);
+            lock_mutex(&cancellation_tokens, "cancellation_tokens")
+                .remove(&result_context.agent_id);
         });
         lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
 

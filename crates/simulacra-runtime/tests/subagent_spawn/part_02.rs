@@ -326,9 +326,10 @@ async fn parent_receives_exactly_one_tool_result_message_per_spawn_agent_call() 
         value.get("child_id").is_some(),
         "the single tool result should contain child_id"
     );
-    assert!(
-        value.get("exit_reason").is_some(),
-        "the single tool result should contain exit_reason"
+    assert_eq!(
+        value.get("status").and_then(serde_json::Value::as_str),
+        Some("running"),
+        "the single tool result should contain a live running handle"
     );
 }
 
@@ -424,6 +425,54 @@ async fn spawn_agent_tool_parses_capabilities_override_json_into_spawn_config() 
 }
 
 #[tokio::test]
+async fn spawn_agent_tool_rejects_agent_type_not_in_call_site_spawn_types() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = SpawnAgentTool {
+        sender,
+        can_spawn: vec!["researcher".into()],
+        activity_sink: Arc::new(NoopActivitySink),
+        parent_id: AgentId("parent-agent".into()),
+        tiers: Default::default(),
+        parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
+        parent_model: "parent-model".into(),
+    };
+    let capability = CapabilityToken {
+        spawn_types: vec!["reviewer".into()],
+        ..Default::default()
+    };
+
+    let result = tool
+        .call(
+            serde_json::json!({
+                "agent_type": "researcher",
+                "task": "check",
+                "budget": {
+                    "max_tokens": 1,
+                    "max_turns": 1,
+                    "max_cost": "0",
+                    "max_sub_agents": 0
+                }
+            }),
+            &capability,
+        )
+        .await;
+
+    match result {
+        Err(ToolError::ExecutionFailed(msg)) => {
+            assert!(
+                msg.contains("caller spawn_types"),
+                "error should identify the call-site capability denial: {msg}"
+            );
+        }
+        other => panic!("spawn should fail before supervisor dispatch, got {other:?}"),
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "denied spawn_agent calls must not reach the supervisor"
+    );
+}
+
+#[tokio::test]
 async fn spawn_agent_tool_child_runtime_failures_return_toolerror_execution_failed() {
     let (result, _captured) = run_spawn_tool_call(
         serde_json::json!({
@@ -471,4 +520,3 @@ async fn spawn_agent_tool_does_not_hardcode_parent_agent_id_in_spawn_config() {
         "SpawnAgentTool should propagate the caller's parent AgentId into SpawnConfig"
     );
 }
-

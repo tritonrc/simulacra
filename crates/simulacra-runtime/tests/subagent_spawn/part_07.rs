@@ -418,8 +418,11 @@ async fn generic_spawn_without_tier_reverse_looks_up_parent_model_for_resolved_t
             SupervisorPayload::Spawn(config, result_tx) => {
                 let captured = (*config).clone();
                 result_tx
-                    .send(Ok(child_success_output()))
-                    .expect("spawn tool should still be awaiting the child result");
+                    .send(Ok(SpawnAck {
+                        child_id: captured.agent_id.clone(),
+                        agent_type: "generic".into(),
+                    }))
+                    .expect("spawn tool should still be awaiting the spawn acknowledgement");
                 captured
             }
             other => panic!("expected SupervisorPayload::Spawn, got {other:?}"),

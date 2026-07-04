@@ -94,8 +94,9 @@ fn build_child_registry(
         register_extra_tools(&mut registry, Arc::clone(cell))?;
     }
     if let Some(spawn_tool) = &spec.spawn_tool {
+        let sender = spawn_tool.sender.clone();
         registry.register(Box::new(SpawnAgentTool {
-            sender: spawn_tool.sender.clone(),
+            sender: sender.clone(),
             can_spawn: spawn_tool.can_spawn.clone(),
             activity_sink: Arc::clone(&spec.parent_sink),
             parent_id: spec.spawn_config.agent_id.clone(),
@@ -103,6 +104,10 @@ fn build_child_registry(
             parent_budget: child_budget,
             parent_model: spawn_tool.parent_model.clone(),
         }))?;
+        registry.register(Box::new(JoinChildAgentTool {
+            sender: sender.clone(),
+        }))?;
+        registry.register(Box::new(CancelChildAgentTool { sender }))?;
     }
     Ok(registry)
 }

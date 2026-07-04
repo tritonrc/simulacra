@@ -389,9 +389,16 @@ async fn run_spawn_tool_call(
         match message.payload {
             SupervisorPayload::Spawn(config, result_tx) => {
                 let captured = (*config).clone();
+                let reply = supervisor_reply.map(|_| SpawnAck {
+                    child_id: captured.agent_id.clone(),
+                    agent_type: captured
+                        .agent_type
+                        .clone()
+                        .unwrap_or_else(|| "generic".to_string()),
+                });
                 result_tx
-                    .send(supervisor_reply)
-                    .expect("spawn tool should still be awaiting the child result");
+                    .send(reply)
+                    .expect("spawn tool should still be awaiting the spawn acknowledgement");
                 captured
             }
             other => panic!("expected SupervisorPayload::Spawn, got {other:?}"),
@@ -402,3 +409,34 @@ async fn run_spawn_tool_call(
     (result, captured)
 }
 
+async fn run_join_tool_call(
+    terminal_result: Result<AgentLoopOutput, String>,
+) -> Result<serde_json::Value, ToolError> {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = JoinChildAgentTool { sender };
+    let call_future = tool.call(
+        serde_json::json!({ "child_id": "child-1" }),
+        &CapabilityToken::default(),
+    );
+    let receive_future = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("join tool should send one supervisor message");
+        match message.payload {
+            SupervisorPayload::JoinChild(child_id, result_tx) => {
+                assert_eq!(child_id.0, "child-1");
+                result_tx
+                    .send(Ok(ChildTerminalResult {
+                        child_id,
+                        agent_type: "researcher".into(),
+                        result: terminal_result,
+                    }))
+                    .expect("join tool should still be awaiting the terminal result");
+            }
+            other => panic!("expected SupervisorPayload::JoinChild, got {other:?}"),
+        }
+    };
+    let (result, _) = tokio::join!(call_future, receive_future);
+    result
+}

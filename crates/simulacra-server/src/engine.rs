@@ -20,8 +20,8 @@ use simulacra_memory::{Embedder, HitIdCache, MemoryStore, VectorIndex};
 use simulacra_provider::{AnthropicProvider, OpenAiProvider};
 use simulacra_runtime::{
     ActivitySink, AgentHitlRuntime, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor,
-    AgentTaskFactory, CountingJournalStorage, InMemoryJournalStorage, RequestInputTool,
-    SpawnAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, CountingJournalStorage, InMemoryJournalStorage,
+    JoinChildAgentTool, RequestInputTool, SpawnAgentTool,
 };
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
 use simulacra_tool::{
@@ -1713,7 +1713,7 @@ impl SimulacraEngine {
                     let spawn_tx_clone = spawn_tx.clone();
                     registry
                         .register(Box::new(SpawnAgentTool {
-                            sender: spawn_tx,
+                            sender: spawn_tx.clone(),
                             can_spawn: capability_token.spawn_types.clone(),
                             activity_sink: spawn_sink,
                             parent_id: AgentId(task_id.clone()),
@@ -1722,6 +1722,14 @@ impl SimulacraEngine {
                             parent_model: model_clone.clone(),
                         }))
                         .map_err(|e| format!("failed to register spawn_agent tool: {e}"))?;
+                    registry
+                        .register(Box::new(JoinChildAgentTool {
+                            sender: spawn_tx.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register join_child_agent tool: {e}"))?;
+                    registry
+                        .register(Box::new(CancelChildAgentTool { sender: spawn_tx }))
+                        .map_err(|e| format!("failed to register cancel_child_agent tool: {e}"))?;
                     spawn_rx = Some(rx);
                     supervisor_tx_for_factory = Some(spawn_tx_clone);
                 }

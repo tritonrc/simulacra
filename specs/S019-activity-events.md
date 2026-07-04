@@ -9,7 +9,7 @@
 - **S009** — Supervisor (child agent lifecycle)
 - **S012** — Built-in tools (tool registry, tool execution)
 - **S015** — Interactive mode (REPL rendering, status line)
-- **S018** — Interactive sub-agents (spawn_agent tool, synchronous delegation)
+- **S018** — Interactive sub-agents (spawn_agent live handles, join/cancel control)
 - **S050** — Agent streaming runtime (provider stream events to activity events)
 
 ## Context
@@ -323,8 +323,8 @@ by the interactive layer based on provider errors, not activity events.
 ### Sub-agent forwarding
 
 - [x] Child `AgentLoop` receives a `ForwardingActivitySink` that wraps events in `ChildActivity`. **`AgentTaskFactory::create_task()` creates `ForwardingActivitySink::new(child_id, agent_type, parent_sink)` and passes it to the child `AgentLoop`.**
-- [x] `SpawnAgentTool` emits `ChildSpawned` before the child starts. **`self.activity_sink.emit(ActivityEvent::ChildSpawned { child_id, agent_type, task })` in `SpawnAgentTool::call()` before sending the spawn message.**
-- [x] Supervisor emits `ChildFinished` with aggregated stats after child completion/failure. **`self.activity_sink.emit(ActivityEvent::ChildFinished { child_id, agent_type, exit_reason, duration_ms, tool_uses, token_count })` after `result_rx.await` in `SpawnAgentTool::call()`.**
+- [x] Supervisor emits `ChildSpawned` before the child starts. **`AgentSupervisor::prepare_spawn()` emits `ActivityEvent::ChildSpawned { child_id, agent_type, task }` before dispatching the child task.**
+- [x] Supervisor emits `ChildFinished` with aggregated stats after child completion/failure. **`self.activity_sink.emit(ActivityEvent::ChildFinished { child_id, agent_type, exit_reason, duration_ms, tool_uses, token_count })` when the supervised child task records its terminal result.**
 - [x] Nested children produce doubly-wrapped `ChildActivity` events. **`ForwardingActivitySink::emit()` wraps in `ChildActivity { event: Box::new(event) }`; a grandchild's ForwardingActivitySink wraps again, producing double nesting.**
 
 ### Interactive CLI rendering — activity blocks

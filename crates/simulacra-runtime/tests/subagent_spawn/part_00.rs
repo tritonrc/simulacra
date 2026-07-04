@@ -6,9 +6,10 @@ use simulacra_config::{
 };
 use simulacra_runtime::{
     AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, AgentTaskFactory, BoxTaskFuture,
-    CancellationToken, DEFAULT_SYSTEM_PROMPT, InMemoryJournalStorage, MessagePriority,
-    NoopActivitySink, ProviderKind, RestartStrategy, RuntimeError, SpawnAgentTool, SpawnConfig,
-    SupervisorMessage, SupervisorPayload, TaskFactory, TurnResult,
+    CancellationToken, ChildTerminalResult, DEFAULT_SYSTEM_PROMPT, InMemoryJournalStorage,
+    JoinChildAgentTool, MessagePriority, NoopActivitySink, ProviderKind, RestartStrategy,
+    RuntimeError, SpawnAck, SpawnAgentTool, SpawnConfig, SupervisorMessage, SupervisorPayload,
+    TaskFactory, TurnResult,
 };
 use simulacra_tool::ToolRegistry;
 use simulacra_types::{

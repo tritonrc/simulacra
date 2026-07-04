@@ -51,7 +51,10 @@ pub type CliError = anyhow::Error;
 
 // Re-export ProviderKind publicly (it was pub in simulacra-cli before the move).
 pub use simulacra_runtime::ProviderKind;
-use simulacra_runtime::{AgentTaskFactory, DEFAULT_SYSTEM_PROMPT, SpawnAgentTool};
+use simulacra_runtime::{
+    AgentTaskFactory, CancelChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool,
+    SpawnAgentTool,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CliMode {
@@ -1140,7 +1143,7 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
         let spawn_tx_clone = spawn_tx.clone();
         registry
             .register(Box::new(SpawnAgentTool {
-                sender: spawn_tx,
+                sender: spawn_tx.clone(),
                 can_spawn: agent_type.can_spawn.clone(),
                 activity_sink: spawn_sink,
                 parent_id: AgentId(entry_agent.clone()),
@@ -1149,6 +1152,14 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
                 parent_model: model.clone(),
             }))
             .context("failed to register spawn_agent tool")?;
+        registry
+            .register(Box::new(JoinChildAgentTool {
+                sender: spawn_tx.clone(),
+            }))
+            .context("failed to register join_child_agent tool")?;
+        registry
+            .register(Box::new(CancelChildAgentTool { sender: spawn_tx }))
+            .context("failed to register cancel_child_agent tool")?;
         spawn_rx = Some(rx);
         spawn_tx_for_factory = Some(spawn_tx_clone);
     }

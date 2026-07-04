@@ -44,33 +44,33 @@ impl AgentSupervisor {
                         }
                     }
                     _ = task_set.join_next() => {
-                        // A task completed. If all tasks are done and no pending
-                        // messages, check if we should exit.
+                        // A task completed. If all tasks are done, drain any
+                        // queued messages and continue so late joins/cancels
+                        // remain available until all senders are dropped.
                         if task_set.is_empty() {
                             match rx.try_recv() {
-                                Ok(msg) => {
-                                    priority_queue.push(msg);
-                                    while let Ok(extra) = rx.try_recv() {
-                                        priority_queue.push(extra);
-                                    }
-                                    while let Some(queued) = priority_queue.pop() {
-                                        self.dispatch_message_into(&mut task_set, queued).await;
-                                        ever_dispatched = true;
-                                    }
-                                }
-                                Err(TryRecvError::Empty) if ever_dispatched => break,
+                                Ok(msg) => priority_queue.push(msg),
+                                Err(TryRecvError::Empty) => {}
                                 Err(TryRecvError::Disconnected) => break,
-                                Err(TryRecvError::Empty) => {
-                                    // Haven't dispatched yet, keep waiting
-                                }
+                            }
+                            while let Ok(extra) = rx.try_recv() {
+                                priority_queue.push(extra);
+                            }
+                            while let Some(queued) = priority_queue.pop() {
+                                self.dispatch_message_into(&mut task_set, queued).await;
+                                ever_dispatched = true;
+                            }
+                            if task_set.is_empty() {
+                                continue;
                             }
                         }
                     }
                 }
             } else if ever_dispatched {
-                // All tasks finished and we've dispatched before — check for more
-                match rx.try_recv() {
-                    Ok(msg) => {
+                // All tasks finished, but the supervisor must stay alive for
+                // late joins/cancels and future child spawns until senders drop.
+                match rx.recv().await {
+                    Some(msg) => {
                         priority_queue.push(msg);
                         while let Ok(extra) = rx.try_recv() {
                             priority_queue.push(extra);
@@ -79,8 +79,7 @@ impl AgentSupervisor {
                             self.dispatch_message_into(&mut task_set, queued).await;
                         }
                     }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break,
+                    None => break,
                 }
             } else {
                 // No tasks yet, wait for first message
@@ -110,7 +109,6 @@ impl AgentSupervisor {
         &self,
         task_set: &mut tokio::task::JoinSet<()>,
         config: SpawnConfig,
-        result_tx: tokio::sync::oneshot::Sender<SpawnResult>,
         factory: Arc<dyn TaskFactory>,
     ) {
         let agent_id = config.agent_id.clone();
@@ -118,13 +116,30 @@ impl AgentSupervisor {
         let task_future = factory.create_task(config.clone(), token.clone());
         let result_context = self.child_result_context(&config, Instant::now());
         let retry_counts = Arc::clone(&self.retry_counts_shared);
+        let child_results = Arc::clone(&self.child_results);
+        let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
 
-        lock_mutex(&self.cancellation_tokens, "cancellation_tokens").insert(agent_id, token);
+        lock_mutex(&self.cancellation_tokens, "cancellation_tokens")
+            .insert(agent_id.clone(), token);
+        lock_mutex(&self.child_results, "child_results").insert(
+            agent_id.clone(),
+            ChildRunState {
+                result: None,
+                waiters: Vec::new(),
+            },
+        );
 
         task_set.spawn(async move {
             let result = run_task_with_retries(factory, config, task_future, retry_counts).await;
             let result = AgentSupervisor::process_child_result(result, &result_context);
-            let _ = result_tx.send(result);
+            let terminal = ChildTerminalResult {
+                child_id: result_context.agent_id.clone(),
+                agent_type: result_context.agent_type.clone(),
+                result: result.map_err(|err| err.to_string()),
+            };
+            AgentSupervisor::record_child_terminal_result(&child_results, terminal);
+            lock_mutex(&cancellation_tokens, "cancellation_tokens")
+                .remove(&result_context.agent_id);
         });
     }
 }
@@ -154,7 +169,36 @@ impl AgentSupervisor {
                     let _ = result_tx.send(Err(err));
                     return;
                 }
-                self.spawn_task_into(task_set, *config, result_tx, factory);
+                let ack = SpawnAck {
+                    child_id: config.agent_id.clone(),
+                    agent_type: config
+                        .agent_type
+                        .clone()
+                        .unwrap_or_else(|| "generic".to_string()),
+                };
+                if result_tx.send(Ok(ack)).is_ok() {
+                    tokio::task::yield_now().await;
+                }
+                self.spawn_task_into(task_set, *config, factory);
+            }
+            SupervisorPayload::JoinChild(child_id, result_tx) => {
+                self.join_child(child_id, result_tx);
+            }
+            SupervisorPayload::CancelChild(child_id, result_tx) => {
+                let result = if let Some(token) =
+                    lock_mutex(&self.cancellation_tokens, "cancellation_tokens").get(&child_id)
+                {
+                    token.signal();
+                    Ok(())
+                } else if lock_mutex(&self.child_results, "child_results")
+                    .get(&child_id)
+                    .is_some_and(|state| state.result.is_some())
+                {
+                    Err(format!("child_id already completed: {}", child_id.0))
+                } else {
+                    Err(format!("unknown child_id: {}", child_id.0))
+                };
+                let _ = result_tx.send(result);
             }
             SupervisorPayload::Cancel => {
                 if let Some(token) =
@@ -207,6 +251,39 @@ impl AgentSupervisor {
     fn abort_child(&self, agent_id: &AgentId) {
         if let Some(handle) = lock_mutex(&self.children, "children").remove(agent_id) {
             handle.abort();
+        }
+    }
+
+    fn join_child(&self, child_id: AgentId, result_tx: ChildJoinSender) {
+        let mut results = lock_mutex(&self.child_results, "child_results");
+        let Some(state) = results.get_mut(&child_id) else {
+            let _ = result_tx.send(Err(format!("unknown child_id: {}", child_id.0)));
+            return;
+        };
+        if let Some(result) = state.result.clone() {
+            let _ = result_tx.send(Ok(result));
+        } else {
+            state.waiters.push(result_tx);
+        }
+    }
+
+    pub(super) fn record_child_terminal_result(
+        child_results: &Arc<Mutex<HashMap<AgentId, ChildRunState>>>,
+        terminal: ChildTerminalResult,
+    ) {
+        let waiters = {
+            let mut results = lock_mutex(child_results, "child_results");
+            let state = results
+                .entry(terminal.child_id.clone())
+                .or_insert_with(|| ChildRunState {
+                    result: None,
+                    waiters: Vec::new(),
+                });
+            state.result = Some(terminal.clone());
+            std::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            let _ = waiter.send(Ok(terminal.clone()));
         }
     }
 }

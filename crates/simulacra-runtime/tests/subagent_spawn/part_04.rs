@@ -400,21 +400,7 @@ async fn spawn_agent_tool_exit_reason_uses_snake_case_format_per_spec() {
         used_cost: Decimal::ZERO,
     };
 
-    let (result, _captured) = run_spawn_tool_call(
-        serde_json::json!({
-            "agent_type": "researcher",
-            "task": "check",
-            "budget": {
-                "max_tokens": 10,
-                "max_turns": 1,
-                "max_cost": "0",
-                "max_sub_agents": 0
-            }
-        }),
-        &["researcher"],
-        Ok(budget_exhausted_output),
-    )
-    .await;
+    let result = run_join_tool_call(Ok(budget_exhausted_output)).await;
 
     let value = result.expect("budget exhaustion should still be a success payload");
     assert_eq!(
@@ -442,21 +428,7 @@ async fn spawn_agent_tool_exit_reason_completed_uses_snake_case_format_per_spec(
         used_cost: Decimal::ZERO,
     };
 
-    let (result, _captured) = run_spawn_tool_call(
-        serde_json::json!({
-            "agent_type": "researcher",
-            "task": "check",
-            "budget": {
-                "max_tokens": 10,
-                "max_turns": 1,
-                "max_cost": "0",
-                "max_sub_agents": 0
-            }
-        }),
-        &["researcher"],
-        Ok(completed_output),
-    )
-    .await;
+    let result = run_join_tool_call(Ok(completed_output)).await;
 
     let value = result.expect("completed child should return a success payload");
     assert_eq!(
@@ -465,4 +437,3 @@ async fn spawn_agent_tool_exit_reason_completed_uses_snake_case_format_per_spec(
         "exit_reason should be \"completed\" (snake_case) for ExitReason::Complete, not Debug format like \"Complete\""
     );
 }
-

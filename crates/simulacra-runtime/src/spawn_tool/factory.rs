@@ -37,7 +37,7 @@ impl crate::TaskFactory for AgentTaskFactory {
     fn create_task(
         &self,
         spawn_config: SpawnConfig,
-        _cancellation: CancellationToken,
+        cancellation: CancellationToken,
     ) -> BoxTaskFuture {
         let agent_type_config = spawn_config
             .agent_type
@@ -132,6 +132,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                     pipeline.clone(),
                 );
                 child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
+                child_loop.set_cancellation_token(cancellation.clone());
 
                 let result = child_loop.run(&task).await;
                 run_spawn_after_hook(pipeline.as_ref(), "generic", &result);
@@ -233,6 +234,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                 pipeline.clone(),
             );
             child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
+            child_loop.set_cancellation_token(cancellation);
 
             let result = child_loop.run(&task).await;
             run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);
