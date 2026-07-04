@@ -9,7 +9,7 @@
 - **S004** — Capability tokens (per-agent capability grants applied at task spawn)
 - **S017** — Skills (skill discovery walks the VFS; CatalogSkillFs participates)
 - **S031** — API server (auth provider, tenant resolver, axum route mounting)
-- **S033** — Integration fabric (existing `/var/skills/` mount; CatalogSkillFs composes alongside)
+- **S033** — Integration fabric (existing `/var/skills/` compatibility namespace)
 - **S034** — SimulacraEngine (composition root rewired to read from catalog)
 - **S037** — Memory (SqliteMemoryStore + BackgroundEmbedder; routed by memory_pool config)
 - **S038** — CLI memory wiring (bootstrap path that the catalog augments)
@@ -28,7 +28,7 @@ This is the foundational spec for the broader "web-managed agent platform" effor
   - Repository traits: `AgentRepository`, `SkillRepository`, `MemoryPoolRepository`, `CapabilityRepository`, `TenantRepository`
   - SQLite implementations of each (`SqliteAgentRepository`, etc.)
   - In-memory repository implementations (`MemoryAgentRepository`, etc.) for `--no-catalog` CLI mode
-  - `CatalogSkillFs` — `FsLayer` impl exposing skills as `/var/skills/<name>.md`
+  - `CatalogSkillFs` — `FsLayer` impl exposing skills as `/skills/<name>/SKILL.md`
   - `ResolvedAgent` snapshot type used by `SimulacraEngine`
 - New crate `simulacra-graphql`:
   - `async-graphql` schema (queries + mutations; no subscriptions in v1)
@@ -43,7 +43,7 @@ This is the foundational spec for the broader "web-managed agent platform" effor
   - Default mode: open catalog DB, run migrations, perform one-shot TOML→DB import for the default tenant (idempotent via `seeds_applied` table); resolve agents through the catalog (uniform with server-mode)
   - `--no-catalog` flag: skip catalog entirely; populate `MemoryAgentRepository`/`MemorySkillRepository`/`MemoryMemoryPoolRepository` from `SimulacraConfig` and run with no DB. Filesystem skills (S033 host mounts) still work; DB-only features (GraphQL, multi-tenant, persistence) are unavailable.
 - Per-task VFS composition:
-  - `CatalogSkillFs` mounted at `/var/skills/` alongside any existing host-mounted skills (S033). DB-authored skills shadow filesystem skills with the same name.
+  - `CatalogSkillFs` produces canonical `/skills/<name>/SKILL.md` documents for S017 discovery. Server tasks also preserve `/var/skills/<name>.md` as a compatibility/debug path.
 
 **Out of scope (deferred to later specs):**
 
@@ -159,7 +159,9 @@ ID strategy: ULID (sortable, K-orderable). Stored as 26-char text. Crate depende
 
 JSON columns stored as `TEXT` and parsed at the repository boundary with `serde_json`. SQLite's `JSON1` extension is not used.
 
-The `skills.metadata` column stores parsed frontmatter as a JSON object. When `CatalogSkillFs::read` serves a skill, it reconstructs YAML frontmatter from `metadata` (delimited by `---` markers) and prepends it to `body`, producing the same on-disk shape that S017's skill discovery already understands.
+The `skills.metadata` column stores parsed frontmatter as a JSON object. When `CatalogSkillFs::read` serves a skill, it reconstructs YAML frontmatter from `metadata` plus row fields (`name`, and `description` when present), delimits it with `---` markers, and prepends it to `body`, producing the same on-disk shape that S017's skill discovery already understands.
+
+Skill names used as catalog VFS paths must be valid single path segments: non-empty, not `.` or `..`, and containing no `/`, `\`, or NUL bytes. `CatalogSkillFs` does not expose invalid names, and `SimulacraEngine` rejects a resolved agent containing one before mounting skills.
 
 PRAGMAs at connection open: `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`.
 
@@ -229,7 +231,7 @@ pub struct CatalogSkillFs {
 impl FsLayer for CatalogSkillFs { /* list_dir, read, stat; write/remove → Errno::ROFS */ }
 ```
 
-Constructed from the `ResolvedAgent.skills` snapshot. Mounted at `/var/skills/` per task. When composed with the existing host-mount skills layer, DB-authored skills shadow filesystem skills with the same `<name>.md`.
+Constructed from the `ResolvedAgent.skills` snapshot. It exposes a read-only tree rooted at `/` where `list_dir("/")` returns skill directory names, each skill directory contains `SKILL.md`, and reads of `/<name>/SKILL.md` return S017-compatible skill documents. `SimulacraEngine` snapshots those rendered documents into each task's VFS at `/skills/<name>/SKILL.md` and `/var/skills/<name>.md`, then guards both namespaces as read-only in the composed/runtime VFS.
 
 ### `simulacra-graphql` crate
 
@@ -365,7 +367,7 @@ pub struct SimulacraEngine {
 1. Resolve `tenant_namespace → tenant_id` via `TenantRepository`.
 2. Pick agent name (from `agent_type_override` or task-default).
 3. `agents.resolve(tenant_id, agent_name)` → `ResolvedAgent` snapshot.
-4. Compose per-task VFS: `MemoryFs + host_mounts + ServiceFs + ProcFs + CatalogSkillFs(snapshot.skills)`.
+4. Compose per-task VFS: `MemoryFs + host_mounts + ServiceFs + ProcFs`, with catalog skill snapshots seeded into `/skills/<name>/SKILL.md` and `/var/skills/<name>.md` before wrapping.
 5. Construct `AgentCell`, `ToolRegistry`, `HookPipeline`, `ResourceBudget`, `Journal` as today (S034) — but using `snapshot.system_prompt`, `snapshot.model`, etc.
 6. Apply `snapshot.capabilities` to the capability checker.
 7. If `snapshot.memory_pool` is `Some`, route the `SqliteMemoryStore` to the pool's configured store path.
@@ -377,7 +379,7 @@ New `EngineError::AgentNotFound { tenant: String, agent: String }` replaces the 
 
 The CLI runs in two modes selected at bootstrap:
 
-**Default (catalog-backed).** Opens SQLite at `[catalog].db_path`, runs migrations, performs one-shot TOML import. Constructs `SimulacraEngine` with `SqliteAgentRepository` and friends. Per-task VFS includes `CatalogSkillFs`. This is the path that mirrors server-mode and is what the GraphQL/web UI consume against.
+**Default (catalog-backed).** Opens SQLite at `[catalog].db_path`, runs migrations, performs one-shot TOML import. Constructs `SimulacraEngine` with `SqliteAgentRepository` and friends. Per-task VFS includes rendered catalog skill snapshots. This is the path that mirrors server-mode and is what the GraphQL/web UI consume against.
 
 **`--no-catalog` (TOML-driven, ephemeral).** Skips catalog entirely. Constructs `MemoryAgentRepository` (and skill/memory-pool equivalents) populated from `SimulacraConfig.agent_types`, `SimulacraConfig.memory`, and any inline skill config. `SimulacraEngine` is constructed with these in-memory repositories. Per-task VFS does *not* include `CatalogSkillFs` — only filesystem-mounted skills (S033) are visible. GraphQL is not mounted. No SQLite file is touched.
 
@@ -446,10 +448,12 @@ simulacra-graphql ──→ simulacra-catalog ──→ simulacra-vfs
 - Snapshot is fully owned (no live DB references) — safe to hold for the lifetime of a task.
 
 ### `CatalogSkillFs`
-- `list_dir("/")` returns `<name>.md` for every skill in the snapshot.
-- `read("<name>.md")` returns the skill body (frontmatter prepended if `metadata` is present).
+- `list_dir("/")` returns `<name>` for every skill in the snapshot.
+- `list_dir("/<name>")` returns `SKILL.md`.
+- `read("/<name>/SKILL.md")` returns the skill body with S017-compatible frontmatter prepended.
+- Invalid path-segment names are not exposed as VFS entries.
 - `write` and `remove` return `Errno::ROFS`.
-- When composed with a host-mounted `/var/skills/` layer, DB skills shadow filesystem skills with matching names.
+- Server task spawn snapshots rendered catalog skills into `/skills/<name>/SKILL.md` and the compatibility `/var/skills/<name>.md` path.
 
 ### GraphQL queries
 - All queries require an authenticated principal; unauthenticated requests get a `401` from the auth middleware (before reaching async-graphql).
@@ -465,7 +469,7 @@ simulacra-graphql ──→ simulacra-catalog ──→ simulacra-vfs
 ### `SimulacraEngine` integration
 - `spawn_task(agent_name)` resolves the agent through the catalog, not `SimulacraConfig.agent_types`.
 - Agent unknown to catalog returns `EngineError::AgentNotFound`; no panic.
-- Per-task VFS includes `CatalogSkillFs` mounted at `/var/skills/`.
+- Per-task VFS includes read-only catalog skill snapshots at `/skills/<name>/SKILL.md` and `/var/skills/<name>.md`.
 - Catalog mutations during a task in flight do not affect that task (snapshot semantics).
 
 ### TOML import
@@ -510,11 +514,13 @@ simulacra-graphql ──→ simulacra-catalog ──→ simulacra-vfs
 - [x] Cross-tenant resolve attempt returns `NotFound`.
 
 ### `CatalogSkillFs`
-- [x] `list_dir("/")` returns one entry per skill in snapshot, named `<name>.md`.
-- [x] `read("<name>.md")` returns body bytes (frontmatter prepended if metadata present).
+- [x] `list_dir("/")` returns one directory entry per skill in snapshot, named `<name>`.
+- [x] `list_dir("/<name>")` returns `SKILL.md`.
+- [x] `read("/<name>/SKILL.md")` returns body bytes with S017-compatible frontmatter prepended.
+- [x] Invalid path-segment names are not exposed.
 - [x] `write` returns `Errno::ROFS`.
 - [x] `remove` returns `Errno::ROFS`.
-- [x] When composed with a host-mounted layer, DB skill shadows host skill with the same exact `<name>.md` filename.
+- [x] When overlaid with a host-mounted layer, DB skill shadows host skill with the same exact `<name>/SKILL.md` path.
 - [x] Read of unknown name returns `Errno::NOENT`.
 
 ### GraphQL — auth + tenant scoping
@@ -545,7 +551,7 @@ simulacra-graphql ──→ simulacra-catalog ──→ simulacra-vfs
 ### `SimulacraEngine` integration
 - [x] `spawn_task` resolves agent from catalog, not from `SimulacraConfig.agent_types`.
 - [x] Agent unknown to catalog returns `EngineError::AgentNotFound` (no panic).
-- [x] Per-task VFS exposes catalog skills at `/var/skills/<name>.md`.
+- [x] Per-task VFS exposes read-only catalog skills at `/skills/<name>/SKILL.md` and compatibility `/var/skills/<name>.md`.
 - [x] Capabilities from catalog feed the per-task capability checker.
 - [x] Memory pool config from catalog routes the task's memory store.
 - [x] Catalog mutations during a running task do not affect that task.
@@ -570,7 +576,7 @@ simulacra-graphql ──→ simulacra-catalog ──→ simulacra-vfs
 - [x] `createAgent` mutation against running `simulacra-server` creates row.
 - [x] Subsequent task creation via S031's API resolves the catalog-defined agent.
 - [x] Agent runs to completion against a recording HTTP fixture. *(closed by S043 — `simulacra-server/tests/provider_injection.rs::graphql_created_agent_runs_to_completion_under_a_scripted_provider`. The "fixture" is a stub `Provider` impl rather than HTTP-level; same coverage at the engine+agent-loop seam.)*
-- [x] Skills authored via `createSkill` appear at `/var/skills/<name>.md` in the running task.
+- [x] Skills authored via `createSkill` appear at `/skills/<name>/SKILL.md` and `/var/skills/<name>.md` in the running task.
 
 ## Observability (see S010)
 

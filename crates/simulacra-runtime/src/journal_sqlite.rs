@@ -12,6 +12,18 @@ use simulacra_types::{
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+const JOURNAL_SCHEMA_SQL: &str = "PRAGMA journal_mode = WAL;
+     PRAGMA synchronous = NORMAL;
+     CREATE TABLE IF NOT EXISTS journal_entries (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         agent_id TEXT NOT NULL,
+         schema_version INTEGER NOT NULL,
+         timestamp_ms INTEGER NOT NULL,
+         entry_json TEXT NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS idx_journal_agent_id
+         ON journal_entries (agent_id);";
+
 /// SQLite-backed journal storage.
 ///
 /// Each entry is stored as a row with the agent_id indexed for fast
@@ -25,22 +37,8 @@ impl SqliteJournalStorage {
     /// Create a new SQLite-backed journal at the given path.
     /// Creates the database and table if they don't exist.
     pub fn new(path: PathBuf) -> Result<Self, JournalError> {
-        let conn = Connection::open(&path).map_err(|e| JournalError::Storage(e.to_string()))?;
-
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             CREATE TABLE IF NOT EXISTS journal_entries (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 agent_id TEXT NOT NULL,
-                 schema_version INTEGER NOT NULL,
-                 timestamp_ms INTEGER NOT NULL,
-                 entry_json TEXT NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_journal_agent_id
-                 ON journal_entries (agent_id);",
-        )
-        .map_err(|e| JournalError::Storage(e.to_string()))?;
+        let conn = crate::sqlite_util::open_sqlite(&path, JOURNAL_SCHEMA_SQL)
+            .map_err(JournalError::Storage)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -49,10 +47,7 @@ impl SqliteJournalStorage {
 
     /// Create an in-memory SQLite journal (useful for testing).
     pub fn in_memory() -> Result<Self, JournalError> {
-        let conn =
-            Connection::open_in_memory().map_err(|e| JournalError::Storage(e.to_string()))?;
-
-        conn.execute_batch(
+        let conn = crate::sqlite_util::open_in_memory_sqlite(
             "CREATE TABLE IF NOT EXISTS journal_entries (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  agent_id TEXT NOT NULL,
@@ -63,7 +58,7 @@ impl SqliteJournalStorage {
              CREATE INDEX IF NOT EXISTS idx_journal_agent_id
                  ON journal_entries (agent_id);",
         )
-        .map_err(|e| JournalError::Storage(e.to_string()))?;
+        .map_err(JournalError::Storage)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -76,10 +71,7 @@ impl JournalStorage for SqliteJournalStorage {
         let entry_json = serde_json::to_string(&entry.entry)
             .map_err(|e| JournalError::Storage(e.to_string()))?;
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
+        let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(JournalError::Storage)?;
 
         conn.execute(
             "INSERT INTO journal_entries (agent_id, schema_version, timestamp_ms, entry_json)
@@ -97,10 +89,7 @@ impl JournalStorage for SqliteJournalStorage {
     }
 
     fn read_all(&self, agent_id: &AgentId) -> Result<Vec<JournalEntry>, JournalError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
+        let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(JournalError::Storage)?;
 
         let mut stmt = conn
             .prepare(
@@ -152,10 +141,7 @@ impl JournalStorage for SqliteJournalStorage {
     }
 
     fn query_token_usage(&self, agent_id: &AgentId) -> Result<TokenUsage, JournalError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
+        let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(JournalError::Storage)?;
 
         let mut stmt = conn
             .prepare(
@@ -192,10 +178,7 @@ impl JournalStorage for SqliteJournalStorage {
         after_entry: usize,
         data: CheckpointData,
     ) -> Result<(), JournalError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
+        let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(JournalError::Storage)?;
 
         // Validate after_entry is within bounds
         let agent_count: usize = conn

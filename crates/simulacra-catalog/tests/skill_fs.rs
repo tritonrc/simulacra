@@ -22,15 +22,47 @@ fn skill(name: &str, body: &str, metadata: Option<serde_json::Value>) -> Skill {
 }
 
 #[test]
-fn list_dir_root_returns_skill_filenames() {
+fn list_dir_root_returns_skill_directories() {
     let fs = CatalogSkillFs::new(vec![skill("alpha", "a", None), skill("beta", "b", None)]);
 
     let entries = fs.list_dir("/").unwrap();
     let entry_set: HashSet<String> = entries.into_iter().collect();
 
     assert_eq!(entry_set.len(), 2, "expected exactly two entries");
-    assert!(entry_set.contains("alpha.md"));
-    assert!(entry_set.contains("beta.md"));
+    assert!(entry_set.contains("alpha"));
+    assert!(entry_set.contains("beta"));
+}
+
+#[test]
+fn list_dir_skill_directory_returns_skill_md() {
+    let fs = CatalogSkillFs::new(vec![skill("alpha", "a", None)]);
+
+    assert_eq!(fs.list_dir("/alpha").unwrap(), vec!["SKILL.md"]);
+    assert_eq!(fs.list_dir("/alpha/").unwrap(), vec!["SKILL.md"]);
+}
+
+#[test]
+fn invalid_path_segment_skill_names_are_not_exposed() {
+    let fs = CatalogSkillFs::new(vec![
+        skill("alpha", "a", None),
+        skill("bad/name", "b", None),
+        skill(".", "dot", None),
+        skill("..", "dotdot", None),
+    ]);
+
+    assert_eq!(fs.list_dir("/").unwrap(), vec!["alpha"]);
+    assert!(matches!(
+        fs.read("/bad/name/SKILL.md").unwrap_err(),
+        VfsError::NotFound(_)
+    ));
+    assert!(matches!(
+        fs.read("/./SKILL.md").unwrap_err(),
+        VfsError::NotFound(_)
+    ));
+    assert!(matches!(
+        fs.read("/../SKILL.md").unwrap_err(),
+        VfsError::NotFound(_)
+    ));
 }
 
 #[test]
@@ -38,7 +70,7 @@ fn read_returns_body_with_frontmatter_when_metadata_present() {
     let metadata = json!({"name": "alpha", "description": "d", "version": 2});
     let fs = CatalogSkillFs::new(vec![skill("alpha", "Hello body.", Some(metadata.clone()))]);
 
-    let bytes = fs.read("/alpha.md").unwrap();
+    let bytes = fs.read("/alpha/SKILL.md").unwrap();
     let rendered = String::from_utf8(bytes).unwrap();
 
     // Structural assertion — split on the YAML delimiter.
@@ -113,19 +145,23 @@ fn read_returns_body_with_frontmatter_when_metadata_present() {
 }
 
 #[test]
-fn read_returns_body_only_when_metadata_absent() {
+fn read_returns_frontmatter_from_row_fields_when_metadata_absent() {
     let fs = CatalogSkillFs::new(vec![skill("alpha", "Hello body.", None)]);
 
-    let bytes = fs.read("/alpha.md").unwrap();
+    let bytes = fs.read("/alpha/SKILL.md").unwrap();
+    let rendered = String::from_utf8(bytes).unwrap();
 
-    assert_eq!(String::from_utf8(bytes).unwrap(), "Hello body.");
+    assert!(rendered.starts_with("---\n"));
+    assert!(rendered.contains("name: alpha"));
+    assert!(rendered.contains("description: alpha"));
+    assert!(rendered.ends_with("Hello body."));
 }
 
 #[test]
 fn read_missing_returns_noent() {
     let fs = CatalogSkillFs::new(vec![]);
 
-    let err = fs.read("/missing.md").unwrap_err();
+    let err = fs.read("/missing/SKILL.md").unwrap_err();
 
     assert!(matches!(err, VfsError::NotFound(_)));
 }
@@ -134,7 +170,7 @@ fn read_missing_returns_noent() {
 fn write_returns_readonly_error() {
     let fs = CatalogSkillFs::new(vec![skill("alpha", "body", None)]);
 
-    let err = fs.write("/alpha.md", b"new body").unwrap_err();
+    let err = fs.write("/alpha/SKILL.md", b"new body").unwrap_err();
 
     assert!(matches!(err, VfsError::PermissionDenied(_)));
 }
@@ -143,7 +179,7 @@ fn write_returns_readonly_error() {
 fn remove_returns_readonly_error() {
     let fs = CatalogSkillFs::new(vec![skill("alpha", "body", None)]);
 
-    let err = fs.remove("/alpha.md").unwrap_err();
+    let err = fs.remove("/alpha/SKILL.md").unwrap_err();
 
     assert!(matches!(err, VfsError::PermissionDenied(_)));
 }
@@ -151,12 +187,31 @@ fn remove_returns_readonly_error() {
 #[test]
 fn shadows_host_skill_with_same_name() {
     let host = MemoryFs::new();
-    host.write("/alpha.md", b"host body").unwrap();
+    host.mkdir("/alpha").unwrap();
+    host.write("/alpha/SKILL.md", b"host body").unwrap();
 
     let catalog = CatalogSkillFs::new(vec![skill("alpha", "catalog body", None)]);
     let overlay = OverlayFs::new(Box::new(host), Box::new(catalog));
 
-    let bytes = overlay.read("/alpha.md").unwrap();
+    let bytes = overlay.read("/alpha/SKILL.md").unwrap();
 
-    assert_eq!(String::from_utf8(bytes).unwrap(), "catalog body");
+    assert!(String::from_utf8(bytes).unwrap().contains("catalog body"));
+}
+
+#[test]
+fn metadata_reports_root_skill_dir_and_skill_file_shapes() {
+    let fs = CatalogSkillFs::new(vec![skill("alpha", "body", None)]);
+
+    let root = fs.metadata("/").unwrap();
+    assert!(root.is_dir);
+    assert!(!root.is_file);
+
+    let dir = fs.metadata("/alpha").unwrap();
+    assert!(dir.is_dir);
+    assert!(!dir.is_file);
+
+    let file = fs.metadata("/alpha/SKILL.md").unwrap();
+    assert!(file.is_file);
+    assert!(!file.is_dir);
+    assert!(file.size > 0);
 }

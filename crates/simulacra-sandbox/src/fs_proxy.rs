@@ -15,8 +15,9 @@ use simulacra_types::{
 };
 use std::sync::{Arc, Mutex};
 
+use crate::file_io::{read_file_inner, write_file_inner};
 use crate::guards::{check_and_journal_capability, release_vfs_bytes, reserve_vfs_bytes};
-use crate::{cap_name_for_read, cap_name_for_write, read_file_inner, write_file_inner};
+use crate::{cap_name_for_read, cap_name_for_write};
 
 pub(crate) struct AgentCellFsProxy {
     pub(crate) vfs: Arc<dyn VirtualFs>,

@@ -17,6 +17,7 @@ mod session_file;
 mod session_sqlite;
 #[cfg(feature = "spawn")]
 mod spawn_tool;
+mod sqlite_util;
 mod supervisor;
 #[cfg(test)]
 mod tests;
@@ -28,8 +29,9 @@ pub use activity_sink::{
     ActivitySink, ChannelActivitySink, ForwardingActivitySink, NoopActivitySink,
 };
 pub use agent_loop::{
-    ActiveTurn, AgentLoop, AgentLoopConfig, AgentLoopOutput, StepContext, TurnContext, TurnResult,
-    TurnState,
+    ActiveTurn, AgentHitlRuntime, AgentHitlSenders, AgentLoop, AgentLoopConfig, AgentLoopOutput,
+    REQUEST_INPUT_TOOL_NAME, RequestInputTool, StepContext, ToolApprovalResponse, TurnContext,
+    TurnResult, TurnState,
 };
 pub use error::RuntimeError;
 pub use guardrail::{GuardrailDecision, InputGuardrail, OutputGuardrail};

@@ -19,17 +19,21 @@ use simulacra_context::ObservationMaskingStrategy;
 use simulacra_memory::{Embedder, HitIdCache, MemoryStore, VectorIndex};
 use simulacra_provider::{AnthropicProvider, OpenAiProvider};
 use simulacra_runtime::{
-    ActivitySink, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, AgentTaskFactory,
-    CountingJournalStorage, InMemoryJournalStorage, SpawnAgentTool,
+    ActivitySink, AgentHitlRuntime, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor,
+    AgentTaskFactory, CountingJournalStorage, InMemoryJournalStorage, RequestInputTool,
+    SpawnAgentTool,
 };
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
-use simulacra_tool::{MemoryToolHandles, ToolRegistry, register_memory_tools};
+use simulacra_tool::{
+    MemoryToolHandles, SkillTool, ToolRegistry, discover_and_filter_skills, register_memory_tools,
+};
 use simulacra_types::VirtualFs;
 use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ResourceBudget, ToolDefinition};
 use simulacra_vfs::{
     HookLister, IntegrationLister, MailboxFs, MemoryFs, MemoryStoreFs, ProcFs, ProcState,
     ReadOnlyPathGuard, ServiceFs, ToolLister,
 };
+use simulacra_workflow::{WorkflowRuntime, WorkflowTool};
 use thiserror::Error;
 use tracing::info;
 
@@ -209,6 +213,19 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "tool_name": name,
             "arguments": arguments,
         }),
+        ActivityEvent::ToolApprovalRequired {
+            tool_call_id,
+            name,
+            arguments,
+            reason,
+        } => json!({
+            "event": "tool.approval_required",
+            "task_id": task_id,
+            "tool_call_id": tool_call_id,
+            "tool_name": name,
+            "arguments": arguments,
+            "reason": reason,
+        }),
         ActivityEvent::ToolCallDelta {
             index,
             tool_call_id,
@@ -227,6 +244,12 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "task_id": task_id,
             "tool_call_id": tool_call_id,
             "line": line,
+        }),
+        ActivityEvent::InputRequired { prompt, schema } => json!({
+            "event": "input.required",
+            "task_id": task_id,
+            "prompt": prompt,
+            "schema": schema,
         }),
         ActivityEvent::ToolFinish {
             tool_call_id,
@@ -266,6 +289,86 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "agent_type": agent_type,
             "exit_reason": exit_reason,
             "duration_ms": duration_ms,
+        }),
+        ActivityEvent::WorkflowStarted {
+            run_id,
+            script_path,
+            name,
+        } => json!({
+            "event": "workflow.started",
+            "task_id": task_id,
+            "run_id": run_id,
+            "script_path": script_path,
+            "name": name,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowProgress { run_id, message } => json!({
+            "event": "workflow.progress",
+            "task_id": task_id,
+            "run_id": run_id,
+            "message": message,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowPhaseStarted { run_id, name } => json!({
+            "event": "workflow.phase_start",
+            "task_id": task_id,
+            "run_id": run_id,
+            "phase": name,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowPhaseCompleted { run_id, name } => json!({
+            "event": "workflow.phase_finish",
+            "task_id": task_id,
+            "run_id": run_id,
+            "phase": name,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowAgentStarted {
+            run_id,
+            key,
+            agent,
+            task,
+        } => json!({
+            "event": "workflow.agent_start",
+            "task_id": task_id,
+            "run_id": run_id,
+            "agent_label": key,
+            "agent_type": agent,
+            "child_task": task,
+            "status": "running",
+        }),
+        ActivityEvent::WorkflowAgentCompleted {
+            run_id,
+            key,
+            cached,
+            is_error,
+        } => json!({
+            "event": "workflow.agent_finish",
+            "task_id": task_id,
+            "run_id": run_id,
+            "agent_label": key,
+            "cached": cached,
+            "is_error": is_error,
+            "status": if *is_error { "failed" } else { "running" },
+        }),
+        ActivityEvent::WorkflowCompleted { run_id } => json!({
+            "event": "workflow.completed",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": "completed",
+        }),
+        ActivityEvent::WorkflowFailed { run_id, error } => json!({
+            "event": "workflow.failed",
+            "task_id": task_id,
+            "run_id": run_id,
+            "error": error,
+            "status": "failed",
+        }),
+        ActivityEvent::WorkflowCancelled { run_id } => json!({
+            "event": "workflow.cancelled",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": "cancelled",
         }),
         ActivityEvent::TurnComplete => json!({
             "event": "agent.turn_complete",
@@ -324,6 +427,8 @@ pub struct EngineActivitySink {
     sender: crate::task::TaskEventChannel,
     /// Monotonic sequence counter for this task's events.
     seq: AtomicU64,
+    /// Optional task manager used to transition HITL activity into waiting states.
+    task_manager: Option<TaskManager>,
 }
 
 impl EngineActivitySink {
@@ -333,12 +438,52 @@ impl EngineActivitySink {
             task_id,
             sender,
             seq: AtomicU64::new(0),
+            task_manager: None,
+        }
+    }
+
+    /// Create a sink that also mirrors HITL events into TaskManager state.
+    pub fn with_task_manager(
+        task_id: String,
+        sender: crate::task::TaskEventChannel,
+        task_manager: TaskManager,
+    ) -> Self {
+        Self {
+            task_id,
+            sender,
+            seq: AtomicU64::new(0),
+            task_manager: Some(task_manager),
+        }
+    }
+
+    fn transition_for_hitl_event(&self, event: &ActivityEvent) {
+        let Some(task_manager) = &self.task_manager else {
+            return;
+        };
+        let result = match event {
+            ActivityEvent::InputRequired { .. } => task_manager.request_input(&self.task_id),
+            ActivityEvent::ToolApprovalRequired { tool_call_id, .. } => {
+                task_manager.request_approval_for(&self.task_id, Some(tool_call_id.clone()))
+            }
+            _ => return,
+        };
+        if let Err(err) = result {
+            tracing::warn!(
+                task_id = %self.task_id,
+                error = %err,
+                "failed to transition task for HITL activity event"
+            );
         }
     }
 }
 
 impl simulacra_runtime::ActivitySink for EngineActivitySink {
     fn emit(&self, event: ActivityEvent) {
+        // Move HITL tasks into their waiting state before broadcasting the
+        // actionable event. Otherwise a fast client can receive the event and
+        // send input/approval before TaskManager accepts the response.
+        self.transition_for_hitl_event(&event);
+
         let events = flatten_activity_event(&self.task_id, &event);
         for mut server_event in events {
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
@@ -508,6 +653,9 @@ pub struct SimulacraEngine {
     /// outlive a transient store misconfig, and the agent shouldn't be
     /// blocked from running on data it can fetch via REST.
     agent_file_store: Option<Arc<dyn simulacra_catalog::AgentFileStore>>,
+    /// Optional workflow runtime. When present, agents with the `workflow`
+    /// capability receive the model-visible `Workflow` tool.
+    workflow_runtime: Option<Arc<WorkflowRuntime>>,
 }
 
 /// S043 — Test-only provider factory closure. The factory receives the
@@ -617,6 +765,7 @@ impl SimulacraEngine {
             hook_pipeline: Arc::new(simulacra_hooks::HookPipeline::new()),
             provider_factory: None,
             agent_file_store: None,
+            workflow_runtime: None,
         })
     }
 
@@ -656,6 +805,7 @@ impl SimulacraEngine {
             hook_pipeline: Arc::new(simulacra_hooks::HookPipeline::new()),
             provider_factory: None,
             agent_file_store: None,
+            workflow_runtime: None,
         })
     }
 
@@ -703,6 +853,12 @@ impl SimulacraEngine {
         store: Arc<dyn simulacra_catalog::AgentFileStore>,
     ) -> Self {
         self.agent_file_store = Some(store);
+        self
+    }
+
+    /// Wire a workflow runtime for agents granted the `workflow` capability.
+    pub fn with_workflow_runtime(mut self, runtime: Arc<WorkflowRuntime>) -> Self {
+        self.workflow_runtime = Some(runtime);
         self
     }
 
@@ -809,6 +965,11 @@ impl SimulacraEngine {
         self.embedder.as_ref()
     }
 
+    /// Return the workflow runtime if configured.
+    pub fn workflow_runtime(&self) -> Option<&Arc<WorkflowRuntime>> {
+        self.workflow_runtime.as_ref()
+    }
+
     /// Returns a reference to the worker pool.
     pub fn pool(&self) -> &Arc<AgentWorkerPool> {
         &self.pool
@@ -848,8 +1009,8 @@ impl SimulacraEngine {
         snapshots.get(task_id).map(|s| s.resolved.clone())
     }
 
-    /// Return the per-task composed VFS stack (with catalog skills mounted at
-    /// `/var/skills/`).
+    /// Return the per-task composed VFS stack with catalog skills snapshotted
+    /// at `/skills/<name>/SKILL.md` and `/var/skills/<name>.md`.
     pub fn debug_composed_vfs(&self, task_id: &str) -> Option<Arc<dyn VirtualFs>> {
         let snapshots = self.resolved_snapshots.lock().ok()?;
         snapshots.get(task_id).map(|s| Arc::clone(&s.composed_vfs))
@@ -884,6 +1045,15 @@ impl SimulacraEngine {
         let agent_type_name = agent_type_override
             .map(str::to_owned)
             .unwrap_or_else(|| tenant.agent_type.clone());
+        let enable_human_input = metadata
+            .get("enable_human_input")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let require_tool_approval = metadata
+            .get("require_tool_approval")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let hitl_enabled = enable_human_input || require_tool_approval;
 
         // Resolve tenant from catalog.
         let tenant_row = self
@@ -967,10 +1137,22 @@ impl SimulacraEngine {
             return Err(e);
         }
 
-        let sink = Arc::new(EngineActivitySink::new(task_id.clone(), sender));
+        let sink = Arc::new(EngineActivitySink::with_task_manager(
+            task_id.clone(),
+            sender,
+            task_manager.clone(),
+        ));
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let _ = task_manager.set_cancellation_token(&task_id, cancel_token.clone());
+
+        let hitl_runtime = if hitl_enabled {
+            let (senders, runtime) = AgentHitlRuntime::channel_pair(require_tool_approval);
+            task_manager.set_hitl_senders(&task_id, senders.input_tx, senders.approval_tx)?;
+            Some(runtime)
+        } else {
+            None
+        };
 
         let system_prompt = resolved.system_prompt.clone();
 
@@ -1086,20 +1268,26 @@ impl SimulacraEngine {
             }
         }
 
-        // Mount catalog skills at /var/skills/<name>.md, shadowing any host
-        // mount at the same path. Bodies are pre-rendered via CatalogSkillFs
-        // so YAML frontmatter handling stays consistent with the read-only
-        // fs view used elsewhere.
+        // Mount catalog skills at canonical /skills/<name>/SKILL.md paths for
+        // S017 discovery, and preserve /var/skills/<name>.md as a compatibility
+        // debug path. Bodies are pre-rendered via CatalogSkillFs so YAML
+        // frontmatter handling stays consistent with the read-only fs view.
+        let _ = memory_fs.mkdir("/skills");
         let _ = memory_fs.mkdir("/var");
         let _ = memory_fs.mkdir("/var/skills");
         let skill_fs = CatalogSkillFs::new(resolved.skills.clone());
         for skill in &resolved.skills {
-            let rendered_path = format!("/{}.md", skill.name);
+            validate_catalog_skill_name_for_vfs(&skill.name)?;
+            let rendered_path = format!("/{}/SKILL.md", skill.name);
             let body = skill_fs.read(&rendered_path).map_err(|e| {
                 EngineError::VfsError(format!(
                     "failed to render catalog skill '{}': {e}",
                     skill.name
                 ))
+            })?;
+            let canonical_path = format!("/skills/{}/SKILL.md", skill.name);
+            memory_fs.write(&canonical_path, &body).map_err(|e| {
+                EngineError::VfsError(format!("failed to mount catalog skill: {e}"))
             })?;
             let mount_path = format!("/var/skills/{}.md", skill.name);
             memory_fs.write(&mount_path, &body).map_err(|e| {
@@ -1151,15 +1339,12 @@ impl SimulacraEngine {
         // later inspection. Catalog mutations after this point cannot reach
         // the running task (S042 assertion 6).
         //
-        // S045 — wrap the composed view in a `ReadOnlyPathGuard` for
-        // `/var/agent_files/`. The mount holds a snapshot copy in memory_fs
-        // (writable) but the spec assertion is that write/mkdir/remove
-        // there return ROFS at the composed-VFS level. The guard adds that
-        // enforcement without changing how memory_fs handles other paths.
-        let composed_vfs: Arc<dyn VirtualFs> = Arc::new(ReadOnlyPathGuard::new(
-            Arc::clone(&memory_fs) as Arc<dyn VirtualFs>,
-            "/var/agent_files",
-        ));
+        // S042/S045 — these mounts hold snapshot copies in memory_fs (writable),
+        // but the composed/runtime VFS must reject write/mkdir/remove attempts
+        // under their read-only namespaces.
+        let runtime_root_vfs =
+            read_only_spawn_snapshot_paths(Arc::clone(&memory_fs) as Arc<dyn VirtualFs>);
+        let composed_vfs = Arc::clone(&runtime_root_vfs);
         {
             let mut snapshots = self.resolved_snapshots.lock().unwrap();
             snapshots.insert(
@@ -1187,10 +1372,25 @@ impl SimulacraEngine {
         let embedder_opt = self.embedder.as_ref().map(Arc::clone);
         let hit_cache = Arc::clone(&self.hit_cache);
         let hook_pipeline = Arc::clone(&self.hook_pipeline);
+        let hitl_runtime_for_worker = hitl_runtime.clone();
+        let agent_skill_names: Vec<String> = resolved
+            .skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
         // S043 — clone the optional provider factory into the worker closure.
         // `None` in production; `Some(...)` only when a test installed an
         // override via `with_provider_factory`.
         let provider_factory_for_worker = self.provider_factory.clone();
+        let workflow_runtime_for_worker = if resolved
+            .capabilities
+            .iter()
+            .any(|capability| matches!(capability.as_str(), "workflow" | "workflow:run"))
+        {
+            self.workflow_runtime.as_ref().map(Arc::clone)
+        } else {
+            None
+        };
 
         self.pool.submit(Box::new(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
@@ -1220,8 +1420,7 @@ impl SimulacraEngine {
                 // handles. When disabled, memory paths fall through to the
                 // inner VFS (MemoryFs) and return NotFound — enforcing the
                 // opt-in model per S037 §14.
-                let inner_vfs: Arc<dyn simulacra_types::VirtualFs> =
-                    memory_fs as Arc<dyn simulacra_types::VirtualFs>;
+                let inner_vfs: Arc<dyn simulacra_types::VirtualFs> = runtime_root_vfs;
 
                 // 1b. Wrap with MailboxFs (persists /proc/mailbox/** to artifact store).
                 //
@@ -1362,6 +1561,23 @@ impl SimulacraEngine {
                 simulacra_tool::register_builtins(&mut registry, Arc::clone(&cell))
                     .map_err(|e| format!("failed to register built-in tools: {e}"))?;
 
+                if enable_human_input
+                    && let Some(hitl_runtime) = hitl_runtime_for_worker.as_ref()
+                {
+                    registry
+                        .register(Box::new(RequestInputTool::new(
+                            hitl_runtime.clone(),
+                            Arc::clone(&sink) as Arc<dyn ActivitySink>,
+                        )))
+                        .map_err(|e| format!("failed to register request_input tool: {e}"))?;
+                }
+
+                if let Some(workflow_runtime) = workflow_runtime_for_worker.as_ref() {
+                    registry
+                        .register(Box::new(WorkflowTool::new(Arc::clone(workflow_runtime))))
+                        .map_err(|e| format!("failed to register Workflow tool: {e}"))?;
+                }
+
                 // 7a. Register py_exec when the `python` Cargo feature is
                 // compiled in. Capability gating (`capability_token.python`)
                 // happens inside the tool's `call` path, so we register
@@ -1406,6 +1622,22 @@ impl SimulacraEngine {
                         },
                     )
                     .map_err(|e| format!("failed to register memory tools: {e}"))?;
+                }
+
+                let skill_catalog = discover_and_filter_skills(
+                    &vfs,
+                    &agent_skill_names,
+                    &capability_token,
+                    &agent_type_name_owned,
+                )
+                .map_err(|e| format!("failed to discover catalog skills: {e}"))?;
+                if skill_catalog
+                    .iter()
+                    .any(|skill| !skill.disable_model_invocation && skill.allow_implicit_invocation)
+                {
+                    registry
+                        .register(Box::new(SkillTool::new(Arc::clone(&cell), skill_catalog)))
+                        .map_err(|e| format!("failed to register Skill tool: {e}"))?;
                 }
 
                 if let Some(ref mcp_config) = config_for_worker.mcp {
@@ -1598,6 +1830,9 @@ impl SimulacraEngine {
                     None, // no hook pipeline for now
                 );
                 agent_loop.set_proc_budget_mirror(Arc::clone(&budget_arc), Arc::clone(&proc_turn));
+                if let Some(hitl_runtime) = hitl_runtime_for_worker {
+                    agent_loop.set_hitl_runtime(hitl_runtime);
+                }
 
                 // 11. Run the agent with cancellation support
                 let result = tokio::select! {
@@ -1724,6 +1959,24 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
         spawn_types,
         skill_patterns,
         memory: simulacra_types::MemoryCapability::default(),
+    }
+}
+
+fn read_only_spawn_snapshot_paths(vfs: Arc<dyn VirtualFs>) -> Arc<dyn VirtualFs> {
+    ["/skills", "/var/skills", "/var/agent_files"]
+        .into_iter()
+        .fold(vfs, |inner, prefix| {
+            Arc::new(ReadOnlyPathGuard::new(inner, prefix)) as Arc<dyn VirtualFs>
+        })
+}
+
+fn validate_catalog_skill_name_for_vfs(name: &str) -> Result<(), EngineError> {
+    if CatalogSkillFs::is_valid_skill_path_name(name) {
+        Ok(())
+    } else {
+        Err(EngineError::VfsError(format!(
+            "invalid catalog skill name for VFS path segment: {name:?}"
+        )))
     }
 }
 

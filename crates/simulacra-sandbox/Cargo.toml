@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 simulacra-http.workspace = true

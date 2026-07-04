@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
-use simulacra_sandbox::AgentCell;
+use simulacra_sandbox::{AgentCell, ScriptExecutor};
 use simulacra_tool::{ToolError, ToolRegistry, register_builtins};
 use simulacra_types::{
     AgentId, CapabilityToken, CheckpointData, JOURNAL_SCHEMA_VERSION, JournalEntry,
@@ -83,6 +83,7 @@ impl JournalStorage for FakeJournalStorage {
 
 struct Harness {
     registry: ToolRegistry,
+    _cell: Arc<AgentCell>,
     vfs: Arc<MemoryFs>,
     journal: Arc<FakeJournalStorage>,
 }
@@ -106,10 +107,41 @@ impl Harness {
         register_builtins(&mut registry, Arc::clone(&cell))
             .expect("built-in registration should succeed");
 
-        let _ = cell;
+        Self {
+            registry,
+            _cell: cell,
+            vfs,
+            journal,
+        }
+    }
+
+    fn with_script_executor(
+        capability: CapabilityToken,
+        budget: ResourceBudget,
+        executor: ScriptExecutor,
+    ) -> Self {
+        let vfs = Arc::new(MemoryFs::new());
+        let vfs_dyn: Arc<dyn VirtualFs> = vfs.clone();
+        let journal = Arc::new(FakeJournalStorage::default());
+        let journal_dyn: Arc<dyn JournalStorage> = journal.clone();
+        let http_client: Arc<dyn simulacra_http::HttpClient> =
+            Arc::new(simulacra_http::UreqHttpClient::default());
+        let mut raw_cell = AgentCell::new(
+            vfs_dyn,
+            capability,
+            Arc::new(Mutex::new(budget)),
+            journal_dyn,
+            http_client,
+        );
+        raw_cell.set_script_executor(executor);
+        let cell = Arc::new(raw_cell);
+        let mut registry = ToolRegistry::new();
+        register_builtins(&mut registry, Arc::clone(&cell))
+            .expect("built-in registration should succeed");
 
         Self {
             registry,
+            _cell: cell,
             vfs,
             journal,
         }

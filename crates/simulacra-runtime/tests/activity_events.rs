@@ -34,6 +34,12 @@ mod activity_event_type {
             name: "shell".into(),
             arguments: serde_json::json!({"cmd": "ls"}),
         };
+        let _tool_approval_required = ActivityEvent::ToolApprovalRequired {
+            tool_call_id: "tc-1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"cmd": "ls"}),
+            reason: Some("approval required".into()),
+        };
         let _tool_call_delta = ActivityEvent::ToolCallDelta {
             index: 0,
             tool_call_id: Some("tc-1".into()),
@@ -43,6 +49,10 @@ mod activity_event_type {
         let _tool_output = ActivityEvent::ToolOutput {
             tool_call_id: "tc-1".into(),
             line: "file.txt".into(),
+        };
+        let _input_required = ActivityEvent::InputRequired {
+            prompt: "Need detail".into(),
+            schema: Some(serde_json::json!({"type": "string"})),
         };
         let _tool_finish = ActivityEvent::ToolFinish {
             tool_call_id: "tc-1".into(),
@@ -126,6 +136,26 @@ mod activity_event_type {
         let restored: ActivityEvent = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&restored).unwrap();
         assert_eq!(json, json2);
+    }
+
+    #[test]
+    fn json_roundtrip_hitl_events() {
+        let approval = ActivityEvent::ToolApprovalRequired {
+            tool_call_id: "tc-42".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"cmd": "echo hi"}),
+            reason: Some("approval required".into()),
+        };
+        let input = ActivityEvent::InputRequired {
+            prompt: "Need detail".into(),
+            schema: Some(serde_json::json!({"type": "string"})),
+        };
+
+        for event in [approval, input] {
+            let json = serde_json::to_string(&event).unwrap();
+            let restored: ActivityEvent = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, restored);
+        }
     }
 
     /// JSON roundtrip for ToolFinish preserves is_error, duration, and exit_code.

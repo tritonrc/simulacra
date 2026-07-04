@@ -1,6 +1,7 @@
 //! Tests for task lifecycle state machine (S031 assertions).
 
 use serde_json::json;
+use simulacra_runtime::ToolApprovalResponse;
 use simulacra_server::{BudgetPoolConfig, TaskManager, TaskManagerError, TaskState, TenantConfig};
 use std::path::PathBuf;
 
@@ -72,13 +73,35 @@ fn task_resume_transitions_paused_task_back_to_running() {
     assert_eq!(state, TaskState::Running);
 }
 
+#[tokio::test]
+async fn input_response_sends_to_live_channel_and_transitions_to_running() {
+    let manager = TaskManager::new();
+    let handle = manager
+        .create_task(&tenant("csm"), "investigate ticket", None, json!({}), None)
+        .unwrap();
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+    let (approval_tx, _approval_rx) = tokio::sync::mpsc::channel(1);
+    manager
+        .set_hitl_senders(&handle.task_id, input_tx, approval_tx)
+        .unwrap();
+    manager.request_input(&handle.task_id).unwrap();
+
+    let state = manager
+        .provide_input(&handle.task_id, "please proceed")
+        .expect("input response should be accepted");
+    assert_eq!(state, TaskState::Running);
+    assert_eq!(
+        input_rx.recv().await.as_deref(),
+        Some("please proceed"),
+        "input response must reach the live agent channel"
+    );
+
+    let task = manager.get_task(&handle.task_id).unwrap();
+    assert_eq!(task.state, TaskState::Running);
+}
+
 #[test]
-fn input_response_returns_not_implemented_until_hitl_is_wired() {
-    // HITL (provide_input / respond_approval) requires engine-level pause
-    // and resume of the agent loop. Until that wiring lands, silently flipping
-    // the task state back to Running discards the input and leaves the task
-    // with no worker — a worse outcome than surfacing the gap. The contract
-    // for now: return `NotImplemented` when the task is genuinely waiting.
+fn input_response_without_live_channel_fails_explicitly() {
     let manager = TaskManager::new();
     let handle = manager
         .create_task(&tenant("csm"), "investigate ticket", None, json!({}), None)
@@ -89,60 +112,86 @@ fn input_response_returns_not_implemented_until_hitl_is_wired() {
     assert!(
         matches!(
             result,
-            Err(TaskManagerError::NotImplemented {
-                op: "provide_input"
+            Err(TaskManagerError::ResponseChannelUnavailable {
+                op: "provide_input",
+                ..
             })
         ),
-        "provide_input on WaitingInput must return NotImplemented, got {result:?}"
+        "provide_input on WaitingInput without a channel must fail explicitly, got {result:?}"
     );
-
-    // The task stays in WaitingInput — the input was not silently accepted.
-    let task = manager.get_task(&handle.task_id).unwrap();
-    assert_eq!(task.state, TaskState::WaitingInput);
 }
 
-#[test]
-fn approval_respond_with_approved_true_returns_not_implemented_until_hitl_is_wired() {
-    // Same reasoning as `provide_input`: surface the gap instead of silently
-    // flipping the task to Running with no worker to consume the approval.
+#[tokio::test]
+async fn approval_response_sends_to_live_channel_and_transitions_to_running() {
     let manager = TaskManager::new();
     let handle = manager
         .create_task(&tenant("csm"), "investigate ticket", None, json!({}), None)
         .unwrap();
-    manager.request_approval(&handle.task_id).unwrap();
+    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel(2);
+    manager
+        .set_hitl_senders(&handle.task_id, input_tx, approval_tx)
+        .unwrap();
+    manager
+        .request_approval_for(&handle.task_id, Some("tool-call-1".into()))
+        .unwrap();
 
-    let result = manager.respond_approval(&handle.task_id, "tool-call-1", true, None);
+    let state = manager
+        .respond_approval(&handle.task_id, "tool-call-1", true, None)
+        .expect("approval response should be accepted");
+    assert_eq!(state, TaskState::Running);
+    assert_eq!(
+        approval_rx.recv().await,
+        Some(ToolApprovalResponse {
+            tool_call_id: "tool-call-1".into(),
+            approved: true,
+            reason: None,
+        })
+    );
+
+    manager
+        .request_approval_for(&handle.task_id, Some("tool-call-2".into()))
+        .unwrap();
+    manager
+        .respond_approval(&handle.task_id, "tool-call-2", false, Some("deny"))
+        .expect("denial should be sent to the agent loop");
+    assert_eq!(
+        approval_rx.recv().await,
+        Some(ToolApprovalResponse {
+            tool_call_id: "tool-call-2".into(),
+            approved: false,
+            reason: Some("deny".into()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn approval_response_rejects_mismatched_tool_call_id_without_sending() {
+    let manager = TaskManager::new();
+    let handle = manager
+        .create_task(&tenant("csm"), "investigate ticket", None, json!({}), None)
+        .unwrap();
+    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel(1);
+    manager
+        .set_hitl_senders(&handle.task_id, input_tx, approval_tx)
+        .unwrap();
+    manager
+        .request_approval_for(&handle.task_id, Some("expected-call".into()))
+        .unwrap();
+
+    let result = manager.respond_approval(&handle.task_id, "stale-call", true, None);
     assert!(
         matches!(
             result,
-            Err(TaskManagerError::NotImplemented {
-                op: "respond_approval"
-            })
+            Err(TaskManagerError::ApprovalToolCallMismatch { .. })
         ),
-        "approved respond_approval must return NotImplemented until HITL is wired, got {result:?}"
+        "stale approval response must be rejected, got {result:?}"
     );
-
-    // Task still WaitingApproval — the approval did not silently take effect.
-    let task = manager.get_task(&handle.task_id).unwrap();
-    assert_eq!(task.state, TaskState::WaitingApproval);
-}
-
-#[test]
-fn approval_respond_with_approved_false_returns_tool_error_to_agent() {
-    // Denial is distinct from approval: the caller's intent is to stop the
-    // tool call, and the `ApprovalDenied` error is the documented way to
-    // surface that. We return `ApprovalDenied` (not `NotImplemented`) so
-    // clients that depend on observing denial still get the signal.
-    let manager = TaskManager::new();
-    let handle = manager
-        .create_task(&tenant("csm"), "investigate ticket", None, json!({}), None)
-        .unwrap();
-    manager.request_approval(&handle.task_id).unwrap();
-
-    let result = manager.respond_approval(&handle.task_id, "tool-call-1", false, Some("deny"));
-    assert!(
-        matches!(result, Err(TaskManagerError::ApprovalDenied { .. })),
-        "denied approval must return ApprovalDenied error"
+    assert!(approval_rx.try_recv().is_err());
+    assert_eq!(
+        manager.get_task(&handle.task_id).unwrap().state,
+        TaskState::WaitingApproval
     );
 }
 
@@ -318,31 +367,32 @@ fn tenant_budget_pool_applies_to_triggered_tasks() {
     );
 }
 
-// ─── BLOCKER 3: Approval denial must not leave task stuck ──────────────────────
-
-// TODO(S031-HITL): real WaitingApproval → Running transition on deny is gated on
-// engine-level pause/resume work (see `respond_approval` in `task.rs` — returns
-// `TaskManagerError::NotImplemented` on the approve path and leaves state
-// unchanged on deny). The S031 acceptance criterion at line 379 ("approval.respond
-// with `approved: false` returns tool error to agent") is pinned by this test, but
-// the lifecycle half hasn't shipped. Re-enable once the engine wires the resume.
-#[ignore = "S031-HITL: WaitingApproval → Running transition on deny not yet implemented (TaskManagerError::NotImplemented)"]
-#[test]
-fn approval_denial_transitions_task_to_running_not_stuck_in_waiting_approval() {
+#[tokio::test]
+async fn approval_denial_transitions_task_to_running_not_stuck_in_waiting_approval() {
     let manager = TaskManager::new();
     let handle = manager
         .create_task(&tenant("csm"), "investigate ticket", None, json!({}), None)
         .unwrap();
-    manager.request_approval(&handle.task_id).unwrap();
+    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::channel(1);
+    manager
+        .set_hitl_senders(&handle.task_id, input_tx, approval_tx)
+        .unwrap();
+    manager
+        .request_approval_for(&handle.task_id, Some("tool-call-1".into()))
+        .unwrap();
 
-    // Deny the approval.
     let result = manager.respond_approval(&handle.task_id, "tool-call-1", false, Some("denied"));
-    assert!(
-        matches!(result, Err(TaskManagerError::ApprovalDenied { .. })),
-        "denial must return ApprovalDenied error"
+    assert_eq!(result.unwrap(), TaskState::Running);
+    assert_eq!(
+        approval_rx.recv().await,
+        Some(ToolApprovalResponse {
+            tool_call_id: "tool-call-1".into(),
+            approved: false,
+            reason: Some("denied".into()),
+        })
     );
 
-    // Task must be back in Running, not stuck in WaitingApproval.
     let task = manager.get_task(&handle.task_id).unwrap();
     assert_eq!(
         task.state,

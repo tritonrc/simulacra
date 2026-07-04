@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use simulacra_catalog::repo::{
     AgentRepository, MemoryPoolRepository, SkillRepository, TenantRepository,
 };
-use simulacra_catalog::{Catalog, NewAgent, Tenant};
+use simulacra_catalog::{Catalog, NewAgent, NewSkill, Skill, SkillId, Tenant};
 use simulacra_config::{
     CatalogConfig, McpConfig, McpServerConfig, ProjectConfig, SimulacraConfig, VfsConfig,
 };
@@ -225,6 +225,53 @@ async fn create_catalog_agent_with_capabilities(
                 memory_pool_id: None,
                 skill_ids: &skill_ids,
                 capabilities,
+                channel_ids: &[],
+            },
+        )
+        .await
+        .expect("agent should be created");
+}
+
+async fn create_catalog_skill(catalog: &Catalog, tenant: &Tenant, name: &str, body: &str) -> Skill {
+    catalog
+        .skills()
+        .create(
+            &tenant.id,
+            NewSkill {
+                name,
+                description: Some("Use runbook."),
+                body,
+                metadata: None,
+            },
+        )
+        .await
+        .expect("skill should be created")
+}
+
+async fn create_catalog_agent_with_skills(
+    catalog: &Catalog,
+    tenant: &Tenant,
+    name: &str,
+    system_prompt: &str,
+    model: &str,
+    skill_ids: &[SkillId],
+) {
+    let capabilities = Vec::new();
+
+    catalog
+        .agents()
+        .create(
+            &tenant.id,
+            NewAgent {
+                name,
+                description: Some("test agent"),
+                system_prompt,
+                model,
+                max_turns: Some(4),
+                max_tokens: Some(256),
+                memory_pool_id: None,
+                skill_ids,
+                capabilities: &capabilities,
                 channel_ids: &[],
             },
         )
@@ -500,6 +547,29 @@ async fn wait_for_terminal(manager: &TaskManager, task_id: &str, timeout: Durati
     }
 }
 
+async fn wait_for_state(
+    manager: &TaskManager,
+    task_id: &str,
+    expected: TaskState,
+    timeout: Duration,
+) -> TaskHandle {
+    let start = tokio::time::Instant::now();
+    loop {
+        let handle = manager
+            .get_task(task_id)
+            .expect("task should remain visible while polling");
+        if handle.state == expected {
+            return handle;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "task {task_id} did not reach state {expected:?} within {timeout:?}; last state: {:?}",
+            handle.state
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn scripted_factory(provider: Arc<ScriptedProvider>) -> ProviderFactory {
     Arc::new(move |_kind, _model| {
         Ok(Box::new(SharedProvider(Arc::clone(&provider))) as Box<dyn Provider>)
@@ -715,6 +785,134 @@ async fn with_provider_factory_sets_the_override_and_is_invoked_on_spawn_task() 
         !recorded.is_empty(),
         "spawn_task should invoke the scripted provider via the override"
     );
+}
+
+#[tokio::test]
+async fn server_task_consumes_input_response_and_resumes_agent_loop() {
+    let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+    let tenant = ensure_tenant(&catalog, "default").await;
+    create_catalog_agent(
+        &catalog,
+        &tenant,
+        "input-agent",
+        "Ask for missing details.",
+        "claude-3-5-sonnet",
+    )
+    .await;
+
+    let provider = Arc::new(ScriptedProvider::new([
+        tool_call_response(
+            "call-input",
+            "request_input",
+            json!({"prompt": "What account should I use?"}),
+            "claude-3-5-sonnet",
+        ),
+        assistant_response("input handled", "claude-3-5-sonnet"),
+    ]));
+    let engine =
+        build_engine(&catalog).with_provider_factory(scripted_factory(Arc::clone(&provider)));
+    let manager = TaskManager::new();
+
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "prepare account report",
+            &tenant_config("default", "input-agent"),
+            None,
+            json!({"enable_human_input": true}),
+            None,
+            None,
+        )
+        .await
+        .expect("server task should spawn");
+
+    wait_for_state(
+        &manager,
+        &handle.task_id,
+        TaskState::WaitingInput,
+        Duration::from_secs(5),
+    )
+    .await;
+    manager
+        .provide_input(&handle.task_id, "Use Acme account")
+        .expect("input.response should resume the task");
+
+    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    assert_eq!(terminal.state, TaskState::Completed);
+
+    let recorded = provider.recorded_messages();
+    let resumed = recorded
+        .get(1)
+        .expect("provider should be called again after input");
+    assert!(resumed.iter().any(|message| {
+        message.role == Role::Tool
+            && message.tool_call_id.as_deref() == Some("call-input")
+            && message.content == "Use Acme account"
+    }));
+}
+
+#[tokio::test]
+async fn server_task_consumes_tool_approval_and_resumes_agent_loop() {
+    let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+    let tenant = ensure_tenant(&catalog, "default").await;
+    create_catalog_agent(
+        &catalog,
+        &tenant,
+        "approval-agent",
+        "Read the task when approved.",
+        "claude-3-5-sonnet",
+    )
+    .await;
+
+    let provider = Arc::new(ScriptedProvider::new([
+        tool_call_response(
+            "call-read",
+            "file_read",
+            json!({"path": "/workspace/task.md"}),
+            "claude-3-5-sonnet",
+        ),
+        assistant_response("approval handled", "claude-3-5-sonnet"),
+    ]));
+    let engine =
+        build_engine(&catalog).with_provider_factory(scripted_factory(Arc::clone(&provider)));
+    let manager = TaskManager::new();
+
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "approved file read task",
+            &tenant_config("default", "approval-agent"),
+            None,
+            json!({"require_tool_approval": true}),
+            None,
+            None,
+        )
+        .await
+        .expect("server task should spawn");
+
+    wait_for_state(
+        &manager,
+        &handle.task_id,
+        TaskState::WaitingApproval,
+        Duration::from_secs(5),
+    )
+    .await;
+    manager
+        .respond_approval(&handle.task_id, "call-read", true, None)
+        .expect("approval.respond should resume the task");
+
+    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    assert_eq!(terminal.state, TaskState::Completed);
+
+    let recorded = provider.recorded_messages();
+    let resumed = recorded
+        .get(1)
+        .expect("provider should be called again after approved tool result");
+    assert!(resumed.iter().any(|message| {
+        message.role == Role::Tool
+            && message.tool_call_id.as_deref() == Some("call-read")
+            && message.content.contains("approved file read task")
+    }));
 }
 
 #[tokio::test]
@@ -992,6 +1190,133 @@ async fn live_anthropic_server_generic_subagent_handoff_smoke() {
     assert!(
         assistant_text.contains("LIVE_HANDOFF_OK") && assistant_text.contains("CHILD_OK_7F3"),
         "parent should resume from the child result; assistant text: {assistant_text:?}; events: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn server_task_registers_catalog_skill_tool_and_loads_catalog_skill_body() {
+    let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+    let tenant = ensure_tenant(&catalog, "default").await;
+    let skill = create_catalog_skill(
+        &catalog,
+        &tenant,
+        "runbook",
+        "Follow the runbook.\nCheck the catalog path.",
+    )
+    .await;
+    create_catalog_agent_with_skills(
+        &catalog,
+        &tenant,
+        "skill-agent",
+        "Load skills when useful.",
+        "claude-3-5-sonnet",
+        std::slice::from_ref(&skill.id),
+    )
+    .await;
+
+    let provider = Arc::new(ScriptedProvider::new([
+        tool_call_response(
+            "call-tamper",
+            "file_write",
+            json!({
+                "path": "/skills/runbook/SKILL.md",
+                "content": "---\nname: runbook\ndescription: tampered\n---\n\nTampered body."
+            }),
+            "claude-3-5-sonnet",
+        ),
+        tool_call_response(
+            "call-skill",
+            "Skill",
+            json!({ "command": "runbook" }),
+            "claude-3-5-sonnet",
+        ),
+        assistant_response("done.", "claude-3-5-sonnet"),
+    ]));
+    let engine =
+        build_engine(&catalog).with_provider_factory(scripted_factory(Arc::clone(&provider)));
+    let manager = TaskManager::new();
+
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "use the catalog runbook",
+            &tenant_config("default", "skill-agent"),
+            None,
+            json!({}),
+            None,
+            None,
+        )
+        .await
+        .expect("server task should spawn");
+
+    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    assert_eq!(terminal.state, TaskState::Completed);
+
+    let recorded_tools = provider.recorded_tools();
+    let first_call_tools = recorded_tools
+        .first()
+        .expect("provider should receive tools on the first call");
+    let skill_tools: Vec<_> = first_call_tools
+        .iter()
+        .filter(|tool| tool.name == "Skill")
+        .collect();
+    assert_eq!(
+        skill_tools.len(),
+        1,
+        "catalog-backed agents should receive exactly one Skill tool; tools were: {:?}",
+        first_call_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !first_call_tools.iter().any(|tool| tool.name == "runbook"),
+        "catalog skills must not be registered as one tool per skill; tools were: {:?}",
+        first_call_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let recorded_messages = provider.recorded_messages();
+    let second_call_messages = recorded_messages
+        .get(1)
+        .expect("file_write call should produce a follow-up provider call");
+    let tamper_result = second_call_messages
+        .iter()
+        .find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some("call-tamper")
+        })
+        .expect("follow-up provider call should include the file_write tool result");
+    assert!(
+        tamper_result.content.contains("ERROR:")
+            && tamper_result.content.contains("read-only")
+            && tamper_result.content.contains("/skills"),
+        "file_write tamper attempt should fail read-only, got: {:?}",
+        tamper_result.content
+    );
+
+    let third_call_messages = recorded_messages
+        .get(2)
+        .expect("Skill call should produce a second follow-up provider call");
+    let skill_result = third_call_messages
+        .iter()
+        .find(|message| {
+            message.role == Role::Tool && message.tool_call_id.as_deref() == Some("call-skill")
+        })
+        .expect("follow-up provider call should include the Skill tool result");
+    assert!(
+        skill_result.content.contains("Follow the runbook.")
+            && skill_result.content.contains("Check the catalog path."),
+        "Skill tool result should contain the catalog skill body, got: {:?}",
+        skill_result.content
+    );
+    assert!(
+        !skill_result.content.contains("Tampered body.")
+            && !skill_result.content.contains("name: runbook")
+            && !skill_result.content.contains("---"),
+        "Skill tool result should strip YAML frontmatter, got: {:?}",
+        skill_result.content
     );
 }
 

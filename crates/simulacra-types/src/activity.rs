@@ -37,6 +37,14 @@ pub enum ActivityEvent {
         arguments: serde_json::Value,
     },
 
+    /// A tool call is waiting for human approval before execution starts.
+    ToolApprovalRequired {
+        tool_call_id: String,
+        name: String,
+        arguments: serde_json::Value,
+        reason: Option<String>,
+    },
+
     /// A provider streamed part of a tool-call argument payload.
     ///
     /// Display-only; the actual tool execution starts at `ToolStart`.
@@ -49,6 +57,12 @@ pub enum ActivityEvent {
 
     /// A line of output from a running tool (e.g. shell stdout/stderr).
     ToolOutput { tool_call_id: String, line: String },
+
+    /// The agent is waiting for user-provided input.
+    InputRequired {
+        prompt: String,
+        schema: Option<serde_json::Value>,
+    },
 
     /// A tool call has finished.
     ToolFinish {
@@ -83,6 +97,47 @@ pub enum ActivityEvent {
         tool_uses: u32,
         token_count: u64,
     },
+
+    /// A workflow run has started.
+    WorkflowStarted {
+        run_id: String,
+        script_path: String,
+        name: String,
+    },
+
+    /// A workflow emitted progress.
+    WorkflowProgress { run_id: String, message: String },
+
+    /// A workflow phase has started.
+    WorkflowPhaseStarted { run_id: String, name: String },
+
+    /// A workflow phase has completed.
+    WorkflowPhaseCompleted { run_id: String, name: String },
+
+    /// A workflow worker call has started.
+    WorkflowAgentStarted {
+        run_id: String,
+        key: String,
+        agent: Option<String>,
+        task: Option<String>,
+    },
+
+    /// A workflow worker call has completed.
+    WorkflowAgentCompleted {
+        run_id: String,
+        key: String,
+        cached: bool,
+        is_error: bool,
+    },
+
+    /// A workflow run completed successfully.
+    WorkflowCompleted { run_id: String },
+
+    /// A workflow run failed.
+    WorkflowFailed { run_id: String, error: String },
+
+    /// A workflow run was cancelled.
+    WorkflowCancelled { run_id: String },
 
     /// The agent turn has completed.
     TurnComplete,
