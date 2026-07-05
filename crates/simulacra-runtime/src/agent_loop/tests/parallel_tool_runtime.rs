@@ -130,6 +130,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
             4,
             JournalEntryKind::ToolCall {
                 tool_call_id: Some("tc-a".into()),
+
                 tool_name: "parallel_a".into(),
                 arguments: serde_json::json!({}),
             },
@@ -138,6 +139,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
             5,
             JournalEntryKind::ToolResult {
                 tool_call_id: Some("tc-a".into()),
+
                 tool_name: "parallel_a".into(),
                 content: "replayed a".into(),
                 is_error: false,
@@ -147,6 +149,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
             6,
             JournalEntryKind::ToolCall {
                 tool_call_id: Some("tc-b".into()),
+
                 tool_name: "parallel_b".into(),
                 arguments: serde_json::json!({}),
             },
@@ -155,6 +158,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
             7,
             JournalEntryKind::ToolResult {
                 tool_call_id: Some("tc-b".into()),
+
                 tool_name: "parallel_b".into(),
                 content: "replayed b".into(),
                 is_error: false,

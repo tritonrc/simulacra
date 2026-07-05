@@ -60,6 +60,7 @@ fn checkpoint_budget_snapshot_survives_serialize_deserialize_roundtrip() {
             content: "test".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         budget_snapshot: budget,
         vfs_snapshot: None,

@@ -131,6 +131,7 @@ impl AgentLoop {
             match &entry.entry {
                 JournalEntryKind::ToolResult {
                     tool_call_id: Some(recorded_id),
+
                     tool_name: recorded,
                     ..
                 } if recorded_id == tool_call_id && recorded == tool_name => {
@@ -142,6 +143,7 @@ impl AgentLoop {
                 // they no longer collide with the top-level ToolResult.
                 JournalEntryKind::ToolResult {
                     tool_call_id: None,
+
                     tool_name: recorded,
                     ..
                 } if allow_legacy_tool_result_match && recorded == tool_name => {

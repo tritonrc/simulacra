@@ -245,6 +245,7 @@ fn final_response(text: &str, input_tokens: u64, output_tokens: u64) -> Provider
             content: text.to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens,
@@ -267,6 +268,7 @@ fn tool_call_response() -> ProviderResponse {
                 arguments: json!({"command": "printf 'echo-line\\n'"}),
             }],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 5,
@@ -298,6 +300,7 @@ fn spawn_agent_tool_call_response() -> ProviderResponse {
                 }),
             }],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 5,

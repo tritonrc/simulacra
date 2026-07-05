@@ -85,6 +85,7 @@ async fn tool_call_delta_events_translate_to_tool_call_delta_with_optional_metad
     sink.emit(ActivityEvent::ToolCallDelta {
         index: 2,
         tool_call_id: Some("tool-delta-1".to_string()),
+
         name: Some("file_read".to_string()),
         arguments_delta: "{\"path\"".to_string(),
     });

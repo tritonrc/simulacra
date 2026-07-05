@@ -25,6 +25,7 @@ impl McpManager {
                     .unwrap_or(0),
                 entry: JournalEntryKind::ToolCall {
                     tool_call_id: None,
+
                     tool_name: tool_name.to_string(),
                     arguments: arguments.clone(),
                 },

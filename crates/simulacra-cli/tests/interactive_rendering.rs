@@ -34,6 +34,7 @@ impl Provider for FakeProvider {
                     content: "ok".into(),
                     tool_calls: vec![],
                     tool_call_id: None,
+                    provider_content: vec![],
                 },
                 token_usage: TokenUsage::default(),
                 finish_reason: FinishReason::EndTurn,
@@ -247,6 +248,7 @@ fn parent_spawn_tool_results_are_the_only_child_visible_messages_added_to_parent
         content: r#"{"child_id":"child-1","agent_type":"researcher","message":"summary"}"#.into(),
         tool_calls: vec![],
         tool_call_id: Some("call-1".into()),
+        provider_content: vec![],
     });
 
     assert_eq!(

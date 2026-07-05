@@ -310,6 +310,7 @@ fn final_response(text: &str) -> ProviderResponse {
             content: text.to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 11,
@@ -1323,6 +1324,7 @@ write_scopes = ["/var/memory/self/"]
                                 }),
                             }],
                             tool_call_id: None,
+                            provider_content: vec![],
                         },
                         token_usage: TokenUsage {
                             input_tokens: 20,
@@ -1404,6 +1406,7 @@ write_scopes = ["/var/memory/self/"]
                                 }),
                             }],
                             tool_call_id: None,
+                            provider_content: vec![],
                         },
                         token_usage: TokenUsage {
                             input_tokens: 20,
@@ -1450,6 +1453,7 @@ write_scopes = ["/var/memory/self/"]
                                 }),
                             }],
                             tool_call_id: None,
+                            provider_content: vec![],
                         },
                         token_usage: TokenUsage {
                             input_tokens: 20,

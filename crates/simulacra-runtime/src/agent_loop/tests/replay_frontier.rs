@@ -77,6 +77,7 @@ fn replay_tool_result_preserves_error_state() {
     // silently reinterpret tool failures as successful tool outputs.
     let (content, is_error) = replay_tool_result(&JournalEntryKind::ToolResult {
         tool_call_id: Some("tc-1".into()),
+
         tool_name: "echo".into(),
         content: "tool exploded".into(),
         is_error: true,

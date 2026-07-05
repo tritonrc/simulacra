@@ -142,6 +142,7 @@ impl AgentLoop {
 
         let tool_call = JournalEntryKind::ToolCall {
             tool_call_id: Some(tc.id.clone()),
+
             tool_name: tc.name.clone(),
             arguments: tc.arguments.clone(),
         };
@@ -187,6 +188,7 @@ impl AgentLoop {
 
         self.journal_entry(JournalEntryKind::ToolResult {
             tool_call_id: Some(tc.id.clone()),
+
             tool_name: tc.name.clone(),
             content: result.content.clone(),
             is_error: result.is_error,
@@ -198,6 +200,7 @@ impl AgentLoop {
             content: format!("{error_prefix}{}", result.content),
             tool_calls: vec![],
             tool_call_id: Some(tc.id.clone()),
+            provider_content: vec![],
         })
     }
 }

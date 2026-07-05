@@ -326,6 +326,7 @@ fn user_message(content: &str) -> Message {
         content: content.into(),
         tool_calls: vec![],
         tool_call_id: None,
+        provider_content: vec![],
     }
 }
 

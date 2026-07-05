@@ -136,5 +136,6 @@ pub fn user_message(content: &str) -> Message {
         content: content.to_string(),
         tool_calls: vec![],
         tool_call_id: None,
+        provider_content: vec![],
     }
 }

@@ -24,6 +24,7 @@ fn hitl_response(
                 arguments: args,
             }],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 20,
@@ -336,6 +337,7 @@ async fn replay_consumes_recorded_hitl_tool_result_without_waiting() {
             4,
             JournalEntryKind::ToolCall {
                 tool_call_id: Some("replay-input".into()),
+
                 tool_name: REQUEST_INPUT_TOOL_NAME.into(),
                 arguments: serde_json::json!({"prompt": "Need input"}),
             },
@@ -344,6 +346,7 @@ async fn replay_consumes_recorded_hitl_tool_result_without_waiting() {
             5,
             JournalEntryKind::ToolResult {
                 tool_call_id: Some("replay-input".into()),
+
                 tool_name: REQUEST_INPUT_TOOL_NAME.into(),
                 content: "recorded human response".into(),
                 is_error: false,

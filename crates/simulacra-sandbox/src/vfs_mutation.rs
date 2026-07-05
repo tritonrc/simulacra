@@ -402,6 +402,7 @@ fn journal_plan(cell: &AgentCell, tool_name: &str, count: usize) -> Result<(), S
         timestamp_ms: 0,
         entry: JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: tool_name.to_string(),
             content: format!("planned {} VFS mutation(s)", count),
             is_error: false,
@@ -483,6 +484,7 @@ fn journal_execution_failure(cell: &AgentCell, tool_name: &str, err: &VfsError) 
         timestamp_ms: 0,
         entry: JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: tool_name.to_string(),
             content: err.to_string(),
             is_error: true,

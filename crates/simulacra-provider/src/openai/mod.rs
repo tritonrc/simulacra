@@ -432,6 +432,7 @@ impl OpenAiProvider {
                 content,
                 tool_calls,
                 tool_call_id: None,
+                provider_content: vec![],
             },
             token_usage: TokenUsage {
                 input_tokens,
@@ -614,6 +615,7 @@ impl<'a> OpenAiSseAccumulator<'a> {
                 content: self.content,
                 tool_calls,
                 tool_call_id: None,
+                provider_content: vec![],
             },
             token_usage: TokenUsage {
                 input_tokens: self.input_tokens,
@@ -1151,6 +1153,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = ResourceBudget::new(100_000, 100, Decimal::new(100, 0), 10);
         let sink = RecordingProviderStreamSink::default();
@@ -1208,6 +1211,7 @@ mod tests {
             content: "weather".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = ResourceBudget::new(100_000, 100, Decimal::new(100, 0), 10);
         let sink = RecordingProviderStreamSink::default();
@@ -1238,18 +1242,21 @@ mod tests {
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("call_tc1".into()),
+
                     name: Some("get_weather".into()),
                     arguments_delta: String::new(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("call_tc1".into()),
+
                     name: Some("get_weather".into()),
                     arguments_delta: "{\"loc".into(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("call_tc1".into()),
+
                     name: Some("get_weather".into()),
                     arguments_delta: "ation\":\"SF\"}".into(),
                 },

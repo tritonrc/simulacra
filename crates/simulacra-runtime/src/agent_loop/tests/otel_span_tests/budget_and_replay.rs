@@ -180,6 +180,7 @@
                 timestamp_ms: 1002,
                 entry: JournalEntryKind::ToolResult {
                     tool_call_id: Some("tc-1".into()),
+
                     tool_name: "echo".into(),
                     content: "wrong entry kind".into(),
                     is_error: false,

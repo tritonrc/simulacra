@@ -43,6 +43,7 @@ mod activity_event_type {
         let _tool_call_delta = ActivityEvent::ToolCallDelta {
             index: 0,
             tool_call_id: Some("tc-1".into()),
+
             name: Some("shell".into()),
             arguments_delta: "{\"cmd\"".into(),
         };
@@ -129,6 +130,7 @@ mod activity_event_type {
         let event = ActivityEvent::ToolCallDelta {
             index: 1,
             tool_call_id: Some("tc-42".into()),
+
             name: Some("bash".into()),
             arguments_delta: "{\"cmd\":\"echo".into(),
         };

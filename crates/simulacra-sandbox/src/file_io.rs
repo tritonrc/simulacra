@@ -70,6 +70,7 @@ pub(crate) fn read_file_inner(
                 timestamp_ms: 0,
                 entry: JournalEntryKind::ToolResult {
                     tool_call_id: None,
+
                     tool_name: "read_file".to_string(),
                     content: err.to_string(),
                     is_error: true,
@@ -88,6 +89,7 @@ pub(crate) fn read_file_inner(
         timestamp_ms: 0,
         entry: JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: "read_file".to_string(),
             content: format!("read {} bytes from {}", data.len(), path),
             is_error: false,

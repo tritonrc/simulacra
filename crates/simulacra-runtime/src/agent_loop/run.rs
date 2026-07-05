@@ -21,12 +21,14 @@ impl AgentLoop {
                 content: self.config.system_prompt.clone(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             },
             Message {
                 role: Role::User,
                 content: task.to_string(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             },
         ];
         let mut total_usage = TokenUsage::default();

@@ -273,6 +273,7 @@ impl AgentCell {
                 timestamp_ms: 0,
                 entry: simulacra_types::JournalEntryKind::ToolResult {
                     tool_call_id: None,
+
                     tool_name: "list_dir".to_string(),
                     content: format!("listed {} entries in {}", entries.len(), path),
                     is_error: false,

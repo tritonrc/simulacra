@@ -38,11 +38,13 @@ pub(super) fn replay_entries_match(expected: &JournalEntryKind, actual: &Journal
         (
             JournalEntryKind::ToolCall {
                 tool_call_id: expected_id,
+
                 tool_name: expected_tool,
                 arguments: expected_args,
             },
             JournalEntryKind::ToolCall {
                 tool_call_id: actual_id,
+
                 tool_name: actual_tool,
                 arguments: actual_args,
             },
@@ -103,6 +105,7 @@ pub(super) fn replay_llm_response(
             content: String::new(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         });
 
         Ok(simulacra_types::ProviderResponse {

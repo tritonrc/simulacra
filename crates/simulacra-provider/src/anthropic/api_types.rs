@@ -48,6 +48,14 @@ pub(crate) enum ApiRequestContentBlock {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -119,7 +127,8 @@ pub(crate) struct ApiErrorDetail {
 // ── Conversions ────────────────────────────────────────────────────
 
 use simulacra_types::{
-    FinishReason, Message, ProviderResponse, Role, TokenUsage, ToolCallMessage, ToolDefinition,
+    FinishReason, Message, ProviderContentBlock, ProviderResponse, Role, TokenUsage,
+    ToolCallMessage, ToolDefinition,
 };
 
 fn normalize_tool_pairs(messages: &[Message]) -> Vec<Message> {
@@ -196,6 +205,7 @@ fn messages_equal(left: &Message, right: &Message) -> bool {
     left.role == right.role
         && left.content == right.content
         && left.tool_call_id == right.tool_call_id
+        && left.provider_content == right.provider_content
         && left.tool_calls.len() == right.tool_calls.len()
         && left
             .tool_calls
@@ -206,6 +216,41 @@ fn messages_equal(left: &Message, right: &Message) -> bool {
                     && left_call.name == right_call.name
                     && left_call.arguments == right_call.arguments
             })
+}
+
+fn anthropic_provider_blocks(
+    provider_content: &[ProviderContentBlock],
+) -> Vec<ApiRequestContentBlock> {
+    provider_content
+        .iter()
+        .filter(|block| block.provider == "anthropic")
+        .filter_map(
+            |block| match block.value.get("type").and_then(|value| value.as_str()) {
+                Some("thinking") => Some(ApiRequestContentBlock::Thinking {
+                    thinking: block
+                        .value
+                        .get("thinking")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    signature: block
+                        .value
+                        .get("signature")
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string),
+                }),
+                Some("redacted_thinking") => Some(ApiRequestContentBlock::RedactedThinking {
+                    data: block
+                        .value
+                        .get("data")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                }),
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 fn tool_result_count(messages: &[Message]) -> usize {
@@ -255,7 +300,8 @@ pub(crate) fn build_request_parts<'a>(
             }
             Role::Assistant => {
                 // Build content blocks: text + tool_use (required for multi-turn tool conversations)
-                let mut blocks: Vec<ApiRequestContentBlock> = Vec::new();
+                let mut blocks: Vec<ApiRequestContentBlock> =
+                    anthropic_provider_blocks(&msg.provider_content);
                 if !msg.content.is_empty() {
                     blocks.push(ApiRequestContentBlock::Text {
                         text: msg.content.clone(),
@@ -268,7 +314,10 @@ pub(crate) fn build_request_parts<'a>(
                         input: tc.arguments.clone(),
                     });
                 }
-                let content = if blocks.len() == 1 && msg.tool_calls.is_empty() {
+                let content = if msg.provider_content.is_empty()
+                    && blocks.len() == 1
+                    && msg.tool_calls.is_empty()
+                {
                     ApiMessageContent::Text(msg.content.clone())
                 } else if blocks.is_empty() {
                     // Assistant messages must have some content
@@ -320,6 +369,7 @@ pub(crate) fn build_request_parts<'a>(
 pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();
+    let mut provider_content = Vec::new();
 
     for block in &resp.content {
         match block {
@@ -333,8 +383,28 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
                     arguments: input.clone(),
                 });
             }
-            ApiResponseContentBlock::Thinking { .. }
-            | ApiResponseContentBlock::RedactedThinking { .. } => {}
+            ApiResponseContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                provider_content.push(ProviderContentBlock {
+                    provider: "anthropic".to_string(),
+                    value: serde_json::json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }),
+                });
+            }
+            ApiResponseContentBlock::RedactedThinking { data } => {
+                provider_content.push(ProviderContentBlock {
+                    provider: "anthropic".to_string(),
+                    value: serde_json::json!({
+                        "type": "redacted_thinking",
+                        "data": data,
+                    }),
+                });
+            }
         }
     }
 
@@ -351,6 +421,7 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
             content: text_parts.join(""),
             tool_calls,
             tool_call_id: None,
+            provider_content,
         },
         token_usage: TokenUsage {
             input_tokens: resp.usage.input_tokens,
@@ -380,6 +451,7 @@ mod tests {
                 })
                 .collect(),
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -389,6 +461,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -398,6 +471,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.into()),
+            provider_content: vec![],
         }
     }
 
@@ -407,6 +481,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -450,6 +525,33 @@ mod tests {
             matches!(
                 block,
                 ApiRequestContentBlock::ToolUse { id: tool_use_id, .. } if tool_use_id == id
+            )
+        })
+    }
+
+    fn has_thinking(api_message: &ApiMessage, signature: &str) -> bool {
+        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
+            return false;
+        };
+        blocks.iter().any(|block| {
+            matches!(
+                block,
+                ApiRequestContentBlock::Thinking {
+                    signature: Some(block_signature),
+                    ..
+                } if block_signature == signature
+            )
+        })
+    }
+
+    fn has_redacted_thinking(api_message: &ApiMessage, data: &str) -> bool {
+        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
+            return false;
+        };
+        blocks.iter().any(|block| {
+            matches!(
+                block,
+                ApiRequestContentBlock::RedactedThinking { data: block_data } if block_data == data
             )
         })
     }
@@ -614,6 +716,61 @@ mod tests {
         let normalized = normalize_tool_pairs(&messages);
 
         assert_same_messages(&normalized, &messages);
+    }
+
+    #[test]
+    fn build_request_parts_preserves_anthropic_thinking_blocks_on_assistant_tool_use() {
+        let mut assistant = assistant("use tool", &["X"]);
+        assistant.provider_content = vec![
+            ProviderContentBlock {
+                provider: "anthropic".to_string(),
+                value: json!({
+                    "type": "thinking",
+                    "thinking": "summary",
+                    "signature": "sig-123"
+                }),
+            },
+            ProviderContentBlock {
+                provider: "anthropic".to_string(),
+                value: json!({
+                    "type": "redacted_thinking",
+                    "data": "encrypted"
+                }),
+            },
+        ];
+        let messages = vec![assistant, tool("X", "result")];
+
+        let request = build_request_parts(&messages, &[], "claude-fable-5", 1024);
+
+        assert_eq!(request.messages.len(), 2);
+        assert!(has_thinking(&request.messages[0], "sig-123"));
+        assert!(has_redacted_thinking(&request.messages[0], "encrypted"));
+        assert!(has_tool_use(&request.messages[0], "X"));
+        assert_eq!(tool_result_id(&request.messages[1]), Some("X"));
+    }
+
+    #[test]
+    fn build_request_parts_uses_blocks_for_provider_only_assistant_content() {
+        let assistant = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![ProviderContentBlock {
+                provider: "anthropic".to_string(),
+                value: json!({
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "sig-only"
+                }),
+            }],
+        };
+
+        let messages = vec![assistant];
+        let request = build_request_parts(&messages, &[], "claude-fable-5", 1024);
+
+        assert_eq!(request.messages.len(), 1);
+        assert!(has_thinking(&request.messages[0], "sig-only"));
     }
 
     #[test]

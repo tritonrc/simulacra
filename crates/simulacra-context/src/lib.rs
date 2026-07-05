@@ -168,6 +168,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
                         content: format!("[output elided — {original_len} chars]"),
                         tool_calls: msg.tool_calls.clone(),
                         tool_call_id: msg.tool_call_id.clone(),
+                        provider_content: msg.provider_content.clone(),
                     }
                 } else {
                     msg.clone()
@@ -225,6 +226,7 @@ mod tests {
             content: content.to_string(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -258,6 +260,7 @@ mod tests {
             content: content.to_string(),
             tool_calls: Vec::new(),
             tool_call_id: Some("call_1".into()),
+            provider_content: vec![],
         }
     }
 
@@ -648,6 +651,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "src/health.rs"}),
                 }],
                 tool_call_id: None,
+                provider_content: vec![],
             }, // tool_use anchor
             tool_msg(&big),
             tool_msg(&big),

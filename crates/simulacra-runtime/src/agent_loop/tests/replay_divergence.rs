@@ -94,6 +94,7 @@ async fn replay_fails_when_recorded_tool_call_does_not_match_live_tool_call() {
             timestamp_ms: 4,
             entry: JournalEntryKind::ToolCall {
                 tool_call_id: Some("tc-1".into()),
+
                 tool_name: "echo".into(),
                 arguments: serde_json::json!({"msg": "recorded"}),
             },
@@ -120,12 +121,14 @@ async fn replay_fails_when_recorded_tool_call_does_not_match_live_tool_call() {
             content: "system".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         Message {
             role: Role::User,
             content: "use echo".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
     ];
 
@@ -182,6 +185,7 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
             timestamp_ms: 4,
             entry: JournalEntryKind::ToolCall {
                 tool_call_id: Some("tc-1".into()),
+
                 tool_name: "echo".into(),
                 arguments: serde_json::json!({"msg": "live"}),
             },
@@ -228,6 +232,7 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
             timestamp_ms: 9,
             entry: JournalEntryKind::ToolResult {
                 tool_call_id: None,
+
                 tool_name: "echo".into(),
                 content: "nested collision".into(),
                 is_error: false,
@@ -239,6 +244,7 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
             timestamp_ms: 10,
             entry: JournalEntryKind::ToolResult {
                 tool_call_id: Some("tc-1".into()),
+
                 tool_name: "echo".into(),
                 content: "recorded final".into(),
                 is_error: false,
@@ -266,12 +272,14 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
             content: "system".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         Message {
             role: Role::User,
             content: "use echo".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
     ];
 
@@ -329,6 +337,7 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
             timestamp_ms: 4,
             entry: JournalEntryKind::ToolCall {
                 tool_call_id: Some("tc-1".into()),
+
                 tool_name: "echo".into(),
                 arguments: serde_json::json!({"msg": "live"}),
             },
@@ -339,6 +348,7 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
             timestamp_ms: 5,
             entry: JournalEntryKind::ToolResult {
                 tool_call_id: None,
+
                 tool_name: "echo".into(),
                 content: "nested same-name result".into(),
                 is_error: false,
@@ -375,12 +385,14 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
             content: "system".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         Message {
             role: Role::User,
             content: "use echo".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
     ];
 

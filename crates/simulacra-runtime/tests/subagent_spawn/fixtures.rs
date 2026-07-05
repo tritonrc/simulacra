@@ -54,6 +54,7 @@ fn child_success_output() -> AgentLoopOutput {
             content: "child summary".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens: 3,

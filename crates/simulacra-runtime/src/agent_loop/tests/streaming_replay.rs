@@ -69,6 +69,7 @@ async fn replay_does_not_emit_tool_call_deltas() {
         vec![simulacra_types::ProviderStreamEvent::ToolCallDelta {
             index: 0,
             tool_call_id: Some("live-call".into()),
+
             name: Some("file_read".into()),
             arguments_delta: "{\"path\":\"/live\"}".into(),
         }],

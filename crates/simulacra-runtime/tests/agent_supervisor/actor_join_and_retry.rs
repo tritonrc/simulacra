@@ -646,24 +646,28 @@ async fn join_child_terminal_result_includes_elapsed_ms_and_structured_tool_use_
                         content: "tool one".into(),
                         tool_calls: vec![],
                         tool_call_id: Some("tool-1".into()),
+            provider_content: vec![],
                     },
                     Message {
                         role: Role::Assistant,
                         content: "middle".into(),
                         tool_calls: vec![],
                         tool_call_id: None,
+            provider_content: vec![],
                     },
                     Message {
                         role: Role::Tool,
                         content: "tool two".into(),
                         tool_calls: vec![],
                         tool_call_id: Some("tool-2".into()),
+            provider_content: vec![],
                     },
                     Message {
                         role: Role::Assistant,
                         content: "done".into(),
                         tool_calls: vec![],
                         tool_call_id: None,
+            provider_content: vec![],
                     },
                 ],
                 token_usage: TokenUsage {
@@ -1073,6 +1077,7 @@ fn wait_any_output(message: &str, input_tokens: u64, output_tokens: u64) -> Agen
             content: message.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens,

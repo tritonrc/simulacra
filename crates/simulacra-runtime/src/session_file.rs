@@ -121,6 +121,7 @@ mod tests {
                 content: "hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }],
             vfs_snapshot: None,
             created_at: 1000,
@@ -181,6 +182,7 @@ mod tests {
             content: "updated".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         });
         storage.save(&session).unwrap();
 

@@ -224,6 +224,7 @@ fn text_response(content: &str) -> ProviderResponse {
             content: content.to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 10,
@@ -246,6 +247,7 @@ fn tool_call_response(tool_name: &str, arguments: serde_json::Value) -> Provider
                 arguments,
             }],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 20,

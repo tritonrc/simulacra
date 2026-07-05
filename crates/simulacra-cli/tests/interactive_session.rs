@@ -281,6 +281,7 @@ impl FakeProvider {
                     content: String::new(),
                     tool_calls,
                     tool_call_id: None,
+                    provider_content: vec![],
                 },
                 token_usage: TokenUsage {
                     input_tokens: 17,
@@ -455,6 +456,7 @@ fn final_response(text: &str) -> ProviderResponse {
             content: text.to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 11,
@@ -472,6 +474,7 @@ fn user_message(content: &str) -> Message {
         content: content.to_string(),
         tool_calls: vec![],
         tool_call_id: None,
+        provider_content: vec![],
     }
 }
 
@@ -481,6 +484,7 @@ fn assistant_message(content: &str) -> Message {
         content: content.to_string(),
         tool_calls: vec![],
         tool_call_id: None,
+        provider_content: vec![],
     }
 }
 

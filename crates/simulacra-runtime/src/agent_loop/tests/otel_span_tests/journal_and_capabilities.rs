@@ -81,6 +81,7 @@
                         content: "fully replayed".into(),
                         tool_calls: vec![],
                         tool_call_id: None,
+            provider_content: vec![],
                     }),
                 },
             },

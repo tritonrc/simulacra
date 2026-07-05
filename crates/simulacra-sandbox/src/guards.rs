@@ -220,6 +220,7 @@ pub(crate) fn journal_denial(
         timestamp_ms: 0,
         entry: JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: operation.to_string(),
             content: format!(
                 "capability denied: {} - {}",
@@ -242,6 +243,7 @@ pub(crate) fn journal_budget_exhaustion(
         timestamp_ms: 0,
         entry: JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: exhausted.resource.clone(),
             content: format!(
                 "budget exhausted: {} - used {}, limit {}",

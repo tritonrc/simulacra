@@ -5,6 +5,7 @@ fn text_response(content: &str) -> ProviderResponse {
             content: content.to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: simulacra_types::TokenUsage {
             input_tokens: 10,
@@ -27,6 +28,7 @@ fn tool_call_response(tool_name: &str, args: serde_json::Value) -> ProviderRespo
                 arguments: args,
             }],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: simulacra_types::TokenUsage {
             input_tokens: 20,

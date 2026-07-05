@@ -9,6 +9,7 @@ fn multi_tool_call_response(calls: Vec<ToolCallMessage>) -> ProviderResponse {
             content: String::new(),
             tool_calls: calls,
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 20,
@@ -36,12 +37,14 @@ fn conversation(task: &str) -> Vec<Message> {
             content: "You are a test agent.".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         Message {
             role: Role::User,
             content: task.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
     ]
 }

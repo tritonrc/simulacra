@@ -80,6 +80,7 @@ impl AgentCellFsProxy {
             timestamp_ms: 0,
             entry: JournalEntryKind::ToolResult {
                 tool_call_id: None,
+
                 tool_name: operation.to_string(),
                 content,
                 is_error,

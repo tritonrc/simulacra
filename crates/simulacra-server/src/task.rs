@@ -190,6 +190,7 @@ pub enum TaskManagerError {
     #[error("approval denied for tool call '{tool_call_id}': {reason}")]
     ApprovalDenied {
         tool_call_id: String,
+
         reason: String,
     },
 

@@ -81,6 +81,7 @@ async fn replay_with_recorded_llm_response_skips_provider() {
                     content: "Replayed answer".into(),
                     tool_calls: vec![],
                     tool_call_id: None,
+            provider_content: vec![],
                 }),
             },
         },

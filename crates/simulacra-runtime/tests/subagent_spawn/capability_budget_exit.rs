@@ -7,6 +7,7 @@ async fn spawn_agent_tool_exit_reason_max_turns_uses_snake_case_format_per_spec(
             content: "ran out of turns".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens: 5,
@@ -241,12 +242,14 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_has_no_assista
                 content: "system prompt".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             },
             Message {
                 role: Role::User,
                 content: "task".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             },
         ],
         token_usage: TokenUsage {
@@ -297,6 +300,7 @@ async fn join_child_agent_returns_structured_terminal_success_metadata() {
             content: "done".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens: 9,
@@ -1007,6 +1011,7 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
                                     content: "done".into(),
                                     tool_calls: vec![],
                                     tool_call_id: None,
+                                    provider_content: vec![],
                                 }],
                                 token_usage: TokenUsage {
                                     input_tokens: 11,

@@ -34,6 +34,7 @@ fn running_the_child_loop_emits_an_invoke_agent_span() {
             content: "done".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens: 3,
@@ -391,6 +392,7 @@ async fn spawn_agent_tool_exit_reason_uses_snake_case_format_per_spec() {
             content: "partial".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens: 5,
@@ -419,6 +421,7 @@ async fn spawn_agent_tool_exit_reason_completed_uses_snake_case_format_per_spec(
             content: "done".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens: 5,

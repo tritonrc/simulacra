@@ -205,6 +205,7 @@ async fn child_token_usage_is_rolled_up_from_agent_loop_output_not_stale_spawn_b
             content: "child result".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         token_usage: TokenUsage {
             input_tokens: 19,

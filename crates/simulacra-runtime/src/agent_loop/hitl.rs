@@ -15,6 +15,7 @@ pub const REQUEST_INPUT_TOOL_NAME: &str = "request_input";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolApprovalResponse {
     pub tool_call_id: String,
+
     pub approved: bool,
     pub reason: Option<String>,
 }

@@ -673,6 +673,7 @@ fn assistant_response(content: &str, model: &str) -> ProviderResponse {
             content: content.to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage::default(),
         finish_reason: FinishReason::EndTurn,
@@ -692,6 +693,7 @@ fn tool_call_response(id: &str, name: &str, arguments: Value, model: &str) -> Pr
                 arguments,
             }],
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage::default(),
         finish_reason: FinishReason::ToolUse,
@@ -706,6 +708,7 @@ fn message(role: Role, content: &str) -> Message {
         content: content.to_string(),
         tool_calls: vec![],
         tool_call_id: None,
+        provider_content: vec![],
     }
 }
 

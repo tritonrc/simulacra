@@ -39,6 +39,7 @@ impl Provider for FakeProvider {
                     content: "ok".into(),
                     tool_calls: vec![],
                     tool_call_id: None,
+                    provider_content: vec![],
                 },
                 token_usage: TokenUsage::default(),
                 finish_reason: FinishReason::EndTurn,

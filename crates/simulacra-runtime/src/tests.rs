@@ -13,6 +13,7 @@ fn make_session(id: &str) -> Session {
             content: "hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         vfs_snapshot: None,
         created_at: 1000,
@@ -52,6 +53,7 @@ fn session_save_overwrites() {
         content: "world".into(),
         tool_calls: vec![],
         tool_call_id: None,
+        provider_content: vec![],
     });
     storage.save(&session).unwrap();
 
@@ -190,6 +192,7 @@ fn checkpoint_fork_creates_independent_journal() {
             content: "hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }],
         budget_snapshot: ResourceBudget::new(100_000, 10, Decimal::new(100, 0), 5),
         vfs_snapshot: None,

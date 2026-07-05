@@ -11,18 +11,21 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
                 content: "child system".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+            provider_content: vec![],
             },
             Message {
                 role: Role::User,
                 content: "child task".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+            provider_content: vec![],
             },
             Message {
                 role: Role::Assistant,
                 content: "child result".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+            provider_content: vec![],
             },
         ],
         token_usage: TokenUsage {
@@ -412,6 +415,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
                         arguments: serde_json::json!({}),
                     }],
                     tool_call_id: None,
+            provider_content: vec![],
                 }),
             },
         ),
@@ -419,6 +423,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
             "parent-agent",
             JournalEntryKind::ToolCall {
                 tool_call_id: Some("call-1".into()),
+
                 tool_name: "spawn_agent".into(),
                 arguments: serde_json::json!({}),
             },
@@ -427,6 +432,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
             "parent-agent",
             JournalEntryKind::ToolResult {
                 tool_call_id: Some("call-1".into()),
+
                 tool_name: "spawn_agent".into(),
                 content: r#"{"child_id":"child-1","agent_type":"researcher","exit_reason":"completed","message":"done","token_usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
                 is_error: false,
@@ -439,6 +445,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
         content: "delegate".into(),
         tool_calls: vec![],
         tool_call_id: None,
+            provider_content: vec![],
     }];
 
     let result = tokio::runtime::Builder::new_current_thread()

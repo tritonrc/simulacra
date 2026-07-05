@@ -170,12 +170,14 @@ async fn provider_tool_call_deltas_map_to_activity_events_without_partial_journa
             simulacra_types::ProviderStreamEvent::ToolCallDelta {
                 index: 0,
                 tool_call_id: Some("call-1".into()),
+
                 name: Some("file_read".into()),
                 arguments_delta: String::new(),
             },
             simulacra_types::ProviderStreamEvent::ToolCallDelta {
                 index: 0,
                 tool_call_id: Some("call-1".into()),
+
                 name: Some("file_read".into()),
                 arguments_delta: "{\"path\":\"/tmp/a\"}".into(),
             },
@@ -211,12 +213,14 @@ async fn provider_tool_call_deltas_map_to_activity_events_without_partial_journa
             ActivityEvent::ToolCallDelta {
                 index: 0,
                 tool_call_id: Some("call-1".into()),
+
                 name: Some("file_read".into()),
                 arguments_delta: String::new(),
             },
             ActivityEvent::ToolCallDelta {
                 index: 0,
                 tool_call_id: Some("call-1".into()),
+
                 name: Some("file_read".into()),
                 arguments_delta: "{\"path\":\"/tmp/a\"}".into(),
             },

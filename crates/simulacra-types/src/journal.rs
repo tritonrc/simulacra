@@ -217,6 +217,7 @@ mod tests {
             content: "hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         };
         let entry = make_entry(JournalEntryKind::LlmResponse {
             model: "claude-3".into(),
@@ -270,6 +271,7 @@ mod tests {
     fn roundtrip_tool_call() {
         let entry = make_entry(JournalEntryKind::ToolCall {
             tool_call_id: Some("tc-1".into()),
+
             tool_name: "read_file".into(),
             arguments: serde_json::json!({"path": "/tmp/test.rs"}),
         });
@@ -293,6 +295,7 @@ mod tests {
     fn roundtrip_tool_result() {
         let entry = make_entry(JournalEntryKind::ToolResult {
             tool_call_id: Some("tc-1".into()),
+
             tool_name: "read_file".into(),
             content: "file contents here".into(),
             is_error: false,
@@ -319,6 +322,7 @@ mod tests {
     fn roundtrip_tool_result_error() {
         let entry = make_entry(JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: "exec".into(),
             content: "permission denied".into(),
             is_error: true,
@@ -479,6 +483,7 @@ mod tests {
     fn empty_strings_roundtrip_correctly() {
         let entry = make_entry(JournalEntryKind::ToolResult {
             tool_call_id: None,
+
             tool_name: "".into(),
             content: "".into(),
             is_error: false,

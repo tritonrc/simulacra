@@ -285,6 +285,7 @@ where
                     content: "/workspace".to_string(),
                     tool_calls: vec![],
                     tool_call_id: Some(tc.id.clone()),
+                    provider_content: vec![],
                 });
                 continue;
             }
@@ -306,6 +307,7 @@ where
                         content: format!("capability denied for tool {}", tc.name),
                         tool_calls: vec![],
                         tool_call_id: Some(tc.id.clone()),
+                        provider_content: vec![],
                     });
                 } else {
                     self.view.executed_tools.push(tc.name.clone());
@@ -314,6 +316,7 @@ where
                         content: "/workspace".to_string(),
                         tool_calls: vec![],
                         tool_call_id: Some(tc.id.clone()),
+                        provider_content: vec![],
                     });
                 }
                 continue;
@@ -338,6 +341,7 @@ where
                                 content: format!("capability denied for tool {}", tc.name),
                                 tool_calls: vec![],
                                 tool_call_id: Some(tc.id.clone()),
+                                provider_content: vec![],
                             });
                         } else {
                             self.view.executed_tools.push(tc.name.clone());
@@ -346,6 +350,7 @@ where
                                 content: "/workspace".to_string(),
                                 tool_calls: vec![],
                                 tool_call_id: Some(tc.id.clone()),
+                                provider_content: vec![],
                             });
                         }
                         break;
@@ -356,6 +361,7 @@ where
                             content: "Tool call denied by user".to_string(),
                             tool_calls: vec![],
                             tool_call_id: Some(tc.id.clone()),
+                            provider_content: vec![],
                         });
                         break;
                     }
@@ -369,6 +375,7 @@ where
                                 content: format!("capability denied for tool {}", tc.name),
                                 tool_calls: vec![],
                                 tool_call_id: Some(tc.id.clone()),
+                                provider_content: vec![],
                             });
                         } else {
                             self.view.executed_tools.push(tc.name.clone());
@@ -377,6 +384,7 @@ where
                                 content: "/workspace".to_string(),
                                 tool_calls: vec![],
                                 tool_call_id: Some(tc.id.clone()),
+                                provider_content: vec![],
                             });
                         }
                         break;
@@ -642,6 +650,7 @@ where
             content: agent_loop.system_prompt().to_string(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
 
         // If task was provided, run it as the first user message
@@ -655,6 +664,7 @@ where
                 content: task.clone(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             });
             self.view.messages.push(user_message(&task));
 
@@ -751,6 +761,7 @@ where
                 content: input.clone(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             });
             self.view.messages.push(user_message(&input));
             self.view.used_turns += 1;
@@ -1230,6 +1241,7 @@ where
                 content: structured.to_string(),
                 tool_calls: vec![],
                 tool_call_id: Some("cancelled".to_string()),
+                provider_content: vec![],
             });
         } else {
             self.view.tool_results_to_model.push(Message {
@@ -1237,6 +1249,7 @@ where
                 content: "Cancelled by user".to_string(),
                 tool_calls: vec![],
                 tool_call_id: Some("cancelled".to_string()),
+                provider_content: vec![],
             });
         }
         self.view.clone()
@@ -1294,6 +1307,7 @@ where
             content: content.to_string(),
             tool_calls: vec![],
             tool_call_id: Some(tool_call_id.to_string()),
+            provider_content: vec![],
         });
     }
 
@@ -1316,6 +1330,7 @@ where
             content: message.to_string(),
             tool_calls: vec![],
             tool_call_id: Some("error".to_string()),
+            provider_content: vec![],
         });
         self.view.clone()
     }

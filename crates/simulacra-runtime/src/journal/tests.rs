@@ -141,6 +141,7 @@ fn fork_from_checkpoint_creates_storage_independent_of_original_mutations() {
                     content: "checkpoint".into(),
                     tool_calls: vec![],
                     tool_call_id: None,
+                    provider_content: vec![],
                 }],
                 budget_snapshot: ResourceBudget::new(256, 8, Decimal::new(100, 0), 0),
                 vfs_snapshot: Some(vec![1, 2, 3]),

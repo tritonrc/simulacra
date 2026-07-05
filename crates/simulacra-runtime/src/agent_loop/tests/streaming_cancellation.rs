@@ -61,6 +61,7 @@ async fn cancellation_after_tool_call_delta_does_not_journal_or_append_partial_t
         vec![simulacra_types::ProviderStreamEvent::ToolCallDelta {
             index: 0,
             tool_call_id: Some("call-partial".into()),
+
             name: Some("file_read".into()),
             arguments_delta: "{\"path\":\"/partial\"}".into(),
         }],

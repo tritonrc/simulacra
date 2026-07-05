@@ -7,8 +7,9 @@ use std::pin::Pin;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Histogram;
 use simulacra_types::{
-    FinishReason, Message, Provider, ProviderError, ProviderResponse, ProviderStreamEvent,
-    ProviderStreamSink, ResourceBudget, Role, StreamingProvider, TokenUsage, ToolDefinition,
+    FinishReason, Message, Provider, ProviderContentBlock, ProviderError, ProviderResponse,
+    ProviderStreamEvent, ProviderStreamSink, ResourceBudget, Role, StreamingProvider, TokenUsage,
+    ToolDefinition,
 };
 use tracing::Instrument;
 
@@ -281,9 +282,11 @@ struct AnthropicSseAccumulator<'a> {
     content: String,
     stop_reason: Option<String>,
     pending_tool_blocks: std::collections::BTreeMap<u64, (String, String, String)>,
+    pending_thinking_blocks: std::collections::BTreeMap<u64, (String, Option<String>)>,
     tool_block_indices: std::collections::BTreeSet<u64>,
     thinking_indices: std::collections::BTreeSet<u64>,
     tool_calls: Vec<simulacra_types::ToolCallMessage>,
+    provider_content: Vec<ProviderContentBlock>,
 }
 
 impl<'a> AnthropicSseAccumulator<'a> {
@@ -297,9 +300,11 @@ impl<'a> AnthropicSseAccumulator<'a> {
             content: String::new(),
             stop_reason: None,
             pending_tool_blocks: std::collections::BTreeMap::new(),
+            pending_thinking_blocks: std::collections::BTreeMap::new(),
             tool_block_indices: std::collections::BTreeSet::new(),
             thinking_indices: std::collections::BTreeSet::new(),
             tool_calls: Vec::new(),
+            provider_content: Vec::new(),
         }
     }
 
@@ -367,10 +372,30 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 }
             }
             "thinking" => {
+                let thinking = block
+                    .get("thinking")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let signature = block
+                    .get("signature")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                self.pending_thinking_blocks
+                    .insert(index, (thinking, signature));
                 self.thinking_indices.insert(index);
                 if let Some(provider_sink) = self.provider_sink {
                     provider_sink.emit(ProviderStreamEvent::ThinkingStart);
                 }
+            }
+            "redacted_thinking" => {
+                self.provider_content.push(ProviderContentBlock {
+                    provider: "anthropic".to_string(),
+                    value: serde_json::json!({
+                        "type": "redacted_thinking",
+                        "data": block.get("data").and_then(|v| v.as_str()).unwrap_or(""),
+                    }),
+                });
             }
             _ => {}
         }
@@ -407,12 +432,25 @@ impl<'a> AnthropicSseAccumulator<'a> {
                     .get("thinking")
                     .or_else(|| delta.get("text"))
                     .and_then(|v| v.as_str())
-                    && !text.is_empty()
-                    && let Some(provider_sink) = self.provider_sink
                 {
-                    provider_sink.emit(ProviderStreamEvent::ThinkingDelta {
-                        text: text.to_owned(),
-                    });
+                    if let Some((thinking, _)) = self.pending_thinking_blocks.get_mut(&index) {
+                        thinking.push_str(text);
+                    }
+                    if !text.is_empty()
+                        && let Some(provider_sink) = self.provider_sink
+                    {
+                        provider_sink.emit(ProviderStreamEvent::ThinkingDelta {
+                            text: text.to_owned(),
+                        });
+                    }
+                }
+            }
+            "signature_delta" if self.thinking_indices.contains(&index) => {
+                if let Some(signature) = delta.get("signature").and_then(|v| v.as_str())
+                    && let Some((_, pending_signature)) =
+                        self.pending_thinking_blocks.get_mut(&index)
+                {
+                    *pending_signature = Some(signature.to_string());
                 }
             }
             _ => {
@@ -459,9 +497,19 @@ impl<'a> AnthropicSseAccumulator<'a> {
             });
         }
         if self.thinking_indices.remove(&index)
-            && let Some(provider_sink) = self.provider_sink
+            && let Some((thinking, signature)) = self.pending_thinking_blocks.remove(&index)
         {
-            provider_sink.emit(ProviderStreamEvent::ThinkingEnd);
+            self.provider_content.push(ProviderContentBlock {
+                provider: "anthropic".to_string(),
+                value: serde_json::json!({
+                    "type": "thinking",
+                    "thinking": thinking,
+                    "signature": signature,
+                }),
+            });
+            if let Some(provider_sink) = self.provider_sink {
+                provider_sink.emit(ProviderStreamEvent::ThinkingEnd);
+            }
         }
     }
 
@@ -494,6 +542,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 content: self.content,
                 tool_calls: self.tool_calls,
                 tool_call_id: None,
+                provider_content: self.provider_content,
             },
             token_usage: TokenUsage {
                 input_tokens: self.input_tokens,
@@ -1247,6 +1296,33 @@ mod tests {
         .to_vec()
     }
 
+    fn streaming_thinking_tool_use_body() -> Vec<u8> {
+        concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_thinking_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-fable-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"inspect inputs\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-stream\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_thinking_stream\",\"name\":\"file_read\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/workspace/AGENTS.md\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
     fn fresh_budget() -> ResourceBudget {
         ResourceBudget::new(100_000, 100, Decimal::new(100, 0), 10)
     }
@@ -1276,6 +1352,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = exhausted_budget();
 
@@ -1307,6 +1384,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1338,6 +1416,7 @@ mod tests {
             content: "What's the weather?".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1367,6 +1446,7 @@ mod tests {
             content: "Think then answer.".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1374,6 +1454,16 @@ mod tests {
 
         assert_eq!(resp.message.content, "Final answer.");
         assert!(resp.message.tool_calls.is_empty());
+        assert_eq!(resp.message.provider_content.len(), 1);
+        assert_eq!(resp.message.provider_content[0].provider, "anthropic");
+        assert_eq!(
+            resp.message.provider_content[0].value["type"],
+            serde_json::json!("thinking")
+        );
+        assert_eq!(
+            resp.message.provider_content[0].value["signature"],
+            serde_json::json!("sig-test")
+        );
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.model, "claude-sonnet-5");
     }
@@ -1389,12 +1479,19 @@ mod tests {
             content: "Inspect the file.".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
         let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
 
         assert_eq!(resp.message.content, "");
+        assert_eq!(resp.message.provider_content.len(), 1);
+        assert_eq!(resp.message.provider_content[0].provider, "anthropic");
+        assert_eq!(
+            resp.message.provider_content[0].value["type"],
+            serde_json::json!("redacted_thinking")
+        );
         assert_eq!(resp.message.tool_calls.len(), 1);
         assert_eq!(resp.message.tool_calls[0].id, "toolu_thinking");
         assert_eq!(resp.message.tool_calls[0].name, "file_read");
@@ -1429,6 +1526,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1464,6 +1562,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1494,6 +1593,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1524,6 +1624,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1552,12 +1653,14 @@ mod tests {
                 content: "You are helpful.".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             },
             Message {
                 role: simulacra_types::Role::User,
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             },
         ];
         let tools = vec![ToolDefinition {
@@ -1613,6 +1716,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
         assert_eq!(budget.used_tokens, 0);
@@ -1641,6 +1745,7 @@ mod tests {
             content: "Hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1666,6 +1771,7 @@ mod tests {
             content: "Say hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
 
@@ -1701,6 +1807,7 @@ mod tests {
             content: "Say hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
         let sink = RecordingProviderStreamSink::default();
@@ -1723,6 +1830,61 @@ mod tests {
         assert_eq!(resp.token_usage.output_tokens, 7);
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.provider_response_id, Some("msg_stream789".to_string()));
+    }
+
+    #[tokio::test]
+    async fn streaming_thinking_blocks_round_trip_on_final_response() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &streaming_thinking_tool_use_body(),
+            headers,
+        );
+        let provider =
+            AnthropicProvider::with_http_client("test-key", "claude-fable-5", Box::new(fake));
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "inspect".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let resp = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("Anthropic streaming should assemble thinking blocks into final response");
+
+        let thinking_deltas: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                simulacra_types::ProviderStreamEvent::ThinkingDelta { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking_deltas, vec!["inspect inputs"]);
+        assert_eq!(resp.finish_reason, FinishReason::ToolUse);
+        assert_eq!(resp.message.provider_content.len(), 1);
+        assert_eq!(resp.message.provider_content[0].provider, "anthropic");
+        assert_eq!(
+            resp.message.provider_content[0].value,
+            serde_json::json!({
+                "type": "thinking",
+                "thinking": "inspect inputs",
+                "signature": "sig-stream"
+            })
+        );
+        assert_eq!(resp.message.tool_calls.len(), 1);
+        assert_eq!(resp.message.tool_calls[0].id, "toolu_thinking_stream");
     }
 
     fn streaming_tool_use_body() -> Vec<u8> {
@@ -1762,6 +1924,7 @@ mod tests {
             content: "weather".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
         let mut budget = fresh_budget();
         let sink = RecordingProviderStreamSink::default();
@@ -1792,18 +1955,21 @@ mod tests {
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("toolu_abc".into()),
+
                     name: Some("get_weather".into()),
                     arguments_delta: String::new(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("toolu_abc".into()),
+
                     name: Some("get_weather".into()),
                     arguments_delta: "{\"location".into(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("toolu_abc".into()),
+
                     name: Some("get_weather".into()),
                     arguments_delta: "\":\"SF\"}".into(),
                 },
@@ -1844,6 +2010,7 @@ mod tests {
             content: "hello".into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }];
 
         let mut budget_a = exhausted_budget();
@@ -2065,6 +2232,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2119,6 +2287,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2154,6 +2323,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2187,6 +2357,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2226,6 +2397,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2270,6 +2442,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2402,6 +2575,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2448,6 +2622,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2491,6 +2666,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2537,6 +2713,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2567,6 +2744,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2604,6 +2782,7 @@ mod tests {
                 content: "What's the weather?".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let tools = vec![ToolDefinition {
                 name: "get_weather".into(),
@@ -2653,6 +2832,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
@@ -2696,6 +2876,7 @@ mod tests {
                 content: "Hello".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
+                provider_content: vec![],
             }];
             let mut budget = fresh_budget();
 
