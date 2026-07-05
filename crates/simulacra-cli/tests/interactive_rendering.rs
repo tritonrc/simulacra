@@ -221,13 +221,16 @@ fn interactive_sessions_register_spawn_agent_and_list_it_in_tools_output() {
             "interactive /tools output should include {tool_name}"
         );
     }
-    assert!(
-        contains_text(
-            &view.visible_output,
-            "Spawn a supervised child agent to handle a delegated task"
-        ),
-        "interactive /tools output should include the documented spawn_agent description"
-    );
+    for expected in [
+        "concrete, bounded, independent subtask",
+        "returns a live child handle, not a final answer",
+        "join_child_agent when the terminal result is needed",
+    ] {
+        assert!(
+            contains_text(&view.visible_output, expected),
+            "interactive /tools output should include spawn_agent guidance {expected:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

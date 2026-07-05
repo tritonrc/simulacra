@@ -12,6 +12,29 @@ use super::*;
 // `SupervisorMessage` over the supervisor's mpsc channel and awaits the
 // matching oneshot acknowledgement.
 
+const JOIN_CHILD_AGENT_DESCRIPTION: &str = "\
+Wait for a child agent when its terminal result is needed and return the \
+canonical terminal summary. This is the potentially blocking API for consuming \
+the final child outcome after spawn_agent has returned a live handle.";
+
+const CHILD_STATUS_DESCRIPTION: &str = "\
+Cheap nonblocking probe for a child handle. Use child_status to inspect \
+whether a live or completed child is running, ready, completed, failed, or \
+cancelled without waiting for or consuming the terminal result.";
+
+const WAIT_CHILD_AGENT_DESCRIPTION: &str = "\
+Bounded, non-consuming wait for one child or for any child in child_ids to \
+become terminal. timeout_ms = 0 polls once without waiting. Supplying \
+child_ids performs wait-any orchestration and returns the first terminal child \
+in listed order when several are already ready. A timeout while the child is \
+still running is a successful non-error result with status running and ready \
+false; join_child_agent can still return the same terminal result later.";
+
+const CLOSE_CHILD_AGENT_DESCRIPTION: &str = "\
+Clean up a terminal child handle and cached terminal result after the parent no \
+longer needs it. close_child_agent is only for completed, failed, or cancelled \
+children; it is not cancellation and must not be used to stop running work.";
+
 pub struct JoinChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
 }
@@ -20,8 +43,7 @@ impl simulacra_types::Tool for JoinChildAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "join_child_agent".to_string(),
-            description: "Wait for a live child agent to finish and return its terminal summary."
-                .to_string(),
+            description: JOIN_CHILD_AGENT_DESCRIPTION.to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -88,8 +110,7 @@ impl simulacra_types::Tool for ChildStatusTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "child_status".to_string(),
-            description: "Inspect the status of a live or completed child agent handle."
-                .to_string(),
+            description: CHILD_STATUS_DESCRIPTION.to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -147,7 +168,7 @@ impl simulacra_types::Tool for WaitChildAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "wait_child_agent".to_string(),
-            description: "Wait for a child agent up to a bounded timeout without consuming its terminal result.".to_string(),
+            description: WAIT_CHILD_AGENT_DESCRIPTION.to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -264,8 +285,7 @@ impl simulacra_types::Tool for CloseChildAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "close_child_agent".to_string(),
-            description: "Release a completed child agent handle and its cached terminal result."
-                .to_string(),
+            description: CLOSE_CHILD_AGENT_DESCRIPTION.to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

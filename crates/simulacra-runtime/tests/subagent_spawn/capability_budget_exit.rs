@@ -454,15 +454,27 @@ fn make_real_spawn_agent_tool() -> SpawnAgentTool {
 }
 
 #[test]
-fn real_spawn_agent_tool_definition_uses_the_documented_name_and_description() {
+fn real_spawn_agent_tool_definition_includes_model_visible_orchestration_guidance() {
     let tool = make_real_spawn_agent_tool();
     let definition = tool.definition();
 
     assert_eq!(definition.name, "spawn_agent");
-    assert_eq!(
-        definition.description,
-        "Spawn a supervised child agent to handle a delegated task and return a live child handle."
-    );
+    for expected in [
+        "concrete, bounded, independent subtask",
+        "Do not delegate immediate critical-path blockers",
+        "returns a live child handle, not a final answer",
+        "continue non-overlapping parent work",
+        "child_status for cheap nonblocking inspection",
+        "wait_child_agent for bounded polling or wait-any orchestration",
+        "join_child_agent when the terminal result is needed",
+        "close_child_agent only to clean up a terminal child handle",
+    ] {
+        assert!(
+            definition.description.contains(expected),
+            "spawn_agent description should guide model behavior with phrase {expected:?}; got {:?}",
+            definition.description
+        );
+    }
 }
 
 #[test]
@@ -539,6 +551,11 @@ fn real_spawn_agent_tool_capabilities_schema_matches_spec_shape() {
 fn make_real_steer_child_agent_tool() -> SteerChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
     SteerChildAgentTool { sender }
+}
+
+fn make_real_join_child_agent_tool() -> JoinChildAgentTool {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    JoinChildAgentTool { sender }
 }
 
 fn make_real_child_status_tool() -> ChildStatusTool {
@@ -634,6 +651,72 @@ async fn steer_child_agent_tool_sends_command_and_returns_queued_status() {
         result,
         serde_json::json!({ "child_id": "child-1", "status": "queued" })
     );
+}
+
+#[test]
+fn s054_child_orchestration_tool_descriptions_provide_model_visible_guidance() {
+    let join = make_real_join_child_agent_tool().definition();
+    assert_eq!(join.name, "join_child_agent");
+    for expected in [
+        "terminal result is needed",
+        "canonical terminal summary",
+        "potentially blocking API",
+        "spawn_agent has returned a live handle",
+    ] {
+        assert!(
+            join.description.contains(expected),
+            "join_child_agent description should include {expected:?}; got {:?}",
+            join.description
+        );
+    }
+
+    let status = make_real_child_status_tool().definition();
+    assert_eq!(status.name, "child_status");
+    for expected in [
+        "Cheap nonblocking probe",
+        "inspect",
+        "running",
+        "ready",
+        "without waiting for or consuming the terminal result",
+    ] {
+        assert!(
+            status.description.contains(expected),
+            "child_status description should include {expected:?}; got {:?}",
+            status.description
+        );
+    }
+
+    let wait = make_real_wait_child_agent_tool().definition();
+    assert_eq!(wait.name, "wait_child_agent");
+    for expected in [
+        "Bounded, non-consuming wait",
+        "timeout_ms = 0 polls once without waiting",
+        "child_ids performs wait-any orchestration",
+        "timeout while the child is still running is a successful non-error result",
+        "status running and ready false",
+        "join_child_agent can still return the same terminal result later",
+    ] {
+        assert!(
+            wait.description.contains(expected),
+            "wait_child_agent description should include {expected:?}; got {:?}",
+            wait.description
+        );
+    }
+
+    let close = make_real_close_child_agent_tool().definition();
+    assert_eq!(close.name, "close_child_agent");
+    for expected in [
+        "Clean up a terminal child handle",
+        "completed, failed, or cancelled children",
+        "not cancellation",
+        "must not be used to stop running work",
+    ] {
+        assert!(
+            close.description.contains(expected),
+            "close_child_agent description should include {expected:?}; got {:?}",
+            close.description
+        );
+    }
 }
 
 #[test]

@@ -22,6 +22,32 @@ semantics.
 
 ## Behavior
 
+### Model-visible tool guidance
+
+- [x] Child-control tool descriptions are model-visible behavioral guidance.
+  They are part of the tool contract sent to providers when the tools are
+  available, not incidental implementation prose.
+- [x] `spawn_agent` description explains the intended lifecycle: spawn only
+  concrete, bounded, independent subtasks; do not delegate immediate
+  critical-path blockers; the tool returns a live handle, not a final answer;
+  continue non-overlapping parent work after spawning; use `child_status` for
+  cheap inspection; use `wait_child_agent` for bounded polling or wait-any;
+  use `join_child_agent` when the terminal result is needed; and use
+  `close_child_agent` only for terminal cleanup.
+- [x] `child_status` description identifies it as a cheap nonblocking
+  handle/status probe.
+- [x] `wait_child_agent` description identifies it as a bounded,
+  non-consuming wait; states that `timeout_ms = 0` is a poll; states that
+  `child_ids` performs wait-any; and states that a running timeout is a
+  successful non-error result.
+- [x] `join_child_agent` description identifies it as the canonical,
+  potentially-blocking terminal-summary API.
+- [x] `close_child_agent` description identifies it as terminal cleanup only,
+  not cancellation.
+- [x] These description changes do not change supervisor behavior, tool names,
+  input schemas, registry exposure, child lifecycle semantics, or provider
+  `ToolDefinition` shape.
+
 ### Supervisor state
 
 - [x] The supervisor tracks stable child metadata for each accepted child:

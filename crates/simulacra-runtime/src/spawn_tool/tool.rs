@@ -1,5 +1,14 @@
 use super::*;
 
+const SPAWN_AGENT_DESCRIPTION: &str = "\
+Spawn a supervised child agent for a concrete, bounded, independent subtask. \
+Do not delegate immediate critical-path blockers when the parent cannot make \
+progress until the answer returns. This tool returns a live child handle, not \
+a final answer. After spawning, continue non-overlapping parent work; use \
+child_status for cheap nonblocking inspection, wait_child_agent for bounded \
+polling or wait-any orchestration, join_child_agent when the terminal result \
+is needed, and close_child_agent only to clean up a terminal child handle.";
+
 // ---------------------------------------------------------------------------
 // SpawnAgentTool
 // ---------------------------------------------------------------------------
@@ -36,7 +45,7 @@ impl simulacra_types::Tool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "spawn_agent".to_string(),
-            description: "Spawn a supervised child agent to handle a delegated task and return a live child handle.".to_string(),
+            description: SPAWN_AGENT_DESCRIPTION.to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
