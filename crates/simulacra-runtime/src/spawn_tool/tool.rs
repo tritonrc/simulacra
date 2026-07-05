@@ -406,17 +406,7 @@ impl simulacra_types::Tool for JoinChildAgentTool {
                 )
             })?;
             let terminal = terminal.map_err(simulacra_types::ToolError::ExecutionFailed)?;
-            match terminal.result {
-                Ok(output) => Ok(child_success_json(
-                    terminal.child_id.0,
-                    terminal.agent_type,
-                    output,
-                )),
-                Err(error) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                    "child {} (agent_type={}) failed: {error}",
-                    terminal.child_id.0, terminal.agent_type
-                ))),
-            }
+            Ok(child_terminal_json(terminal, None))
         })
     }
 }
@@ -872,11 +862,7 @@ fn parse_wait_target(arguments: &serde_json::Value) -> Result<WaitTarget, ToolEr
     Ok(WaitTarget::Any(parsed))
 }
 
-fn child_success_json(
-    child_id: String,
-    agent_type: String,
-    output: AgentLoopOutput,
-) -> serde_json::Value {
+fn child_success_json(terminal: ChildTerminalResult, output: AgentLoopOutput) -> serde_json::Value {
     let exit_reason_str = exit_reason_to_snake_case(&output.exit_reason);
     let message = output
         .messages
@@ -886,15 +872,56 @@ fn child_success_json(
         .unwrap_or_default();
 
     serde_json::json!({
-        "child_id": child_id,
-        "agent_type": agent_type,
+        "child_id": terminal.child_id.0,
+        "agent_type": terminal.agent_type,
+        "status": terminal.status,
+        "ready": true,
         "exit_reason": exit_reason_str,
         "message": message,
+        "elapsed_ms": terminal.elapsed_ms,
+        "tool_uses": terminal.tool_uses,
         "token_usage": {
             "input_tokens": output.token_usage.input_tokens,
             "output_tokens": output.token_usage.output_tokens
-        }
+        },
+        "artifacts": [],
+        "vfs_changes": []
     })
+}
+
+fn child_failed_json(terminal: ChildTerminalResult, error: String) -> serde_json::Value {
+    serde_json::json!({
+        "child_id": terminal.child_id.0,
+        "agent_type": terminal.agent_type,
+        "status": terminal.status,
+        "ready": true,
+        "exit_reason": terminal.status,
+        "message": error,
+        "elapsed_ms": terminal.elapsed_ms,
+        "tool_uses": terminal.tool_uses,
+        "token_usage": {
+            "input_tokens": 0,
+            "output_tokens": 0
+        },
+        "artifacts": [],
+        "vfs_changes": []
+    })
+}
+
+fn child_terminal_json(
+    terminal: ChildTerminalResult,
+    status_override: Option<String>,
+) -> serde_json::Value {
+    let mut json = match terminal.result.clone() {
+        Ok(output) => child_success_json(terminal, output),
+        Err(error) => child_failed_json(terminal, error),
+    };
+    if let serde_json::Value::Object(ref mut object) = json
+        && let Some(status) = status_override
+    {
+        object.insert("status".to_string(), serde_json::Value::String(status));
+    }
+    json
 }
 
 fn child_status_json(status: ChildStatus) -> serde_json::Value {
@@ -909,28 +936,7 @@ fn child_status_json(status: ChildStatus) -> serde_json::Value {
 
 fn wait_child_json(wait: WaitChildResult) -> serde_json::Value {
     if let Some(terminal) = wait.terminal {
-        match terminal.result {
-            Ok(output) => {
-                let mut json = child_success_json(terminal.child_id.0, terminal.agent_type, output);
-                if let serde_json::Value::Object(ref mut object) = json {
-                    object.insert("status".to_string(), serde_json::Value::String(wait.status));
-                    object.insert("ready".to_string(), serde_json::Value::Bool(true));
-                }
-                json
-            }
-            Err(error) => serde_json::json!({
-                "child_id": terminal.child_id.0,
-                "agent_type": terminal.agent_type,
-                "status": wait.status,
-                "ready": true,
-                "exit_reason": "failed",
-                "message": error,
-                "token_usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0
-                }
-            }),
-        }
+        child_terminal_json(terminal, Some(wait.status))
     } else {
         serde_json::json!({
             "child_id": wait.child_id.0,
@@ -942,28 +948,7 @@ fn wait_child_json(wait: WaitChildResult) -> serde_json::Value {
 
 fn wait_children_json(wait: WaitChildrenResult) -> serde_json::Value {
     if let Some(terminal) = wait.terminal {
-        match terminal.result {
-            Ok(output) => {
-                let mut json = child_success_json(terminal.child_id.0, terminal.agent_type, output);
-                if let serde_json::Value::Object(ref mut object) = json {
-                    object.insert("status".to_string(), serde_json::Value::String(wait.status));
-                    object.insert("ready".to_string(), serde_json::Value::Bool(true));
-                }
-                json
-            }
-            Err(error) => serde_json::json!({
-                "child_id": terminal.child_id.0,
-                "agent_type": terminal.agent_type,
-                "status": wait.status,
-                "ready": true,
-                "exit_reason": "failed",
-                "message": error,
-                "token_usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0
-                }
-            }),
-        }
+        child_terminal_json(terminal, Some(wait.status))
     } else {
         serde_json::json!({
             "child_ids": wait.child_ids.into_iter().map(|child_id| child_id.0).collect::<Vec<_>>(),

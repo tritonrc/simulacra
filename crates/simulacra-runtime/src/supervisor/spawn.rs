@@ -278,6 +278,9 @@ impl AgentSupervisor {
             let terminal = ChildTerminalResult {
                 child_id: result_context.agent_id.clone(),
                 agent_type: result_context.agent_type.clone(),
+                status: status_from_spawn_result(&finalized),
+                elapsed_ms: result_context.spawn_start.elapsed().as_millis() as u64,
+                tool_uses: finalized.as_ref().map(count_tool_uses).unwrap_or(0),
                 result: finalized.map_err(|err| err.to_string()),
             };
             Self::record_child_terminal_result(&self.child_results, terminal);
@@ -310,6 +313,9 @@ impl AgentSupervisor {
             let terminal = ChildTerminalResult {
                 child_id: result_context.agent_id.clone(),
                 agent_type: result_context.agent_type.clone(),
+                status: status_from_spawn_result(&result),
+                elapsed_ms: result_context.spawn_start.elapsed().as_millis() as u64,
+                tool_uses: result.as_ref().map(count_tool_uses).unwrap_or(0),
                 result: result.map_err(|err| err.to_string()),
             };
             Self::record_child_terminal_result(&child_results, terminal);
@@ -448,6 +454,28 @@ impl AgentSupervisor {
                 Err(err)
             }
         }
+    }
+}
+
+pub(super) fn count_tool_uses(output: &AgentLoopOutput) -> u64 {
+    // Tool-result messages are the structured child-output record of tool invocations.
+    output
+        .messages
+        .iter()
+        .filter(|message| message.role == simulacra_types::Role::Tool)
+        .count() as u64
+}
+
+pub(super) fn status_from_spawn_result(result: &SpawnResult) -> String {
+    match result {
+        Ok(output) if output.exit_reason == simulacra_types::ExitReason::Cancelled => {
+            "cancelled".to_string()
+        }
+        Ok(output) if matches!(output.exit_reason, simulacra_types::ExitReason::Error(_)) => {
+            "failed".to_string()
+        }
+        Ok(_) => "completed".to_string(),
+        Err(_) => "failed".to_string(),
     }
 }
 

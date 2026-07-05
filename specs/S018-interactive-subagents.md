@@ -154,10 +154,10 @@ InteractiveSession (S015)
 
 4. If validation or spawn acceptance fails before a child starts, `spawn_agent` MUST return an error tool result (`is_error: true` at the agent-loop boundary). If the failure is budget-related or capability-related, the error string MUST preserve the underlying reason.
 5. `spawn_agent` is non-blocking from the parent model's perspective: the parent turn receives a live child handle immediately after the supervisor accepts the spawn. The parent receives exactly one handle result message for each `spawn_agent` tool call.
-5a. `exit_reason` in the success result is one of: `"completed"`, `"budget_exhausted"`, `"max_turns"`. Only `"completed"` means the child finished normally. `"budget_exhausted"` and `"max_turns"` are partial-success results (child did work but hit a limit); these are NOT error results — the parent receives whatever the child produced. True failures (capability denied, spawn rejected, runtime error, cancellation) are error results with `is_error: true`.
+5a. `exit_reason` in a terminal child summary is one of: `"completed"`, `"budget_exhausted"`, `"max_turns"`, `"cancelled"`, or `"failed"`. Only `"completed"` means the child finished normally. `"budget_exhausted"` and `"max_turns"` are partial-success results (child did work but hit a limit). Accepted-child runtime failure and cancellation are terminal summaries with `status: "failed"` or `status: "cancelled"` so the parent can branch on structured metadata. Spawn rejection, capability denial before child acceptance, unknown/closed child handles, and supervisor channel failures remain tool errors with `is_error: true`.
 5b. `spawn_agent` is auto-approved and MUST NOT require user confirmation. The parent agent's decision to delegate is sufficient — the child's capabilities are attenuated and budget-bounded by the host. The user sees the spawn in the transcript but is not prompted.
 5c. The default restart strategy for interactive sub-agents is `LetCrash` — the child runs once, and if it fails the parent sees the error. No automatic restarts unless a future spec adds restart configuration to the tool schema.
-5d. `join_child_agent` accepts `{ "child_id": "..." }`, waits for the child terminal result if needed, and returns the former `spawn_agent` terminal summary shape: `child_id`, `agent_type`, `exit_reason`, `message`, and `token_usage`.
+5d. `join_child_agent` accepts `{ "child_id": "..." }`, waits for the child terminal result if needed, and returns the terminal summary shape: `child_id`, `agent_type`, `status`, `ready`, `exit_reason`, `message`, `token_usage`, `elapsed_ms`, `tool_uses`, `artifacts`, and `vfs_changes`.
 5e. `cancel_child_agent` accepts `{ "child_id": "...", "reason": "optional" }`, signals that child only, and returns `{ "child_id": "...", "status": "cancel_requested" }`. Terminal cancellation is observed through `join_child_agent` and `ChildFinished`.
 5f. `steer_child_agent` accepts `{ "child_id": "...", "message": "..." }`, queues `message` into the live child's conversation before its next provider call, and returns `{ "child_id": "...", "status": "queued" }`.
 5g. Empty `child_id` or blank `message` is an invalid-arguments error.
@@ -174,14 +174,14 @@ InteractiveSession (S015)
    - `agent_type: String` — the configured child type name selected from `simulacra.toml`;
    - `task: String` — the delegated task text passed to `AgentLoop::run(task)`.
 10. The supervisor actor loop remains a host-side concern. The LLM does not send supervisor messages directly and does not observe raw actor protocol messages.
-11. Ctrl-C behavior from S015 extends to child execution: if the user interrupts while `join_child_agent` is waiting on a child, the interactive host MUST signal cancellation through the supervisor and the join result MUST be an error result with content indicating cancellation.
+11. Ctrl-C behavior from S015 extends to child execution: if the user interrupts while `join_child_agent` is waiting on a child, the interactive host MUST signal cancellation through the supervisor and the terminal child summary MUST report `status: "cancelled"` when cancellation is observed.
 
 ### Child result flow back to the parent
 
 12. When the parent model emits `spawn_agent`, the parent `AgentLoop` journals the normal `ToolCall` entry first, as required by S012/S005.
 13. The `spawn_agent` tool MUST return the accepted child handle without waiting for the child's terminal outcome.
 14. The parent model sees the child outcome only through `join_child_agent`. The child's internal conversation history is NOT appended to the parent's message list.
-15. The `join_child_agent` result content sent to the parent MUST contain only the child's terminal summary (`message`) and aggregate `token_usage`. Intermediate child tool results, internal reasoning, and child journal internals remain host-local unless the child includes them in its final assistant message.
+15. The `join_child_agent` result content sent to the parent MUST contain only the child's terminal summary (`message`), structured status metadata, aggregate `token_usage`, `elapsed_ms`, `tool_uses`, and artifact/change summary fields. Intermediate child tool results, internal reasoning, and child journal internals remain host-local unless the child includes them in its final assistant message.
 16. If the child exits without a final assistant message, the joined `message` field MUST be an empty string rather than fabricating a summary.
 
 ### TaskFactory and child `AgentLoop` construction
@@ -225,7 +225,7 @@ InteractiveSession (S015)
 33. Journaling remains host-side and follows the Golden Rule: spawn and completion/failure journal entries are written before the corresponding result is returned to the parent tool call.
 34. When a spawn is accepted, the host MUST append `JournalEntryKind::SubAgentSpawned { child_id, agent_type }` under the parent agent's journal before the child begins execution.
 35. On successful child completion, the host MUST append `JournalEntryKind::SubAgentCompleted { child_id, success: true }` before `join_child_agent` returns its success JSON to the parent.
-36. On child failure or cancellation, the host MUST append `JournalEntryKind::SubAgentCompleted { child_id, success: false }` before `join_child_agent` returns its error tool result to the parent.
+36. On child failure or cancellation, the host MUST append `JournalEntryKind::SubAgentCompleted { child_id, success: false }` before `join_child_agent` returns its structured terminal summary to the parent.
 37. The child agent maintains its own journal stream under `child_id` for its internal turns, tool calls, and results. Parent and child journals are linked by the parent's `SubAgentSpawned` / `SubAgentCompleted` entries and the shared `child_id`.
 38. Replay of the parent journal MUST preserve the parent-visible tool result of `spawn_agent`; replay does not require re-running the child live if the corresponding parent `ToolResult` entry already exists.
 
@@ -254,7 +254,7 @@ can_spawn = ["researcher", "reviewer"]
 47. The parent tool call block remains visible in the transcript as `[tool] spawn_agent: <arguments-json>` per S015. The final child result is rendered as the tool result that returns to the parent.
 48. If multiple nested child agents are permitted in the future, each rendered line MUST retain the immediate child prefix; this spec does not require tree rendering beyond stable prefixes.
 49. On child failure, the user MUST see an error line with the child prefix before control returns to the parent turn.
-50. On child cancellation, the user MUST see a cancellation line with the child prefix and the parent turn resumes with an error tool result.
+50. On child cancellation, the user MUST see a cancellation line with the child prefix and the parent turn resumes with a structured terminal summary whose `status` is `"cancelled"`.
 
 ### Generic sub-agents (S023)
 
@@ -267,9 +267,9 @@ Generic sub-agent spawning is specified in S023. The `spawn_agent` tool accepts 
 - [x] `spawn_agent` is registered in interactive sessions and appears in `/tools` output with the documented name and description. *(SpawnAgentTool registered in InteractiveSession; definition().name == "spawn_agent")*
 - [x] The `spawn_agent` tool definition exposes `agent_type`, `task`, `budget`, and optional `capabilities` with a valid JSON Schema. *(SpawnAgentTool::definition() returns input_schema with all four properties and correct types)*
 - [x] A successful `spawn_agent` call returns a tool result whose JSON content includes `child_id`, `agent_type`, and `status: "running"`.
-- [x] `join_child_agent` returns a terminal result whose JSON content includes `child_id`, `agent_type`, `exit_reason`, `message`, and `token_usage`.
+- [x] `join_child_agent` returns a terminal result whose JSON content includes `child_id`, `agent_type`, `status`, `ready`, `exit_reason`, `message`, `token_usage`, `elapsed_ms`, `tool_uses`, `artifacts`, and `vfs_changes`.
 - [x] `cancel_child_agent` returns `status: "cancel_requested"` and causes the targeted child to observe cancellation.
-- [x] Child runtime failures (supervisor errors, child panics) return `Err(ToolError::ExecutionFailed(...))` so the AgentLoop marks the result as `is_error: true`. Capability violations from `can_spawn` also return `Err(ToolError)`.
+- [x] Child runtime failures after handle acceptance return a structured terminal summary from `join_child_agent` with `status: "failed"`. Spawn rejection, supervisor channel failure, unknown/closed child handles, and capability violations from `can_spawn` return `Err(ToolError)`.
 - [x] `steer_child_agent` is registered anywhere `spawn_agent`, `join_child_agent`, and `cancel_child_agent` are registered for spawn-capable agents.
 - [x] The `steer_child_agent` tool definition exposes required `child_id` and `message` string fields and disallows additional properties.
 - [x] A successful `steer_child_agent` call returns a tool result whose JSON content includes `child_id` and `status: "queued"`.
@@ -279,7 +279,7 @@ Generic sub-agent spawning is specified in S023. The `spawn_agent` tool accepts 
 
 - [x] `InteractiveSession` starts one supervisor actor loop for the session and reuses it across multiple parent turns.
 - [x] `spawn_agent` requests are sent to the supervisor as `SupervisorPayload::Spawn` command messages rather than bypassing the actor loop.
-- [x] Ctrl-C while waiting on a child signals supervisor cancellation and returns an error tool result to the parent.
+- [x] Ctrl-C while waiting on a child signals supervisor cancellation and returns a structured cancellation terminal summary to the parent.
 
 ### Child execution and result flow
 

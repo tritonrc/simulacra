@@ -1,4 +1,5 @@
 use super::restart::run_task_with_retries;
+use super::spawn::{count_tool_uses, status_from_spawn_result};
 use super::*;
 
 impl AgentSupervisor {
@@ -142,6 +143,9 @@ impl AgentSupervisor {
             let terminal = ChildTerminalResult {
                 child_id: result_context.agent_id.clone(),
                 agent_type: result_context.agent_type.clone(),
+                status: status_from_spawn_result(&result),
+                elapsed_ms: result_context.spawn_start.elapsed().as_millis() as u64,
+                tool_uses: result.as_ref().map(count_tool_uses).unwrap_or(0),
                 result: result.map_err(|err| err.to_string()),
             };
             AgentSupervisor::record_child_terminal_result(&child_results, terminal);
@@ -453,18 +457,20 @@ impl AgentSupervisor {
 
     pub(super) fn record_child_terminal_result(
         child_results: &Arc<Mutex<HashMap<AgentId, ChildRunState>>>,
-        terminal: ChildTerminalResult,
+        mut terminal: ChildTerminalResult,
     ) {
         let (join_waiters, wait_waiters) = {
             let mut results = lock_mutex(child_results, "child_results");
+            let finished_at_ms = now_ms();
             let fallback_metadata = ChildMetadata {
                 child_id: terminal.child_id.clone(),
                 agent_type: terminal.agent_type.clone(),
                 task: String::new(),
                 parent_id: AgentId(String::new()),
-                started_at_ms: now_ms(),
+                started_at_ms: finished_at_ms,
                 finished_at_ms: None,
             };
+            let had_state = results.contains_key(&terminal.child_id);
             let state = results
                 .entry(terminal.child_id.clone())
                 .or_insert_with(|| ChildRunState {
@@ -473,7 +479,10 @@ impl AgentSupervisor {
                     join_waiters: Vec::new(),
                     wait_waiters: Vec::new(),
                 });
-            state.metadata.finished_at_ms = Some(now_ms());
+            state.metadata.finished_at_ms = Some(finished_at_ms);
+            if had_state {
+                terminal.elapsed_ms = finished_at_ms.saturating_sub(state.metadata.started_at_ms);
+            }
             state.result = Some(terminal.clone());
             let join_waiters = std::mem::take(&mut state.join_waiters);
             let wait_waiters = std::mem::take(&mut state.wait_waiters);
@@ -538,16 +547,7 @@ pub(super) fn child_metadata(config: &SpawnConfig, started_at_ms: u64) -> ChildM
 }
 
 fn status_from_terminal(terminal: &ChildTerminalResult) -> String {
-    match &terminal.result {
-        Ok(output) if output.exit_reason == simulacra_types::ExitReason::Cancelled => {
-            "cancelled".to_string()
-        }
-        Ok(output) if matches!(output.exit_reason, simulacra_types::ExitReason::Error(_)) => {
-            "failed".to_string()
-        }
-        Ok(_) => "completed".to_string(),
-        Err(_) => "failed".to_string(),
-    }
+    terminal.status.clone()
 }
 
 fn status_from_state(state: &ChildRunState) -> ChildStatus {

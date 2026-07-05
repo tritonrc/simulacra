@@ -288,6 +288,98 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_messages_list_
     );
 }
 
+#[tokio::test]
+async fn join_child_agent_returns_structured_terminal_success_metadata() {
+    let output = AgentLoopOutput {
+        exit_reason: ExitReason::Complete,
+        messages: vec![Message {
+            role: Role::Assistant,
+            content: "done".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }],
+        token_usage: TokenUsage {
+            input_tokens: 9,
+            output_tokens: 4,
+        },
+        used_turns: 1,
+        used_cost: Decimal::ZERO,
+    };
+
+    let result = run_join_tool_call_with_metadata(Ok(output), 123, 2).await;
+
+    assert_eq!(
+        result.expect("join should return structured terminal JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "completed",
+            "ready": true,
+            "exit_reason": "completed",
+            "message": "done",
+            "elapsed_ms": 123,
+            "tool_uses": 2,
+            "token_usage": {
+                "input_tokens": 9,
+                "output_tokens": 4
+            },
+            "artifacts": [],
+            "vfs_changes": []
+        })
+    );
+}
+
+#[tokio::test]
+async fn join_child_agent_returns_structured_terminal_failure_metadata() {
+    let result = run_join_tool_call_with_metadata(Err("boom".into()), 123, 0).await;
+
+    assert_eq!(
+        result.expect("join should return structured failure JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "failed",
+            "ready": true,
+            "exit_reason": "failed",
+            "message": "boom",
+            "elapsed_ms": 123,
+            "tool_uses": 0,
+            "token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            },
+            "artifacts": [],
+            "vfs_changes": []
+        })
+    );
+}
+
+#[tokio::test]
+async fn join_child_agent_preserves_cancelled_terminal_status_metadata() {
+    let result =
+        run_join_tool_call_with_status_metadata(Err("cancelled".into()), "cancelled", 123, 0).await;
+
+    assert_eq!(
+        result.expect("join should return structured cancellation JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "cancelled",
+            "ready": true,
+            "exit_reason": "cancelled",
+            "message": "cancelled",
+            "elapsed_ms": 123,
+            "tool_uses": 0,
+            "token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            },
+            "artifacts": [],
+            "vfs_changes": []
+        })
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Finding 7: Cancellation path — oneshot sender dropped.
 // RED — SpawnAgentTool returns Ok(json!({..error..})) instead of Err(ToolError).
@@ -822,6 +914,9 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
                         terminal: Some(ChildTerminalResult {
                             child_id,
                             agent_type: "researcher".into(),
+                            status: "completed".into(),
+                            elapsed_ms: 42,
+                            tool_uses: 0,
                             result: Ok(AgentLoopOutput {
                                 exit_reason: ExitReason::Complete,
                                 messages: vec![Message {
@@ -855,10 +950,14 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
             "ready": true,
             "exit_reason": "completed",
             "message": "done",
+            "elapsed_ms": 42,
+            "tool_uses": 0,
             "token_usage": {
                 "input_tokens": 11,
                 "output_tokens": 7
-            }
+            },
+            "artifacts": [],
+            "vfs_changes": []
         })
     );
 }
@@ -887,6 +986,9 @@ async fn wait_child_agent_tool_returns_failed_terminal_json() {
                         terminal: Some(ChildTerminalResult {
                             child_id,
                             agent_type: "researcher".into(),
+                            status: "failed".into(),
+                            elapsed_ms: 42,
+                            tool_uses: 0,
                             result: Err("boom".into()),
                         }),
                     }))
@@ -906,10 +1008,14 @@ async fn wait_child_agent_tool_returns_failed_terminal_json() {
             "ready": true,
             "exit_reason": "failed",
             "message": "boom",
+            "elapsed_ms": 42,
+            "tool_uses": 0,
             "token_usage": {
                 "input_tokens": 0,
                 "output_tokens": 0
-            }
+            },
+            "artifacts": [],
+            "vfs_changes": []
         })
     );
 }
@@ -937,6 +1043,9 @@ async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
                         terminal: Some(ChildTerminalResult {
                             child_id: AgentId("child-2".into()),
                             agent_type: "researcher".into(),
+                            status: "failed".into(),
+                            elapsed_ms: 42,
+                            tool_uses: 0,
                             result: Err("boom".into()),
                         }),
                     }))
@@ -956,10 +1065,14 @@ async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
             "ready": true,
             "exit_reason": "failed",
             "message": "boom",
+            "elapsed_ms": 42,
+            "tool_uses": 0,
             "token_usage": {
                 "input_tokens": 0,
                 "output_tokens": 0
-            }
+            },
+            "artifacts": [],
+            "vfs_changes": []
         })
     );
 }

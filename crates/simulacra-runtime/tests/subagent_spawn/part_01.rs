@@ -412,6 +412,24 @@ async fn run_spawn_tool_call(
 async fn run_join_tool_call(
     terminal_result: Result<AgentLoopOutput, String>,
 ) -> Result<serde_json::Value, ToolError> {
+    run_join_tool_call_with_metadata(terminal_result, 42, 0).await
+}
+
+async fn run_join_tool_call_with_metadata(
+    terminal_result: Result<AgentLoopOutput, String>,
+    elapsed_ms: u64,
+    tool_uses: u64,
+) -> Result<serde_json::Value, ToolError> {
+    let status = status_from_join_terminal_result(&terminal_result);
+    run_join_tool_call_with_status_metadata(terminal_result, status, elapsed_ms, tool_uses).await
+}
+
+async fn run_join_tool_call_with_status_metadata(
+    terminal_result: Result<AgentLoopOutput, String>,
+    status: &str,
+    elapsed_ms: u64,
+    tool_uses: u64,
+) -> Result<serde_json::Value, ToolError> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     let tool = JoinChildAgentTool { sender };
     let call_future = tool.call(
@@ -430,6 +448,9 @@ async fn run_join_tool_call(
                     .send(Ok(ChildTerminalResult {
                         child_id,
                         agent_type: "researcher".into(),
+                        status: status.to_string(),
+                        elapsed_ms,
+                        tool_uses,
                         result: terminal_result,
                     }))
                     .expect("join tool should still be awaiting the terminal result");
@@ -439,4 +460,13 @@ async fn run_join_tool_call(
     };
     let (result, _) = tokio::join!(call_future, receive_future);
     result
+}
+
+fn status_from_join_terminal_result(result: &Result<AgentLoopOutput, String>) -> &'static str {
+    match result {
+        Ok(output) if output.exit_reason == ExitReason::Cancelled => "cancelled",
+        Ok(output) if matches!(output.exit_reason, ExitReason::Error(_)) => "failed",
+        Ok(_) => "completed",
+        Err(_) => "failed",
+    }
 }

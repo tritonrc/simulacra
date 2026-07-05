@@ -91,6 +91,9 @@ pub struct SpawnAck {
 pub struct ChildTerminalResult {
     pub child_id: AgentId,
     pub agent_type: String,
+    pub status: String,
+    pub elapsed_ms: u64,
+    pub tool_uses: u64,
     pub result: Result<AgentLoopOutput, String>,
 }
 

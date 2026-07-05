@@ -632,6 +632,110 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
 }
 
 #[tokio::test]
+async fn join_child_terminal_result_includes_elapsed_ms_and_structured_tool_use_count() {
+    let factory = FakeTaskFactory::new();
+    factory.push_plan(
+        "child-with-tools",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: AgentLoopOutput {
+                exit_reason: ExitReason::Complete,
+                messages: vec![
+                    Message {
+                        role: Role::Tool,
+                        content: "tool one".into(),
+                        tool_calls: vec![],
+                        tool_call_id: Some("tool-1".into()),
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: "middle".into(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    },
+                    Message {
+                        role: Role::Tool,
+                        content: "tool two".into(),
+                        tool_calls: vec![],
+                        tool_call_id: Some("tool-2".into()),
+                    },
+                    Message {
+                        role: Role::Assistant,
+                        content: "done".into(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                    },
+                ],
+                token_usage: TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                },
+                used_turns: 1,
+                used_cost: Decimal::ZERO,
+            },
+        },
+    );
+
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory.clone()),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::Spawn(
+            Box::new(spawn_config(
+                "child-with-tools",
+                "parent-agent",
+                CapabilityToken::default(),
+                default_budget(),
+                RestartStrategy::LetCrash,
+            )),
+            ack_tx,
+        ),
+    })
+    .await
+    .expect("spawn message should send");
+    ack_rx
+        .await
+        .expect("spawn ack channel should stay open")
+        .expect("spawn should be accepted");
+
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::JoinChild(AgentId("child-with-tools".into()), join_tx),
+    })
+    .await
+    .expect("join message should send");
+    let terminal = join_rx
+        .await
+        .expect("join response channel should stay open")
+        .expect("join should return terminal metadata");
+    assert_eq!(terminal.tool_uses, 2);
+    assert!(
+        terminal.elapsed_ms < 60_000,
+        "elapsed_ms should be populated from supervisor timing, got {}",
+        terminal.elapsed_ms
+    );
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor should exit after channel closes")
+        .expect("actor task should shut down cleanly");
+}
+
+#[tokio::test]
 async fn wait_children_returns_running_on_timeout_and_first_terminal_child() {
     let release_a = Arc::new(Notify::new());
     let release_b = Arc::new(Notify::new());

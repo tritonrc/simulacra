@@ -92,6 +92,20 @@ semantics.
   `MessagePriority::Command`.
 - [x] A closed supervisor channel returns an error tool result.
 
+### Terminal child summaries
+
+- [x] `join_child_agent` terminal JSON includes structured `status`,
+  `exit_reason`, `message`, `token_usage`, `elapsed_ms`, `tool_uses`,
+  `artifacts`, and `vfs_changes` fields.
+- [x] `wait_child_agent` terminal JSON includes the same structured summary
+  fields as `join_child_agent` when a single child or wait-any child is
+  terminal.
+- [x] `status` is one of `"completed"`, `"failed"`, or `"cancelled"`.
+- [x] `tool_uses` is derived from structured child output, not parent-side
+  prose parsing.
+- [x] `artifacts` and `vfs_changes` are structured arrays and are empty until
+  child artifact/change tracking is introduced by a later spec.
+
 ### Registry
 
 - [x] CLI root registries that include S018 child-control tools also include
