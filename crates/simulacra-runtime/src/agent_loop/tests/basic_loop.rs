@@ -120,6 +120,137 @@ async fn tool_call_then_text_response() {
     ));
 }
 
+struct CapturingSequencedProvider {
+    responses: Mutex<Vec<ProviderResponse>>,
+    calls: Arc<Mutex<Vec<Vec<Message>>>>,
+}
+
+impl Provider for CapturingSequencedProvider {
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        _tools: &'a [ToolDefinition],
+        _budget: &'a mut ResourceBudget,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+    > {
+        self.calls.lock().unwrap().push(messages.to_vec());
+        Box::pin(async {
+            let mut responses = self
+                .responses
+                .lock()
+                .map_err(|e| ProviderError::Other(format!("lock poisoned: {e}")))?;
+            if responses.is_empty() {
+                return Err(ProviderError::Other(
+                    "CapturingSequencedProvider: no more canned responses".into(),
+                ));
+            }
+            Ok(responses.remove(0))
+        })
+    }
+}
+
+#[tokio::test]
+async fn provider_native_content_survives_tool_round_trip() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider_content = vec![
+        simulacra_types::ProviderContentBlock {
+            provider: "anthropic".into(),
+            value: serde_json::json!({
+                "type": "thinking",
+                "thinking": "",
+                "signature": "sig-runtime"
+            }),
+        },
+        simulacra_types::ProviderContentBlock {
+            provider: "anthropic".into(),
+            value: serde_json::json!({
+                "type": "redacted_thinking",
+                "data": "encrypted-runtime"
+            }),
+        },
+    ];
+    let first_response = ProviderResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCallMessage {
+                id: "toolu_runtime".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"msg": "hi"}),
+            }],
+            tool_call_id: None,
+            provider_content: provider_content.clone(),
+        },
+        token_usage: TokenUsage {
+            input_tokens: 20,
+            output_tokens: 10,
+        },
+        finish_reason: FinishReason::ToolUse,
+        provider_response_id: Some("resp-fable-tool".into()),
+        model: "claude-fable-5".into(),
+    };
+    let captured_calls = Arc::new(Mutex::new(Vec::new()));
+    let provider = CapturingSequencedProvider {
+        responses: Mutex::new(vec![first_response, text_response("Done!")]),
+        calls: Arc::clone(&captured_calls),
+    };
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
+
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(provider),
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+        None,
+        None,
+    );
+
+    let output = agent
+        .run("Use the echo tool")
+        .await
+        .expect("run should succeed");
+
+    assert_eq!(output.exit_reason, ExitReason::Complete);
+    assert_eq!(output.messages[2].provider_content, provider_content);
+    assert_eq!(output.messages[3].role, Role::Tool);
+
+    let calls = captured_calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    let second_call = &calls[1];
+    let assistant_turn = second_call
+        .iter()
+        .find(|message| {
+            message.role == Role::Assistant
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|tool_call| tool_call.id == "toolu_runtime")
+        })
+        .expect("second provider call should include the previous assistant tool-use turn");
+    assert_eq!(assistant_turn.provider_content, provider_content);
+
+    let entries = journal
+        .read_all(&AgentId("test-agent".into()))
+        .expect("read_all should succeed");
+    let journaled_response = entries
+        .iter()
+        .find_map(|entry| match &entry.entry {
+            JournalEntryKind::LlmResponse {
+                assistant_message: Some(message),
+                ..
+            } if message.provider_content == provider_content => Some(message),
+            _ => None,
+        })
+        .expect("journal should persist provider-native content on the assistant response");
+    assert_eq!(journaled_response.tool_calls[0].id, "toolu_runtime");
+}
+
 // -----------------------------------------------------------------------
 // Test 3: Budget exhaustion — max_turns=1 with tool call
 // -----------------------------------------------------------------------
