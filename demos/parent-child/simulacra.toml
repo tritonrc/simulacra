@@ -1,0 +1,105 @@
+[project]
+name = "parent-child-playground"
+description = "Focused CLI config for code-agent style parent-to-child orchestration"
+
+[vfs]
+auto_mount_skills = false
+max_files_per_mount = 5000
+max_bytes_per_mount = 52428800
+
+[[vfs.mounts]]
+source = "../../specs"
+target = "/workspace/specs"
+
+[[vfs.mounts]]
+source = "../../rules"
+target = "/workspace/rules"
+
+[[vfs.mounts]]
+source = "../../crates/simulacra-runtime/src/spawn_tool"
+target = "/workspace/crates/simulacra-runtime/src/spawn_tool"
+
+[[vfs.mounts]]
+source = "../../crates/simulacra-runtime/src/supervisor"
+target = "/workspace/crates/simulacra-runtime/src/supervisor"
+
+[[vfs.mounts]]
+source = "../../crates/simulacra-runtime/src/agent_loop"
+target = "/workspace/crates/simulacra-runtime/src/agent_loop"
+
+[[vfs.mounts]]
+source = "../../crates/simulacra-runtime/tests/subagent_spawn"
+target = "/workspace/crates/simulacra-runtime/tests/subagent_spawn"
+
+[[vfs.mounts]]
+source = "../../crates/simulacra-cli/src"
+target = "/workspace/crates/simulacra-cli/src"
+
+[[vfs.mounts]]
+source = "../../crates/simulacra-cli/tests"
+target = "/workspace/crates/simulacra-cli/tests"
+
+[task]
+entry_agent = "parent"
+task = """
+Act like a code-agent lead validating the child-agent orchestration implementation.
+
+Immediately spawn two children in parallel using configured agent types and these exact child budgets:
+1. spawn_agent with agent_type "researcher", budget max_tokens 12000, max_turns 5, max_cost "0", max_sub_agents 0, to inspect the mounted runtime/CLI source paths for how spawn_agent, child_status, wait_child_agent, join_child_agent, steer_child_agent, and close_child_agent are wired.
+2. spawn_agent with agent_type "reviewer", budget max_tokens 12000, max_turns 5, max_cost "0", max_sub_agents 0, to inspect the mounted subagent_spawn tests for missing behavioral coverage or brittle assertions.
+
+After both spawns return handles, do your own parent-side scan of these exact files while the children run:
+- /workspace/specs/S054-child-agent-orchestration.md
+- /workspace/specs/S018-interactive-subagents.md
+
+Do not inventory / or the whole workspace. Use the exact mounted paths above and the child task paths. Use child_status on both handles, then wait_child_agent with child_ids and timeout_ms 0 to poll once without consuming results. Join both children, compare their findings with your parent-side spec scan, close both child handles, and write /workspace/tmp/parent-child-code-agent-plan.md with a concise patch plan: confirmed behavior, suspected gaps, exact files to edit, and tests to run.
+"""
+
+[agent_types.parent]
+model = "claude-sonnet-5"
+max_turns = 80
+max_tokens = 0
+max_sub_agents = 2
+can_spawn = ["researcher", "reviewer"]
+system_prompt = "prompts/parent.md"
+
+[agent_types.parent.capabilities]
+shell = true
+javascript = true
+python = false
+network = []
+mcp = []
+paths_read = ["/**"]
+paths_write = ["/workspace/**"]
+
+[agent_types.researcher]
+model = "claude-sonnet-5"
+max_turns = 5
+max_tokens = 12000
+max_sub_agents = 0
+system_prompt = "prompts/researcher.md"
+
+[agent_types.researcher.capabilities]
+shell = true
+javascript = true
+python = false
+network = []
+mcp = []
+paths_read = ["/**"]
+paths_write = ["/workspace/tmp/**"]
+
+[agent_types.reviewer]
+model = "claude-sonnet-5"
+max_turns = 5
+max_tokens = 12000
+max_sub_agents = 0
+system_prompt = "prompts/reviewer.md"
+
+[agent_types.reviewer.capabilities]
+shell = true
+javascript = true
+python = false
+network = []
+mcp = []
+paths_read = ["/**"]
+paths_write = ["/workspace/tmp/**"]

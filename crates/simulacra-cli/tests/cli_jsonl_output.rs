@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use clap::Parser;
 use serde_json::{Value, json};
@@ -277,6 +278,37 @@ fn tool_call_response() -> ProviderResponse {
     }
 }
 
+fn spawn_agent_tool_call_response() -> ProviderResponse {
+    ProviderResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![ToolCallMessage {
+                id: "call-spawn-researcher".into(),
+                name: "spawn_agent".into(),
+                arguments: json!({
+                    "agent_type": "researcher",
+                    "task": "summarize the fixture",
+                    "budget": {
+                        "max_tokens": 128,
+                        "max_turns": 1,
+                        "max_cost": "0",
+                        "max_sub_agents": 0
+                    }
+                }),
+            }],
+            tool_call_id: None,
+        },
+        token_usage: TokenUsage {
+            input_tokens: 5,
+            output_tokens: 3,
+        },
+        finish_reason: FinishReason::ToolUse,
+        provider_response_id: Some("resp-spawn".into()),
+        model: "claude-sonnet-4-20250514".into(),
+    }
+}
+
 fn valid_config_toml(task: Option<&str>) -> String {
     let task_line = task
         .map(|task| format!("task = {task:?}"))
@@ -302,6 +334,37 @@ entry_agent = "default"
 {task_line}
 "#
     )
+}
+
+fn spawn_capable_config_toml() -> String {
+    r#"[project]
+name = "simulacra-cli-jsonl-spawn-spec"
+
+[agent_types.default]
+model = "claude-sonnet-4-20250514"
+max_turns = 7
+max_tokens = 4321
+max_sub_agents = 2
+can_spawn = ["researcher"]
+
+[agent_types.default.capabilities]
+shell = true
+javascript = true
+paths_read = ["/workspace/**"]
+paths_write = ["/workspace/**"]
+
+[agent_types.researcher]
+model = "claude-sonnet-4-20250514"
+max_turns = 1
+max_tokens = 128
+
+[agent_types.researcher.capabilities]
+paths_read = ["/workspace/**"]
+
+[task]
+entry_agent = "default"
+"#
+    .to_string()
 }
 
 fn args_with_output_format(
@@ -394,6 +457,28 @@ fn field_matches(span: &CapturedSpan, key: &str, expected: &str) -> bool {
         .get(key)
         .map(|value| value.trim_matches('"') == expected)
         .unwrap_or(false)
+}
+
+fn run_with_provider_bounded(
+    args: CliArgs,
+    provider: Box<dyn Provider>,
+    timeout: Duration,
+) -> simulacra_cli::CliOutput {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(run_with_provider(args, provider));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => panic!("CLI run should return CliOutput, got error: {error}"),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("headless spawn_agent run hung for more than {timeout:?}")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("headless spawn_agent runner exited without sending a result")
+        }
+    }
 }
 
 /// S055 argument parsing assertions: `--output-format` accepts `text` and
@@ -551,6 +636,63 @@ fn jsonl_headless_streams_tokens_tool_events_turn_complete_then_result_in_order(
             .expect("tool output line should be a string")
             .contains("echo-line"),
         "echo tool output should be preserved in the activity event: {tool_output:#?}"
+    );
+}
+
+#[test]
+fn jsonl_headless_spawn_agent_returns_handle_and_emits_child_spawned_without_hanging() {
+    let _guard = test_guard();
+    let config = TempConfig::write(&spawn_capable_config_toml());
+    let provider = FakeProvider::scripted(
+        vec![
+            Ok(spawn_agent_tool_call_response()),
+            Ok(final_response("spawn accepted", 13, 17)),
+        ],
+        vec![Vec::new(), Vec::new()],
+    );
+
+    let output = run_with_provider_bounded(
+        jsonl_args(config.path_string(), "delegate to a researcher"),
+        Box::new(provider),
+        Duration::from_secs(2),
+    );
+
+    assert_eq!(output.exit_code, 0);
+    let lines = parse_jsonl(&output.stdout_content);
+    let result = last_result(&lines);
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["final_message"], "spawn accepted");
+
+    let child_spawned = lines
+        .iter()
+        .find(|line| line["event"]["type"] == "ChildSpawned")
+        .unwrap_or_else(|| panic!("spawn_agent should emit ChildSpawned activity: {lines:#?}"));
+    let child_id = child_spawned["event"]["child_id"]
+        .as_str()
+        .expect("ChildSpawned should include child_id");
+    assert!(child_id.starts_with("child-researcher-"));
+    assert_eq!(child_spawned["event"]["agent_type"], "researcher");
+    assert_eq!(child_spawned["event"]["task"], "summarize the fixture");
+
+    let tool_output = lines
+        .iter()
+        .find(|line| line["event"]["type"] == "ToolOutput")
+        .unwrap_or_else(|| {
+            panic!("spawn_agent handle should be emitted as tool output: {lines:#?}")
+        });
+    let tool_output_line = tool_output["event"]["line"]
+        .as_str()
+        .expect("ToolOutput line should be a string");
+    let handle: Value =
+        serde_json::from_str(tool_output_line).expect("spawn_agent tool output should be JSON");
+    assert_eq!(handle["child_id"], child_id);
+    assert_eq!(handle["agent_type"], "researcher");
+    assert_eq!(handle["status"], "running");
+
+    let types = activity_types(&lines);
+    assert!(
+        index_of_type(&types, "ChildSpawned") < index_of_type(&types, "ToolOutput"),
+        "ChildSpawned should be emitted before the parent-visible handle result: {types:?}"
     );
 }
 

@@ -1184,6 +1184,50 @@ mod tests {
         .unwrap()
     }
 
+    fn thinking_text_response_json() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": "msg_thinking_text",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "I should reason briefly before answering.",
+                    "signature": "sig-test"
+                },
+                {"type": "text", "text": "Final answer."}
+            ],
+            "model": "claude-sonnet-5",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 12, "output_tokens": 34}
+        }))
+        .unwrap()
+    }
+
+    fn thinking_tool_use_response_json() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": "msg_thinking_tool",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "redacted_thinking",
+                    "data": "encrypted-thinking"
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_thinking",
+                    "name": "file_read",
+                    "input": {"path": "/workspace/specs/S054-child-agent-orchestration.md"}
+                }
+            ],
+            "model": "claude-fable-5",
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 55, "output_tokens": 89}
+        }))
+        .unwrap()
+    }
+
     fn streaming_response_body() -> Vec<u8> {
         concat!(
             "event: message_start\n",
@@ -1310,6 +1354,56 @@ mod tests {
         assert_eq!(resp.finish_reason, FinishReason::ToolUse);
         assert_eq!(resp.token_usage.input_tokens, 50);
         assert_eq!(resp.token_usage.output_tokens, 100);
+    }
+
+    #[tokio::test]
+    async fn thinking_response_blocks_do_not_break_text_mapping() {
+        let fake = FakeHttpClient::with_response(200, &thinking_text_response_json());
+        let provider =
+            AnthropicProvider::with_http_client("test-key", "claude-sonnet-5", Box::new(fake));
+
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Think then answer.".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(resp.message.content, "Final answer.");
+        assert!(resp.message.tool_calls.is_empty());
+        assert_eq!(resp.finish_reason, FinishReason::EndTurn);
+        assert_eq!(resp.model, "claude-sonnet-5");
+    }
+
+    #[tokio::test]
+    async fn thinking_response_blocks_do_not_break_tool_use_mapping() {
+        let fake = FakeHttpClient::with_response(200, &thinking_tool_use_response_json());
+        let provider =
+            AnthropicProvider::with_http_client("test-key", "claude-fable-5", Box::new(fake));
+
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Inspect the file.".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(resp.message.content, "");
+        assert_eq!(resp.message.tool_calls.len(), 1);
+        assert_eq!(resp.message.tool_calls[0].id, "toolu_thinking");
+        assert_eq!(resp.message.tool_calls[0].name, "file_read");
+        assert_eq!(
+            resp.message.tool_calls[0].arguments,
+            serde_json::json!({"path": "/workspace/specs/S054-child-agent-orchestration.md"})
+        );
+        assert_eq!(resp.finish_reason, FinishReason::ToolUse);
+        assert_eq!(resp.model, "claude-fable-5");
     }
 
     // ── Test 4: Error classification ───────────────────────────────

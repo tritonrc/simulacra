@@ -281,6 +281,21 @@ pub struct CliBootstrap {
     pub fixtures: Option<simulacra_catalog::repo::memory::SharedFixtures>,
 }
 
+struct SupervisorActorParts {
+    spawn_rx: tokio::sync::mpsc::Receiver<simulacra_runtime::SupervisorMessage>,
+    config: SimulacraConfig,
+    provider_kind: ProviderKind,
+    vfs: Arc<dyn VirtualFs>,
+    journal: Arc<dyn JournalStorage>,
+    budget: ResourceBudget,
+    parent_capability: CapabilityToken,
+    supervisor_sender: Option<tokio::sync::mpsc::Sender<simulacra_runtime::SupervisorMessage>>,
+    parent_model: String,
+    pipeline: Arc<HookPipeline>,
+    integration_registry_for_refresh: Option<Arc<simulacra_integration::IntegrationRegistry>>,
+    entry_agent: String,
+}
+
 impl CliBootstrap {
     /// Hook names registered for the given operation in the bootstrapped
     /// pipeline. Surface for tests + diagnostics; the runtime consumes the
@@ -1566,11 +1581,20 @@ fn run_booted(
         capability: boot.capability_token.clone(),
     };
 
-    // Clone journal and budget before they're moved into the agent loop,
-    // so the supervisor can use them for child agents.
-    let journal_for_supervisor = Arc::clone(&boot.journal);
-    let budget_for_supervisor = boot.resource_budget.clone();
-    let vfs_for_supervisor = Arc::clone(&boot.vfs);
+    let mut supervisor_parts = boot.spawn_rx.take().map(|spawn_rx| SupervisorActorParts {
+        spawn_rx,
+        config: boot.config.clone(),
+        provider_kind: boot.provider_kind.clone(),
+        vfs: Arc::clone(&boot.vfs),
+        journal: Arc::clone(&boot.journal),
+        budget: boot.resource_budget.clone(),
+        parent_capability: boot.capability_token.clone(),
+        supervisor_sender: boot.spawn_tx.clone(),
+        parent_model: boot.model.clone(),
+        pipeline: Arc::clone(&boot.pipeline),
+        integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
+        entry_agent: boot.entry_agent.clone(),
+    });
 
     let activity_sink = boot.activity_sink.take();
     let activity_rx = boot.activity_rx.take();
@@ -1724,70 +1748,7 @@ fn run_booted(
                 session.resume_from_storage(sid);
             }
 
-            // Start the supervisor actor loop if spawn_agent is configured.
-            // The supervisor runs as a background tokio task, receiving spawn
-            // messages from the SpawnAgentTool via the mpsc channel.
-            if let Some(spawn_rx) = boot.spawn_rx.take() {
-                let supervisor_sink: Arc<dyn simulacra_runtime::ActivitySink> = activity_sink
-                    .clone()
-                    .unwrap_or_else(|| Arc::new(simulacra_runtime::NoopActivitySink));
-                let child_cell_configurator =
-                    boot.integration_registry_for_refresh.as_ref().map(|reg| {
-                        let reg = Arc::clone(reg);
-                        let tenant_integrations = boot
-                            .config
-                            .tenants
-                            .values()
-                            .find(|t| t.agent_type == boot.entry_agent)
-                            .and_then(|t| t.integrations.clone())
-                            .unwrap_or_default();
-                        Arc::new(move |cell: &mut simulacra_sandbox::AgentCell| {
-                            cell.integration_registry = Some(Arc::clone(&reg));
-                            cell.tenant_integrations = tenant_integrations.clone();
-                        }) as simulacra_runtime::ChildCellConfigurator
-                    });
-                let child_tool_registrar: Option<simulacra_runtime::ChildToolRegistrar> = {
-                    #[cfg(feature = "python")]
-                    {
-                        Some(Arc::new(
-                            |registry: &mut simulacra_tool::ToolRegistry,
-                             cell: Arc<simulacra_sandbox::AgentCell>| {
-                                registry.register(Box::new(simulacra_python::PyExecTool::new(cell)))
-                            },
-                        ))
-                    }
-                    #[cfg(not(feature = "python"))]
-                    {
-                        None
-                    }
-                };
-                let task_factory = Arc::new(AgentTaskFactory {
-                    config: boot.config.clone(),
-                    provider_kind: boot.provider_kind.clone(),
-                    vfs: vfs_for_supervisor,
-                    journal: journal_for_supervisor,
-                    activity_sink: supervisor_sink,
-                    parent_capability: boot.capability_token.clone(),
-                    supervisor_sender: boot.spawn_tx.clone(),
-                    parent_model: boot.model.clone(),
-                    pipeline: Some(Arc::clone(&boot.pipeline)),
-                    script_executor: Some(simulacra_sandbox::ScriptExecutor::new(4)),
-                    child_cell_configurator,
-                    child_tool_registrar,
-                });
-                let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory(
-                    boot.capability_token.clone(),
-                    budget_for_supervisor,
-                    task_factory,
-                );
-                supervisor.set_activity_sink(activity_sink.clone().unwrap_or_else(|| {
-                    Arc::new(simulacra_runtime::NoopActivitySink)
-                        as Arc<dyn simulacra_runtime::ActivitySink>
-                }));
-                runtime.spawn(async move {
-                    supervisor.run_actor_loop(spawn_rx).await;
-                });
-            }
+            start_supervisor_actor(&runtime, supervisor_parts.take(), activity_sink.clone());
 
             let integration_for_shutdown = boot.integration_registry_for_refresh.clone();
             let (stdout_content, exit_code, shutdown_result) = runtime.block_on(async move {
@@ -1842,6 +1803,8 @@ fn run_booted(
             let jsonl = args.output_format == OutputFormat::Jsonl;
             let boot_task = boot.task.clone();
             let integration_for_shutdown = boot.integration_registry_for_refresh.clone();
+            let supervisor_handle =
+                start_supervisor_actor(&runtime, supervisor_parts.take(), activity_sink.clone());
             // `activity_sink` (every remaining sender ref) and `activity_rx`
             // are moved into the runtime block so that, for JSONL mode, we
             // can drop the senders after the run completes to close the
@@ -1867,6 +1830,10 @@ fn run_booted(
                 };
 
                 let agent_result = agent_loop.run(&boot_task).await;
+                if let Some(handle) = supervisor_handle {
+                    handle.abort();
+                    let _ = handle.await;
+                }
                 // S033: Stop background OAuth2 refresh tasks before returning.
                 if let Some(ref reg) = integration_for_shutdown {
                     reg.shutdown().await;
@@ -2022,6 +1989,72 @@ fn emit_jsonl_result_line(
     }))
     .expect("jsonl result envelope serializable");
     write_jsonl_line(buf, &line);
+}
+
+fn start_supervisor_actor(
+    runtime: &tokio::runtime::Runtime,
+    parts: Option<SupervisorActorParts>,
+    activity_sink: Option<Arc<dyn simulacra_runtime::ActivitySink>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let parts = parts?;
+    let supervisor_sink: Arc<dyn simulacra_runtime::ActivitySink> = activity_sink
+        .clone()
+        .unwrap_or_else(|| Arc::new(simulacra_runtime::NoopActivitySink));
+    let child_cell_configurator = parts.integration_registry_for_refresh.as_ref().map(|reg| {
+        let reg = Arc::clone(reg);
+        let tenant_integrations = parts
+            .config
+            .tenants
+            .values()
+            .find(|t| t.agent_type == parts.entry_agent)
+            .and_then(|t| t.integrations.clone())
+            .unwrap_or_default();
+        Arc::new(move |cell: &mut simulacra_sandbox::AgentCell| {
+            cell.integration_registry = Some(Arc::clone(&reg));
+            cell.tenant_integrations = tenant_integrations.clone();
+        }) as simulacra_runtime::ChildCellConfigurator
+    });
+    let child_tool_registrar: Option<simulacra_runtime::ChildToolRegistrar> = {
+        #[cfg(feature = "python")]
+        {
+            Some(Arc::new(
+                |registry: &mut simulacra_tool::ToolRegistry,
+                 cell: Arc<simulacra_sandbox::AgentCell>| {
+                    registry.register(Box::new(simulacra_python::PyExecTool::new(cell)))
+                },
+            ))
+        }
+        #[cfg(not(feature = "python"))]
+        {
+            None
+        }
+    };
+    let task_factory = Arc::new(AgentTaskFactory {
+        config: parts.config,
+        provider_kind: parts.provider_kind,
+        vfs: parts.vfs,
+        journal: parts.journal,
+        activity_sink: supervisor_sink,
+        parent_capability: parts.parent_capability.clone(),
+        supervisor_sender: parts.supervisor_sender,
+        parent_model: parts.parent_model,
+        pipeline: Some(Arc::clone(&parts.pipeline)),
+        script_executor: Some(simulacra_sandbox::ScriptExecutor::new(4)),
+        child_cell_configurator,
+        child_tool_registrar,
+    });
+    let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory(
+        parts.parent_capability,
+        parts.budget,
+        task_factory,
+    );
+    supervisor.set_activity_sink(activity_sink.unwrap_or_else(|| {
+        Arc::new(simulacra_runtime::NoopActivitySink) as Arc<dyn simulacra_runtime::ActivitySink>
+    }));
+
+    Some(runtime.spawn(async move {
+        supervisor.run_actor_loop(parts.spawn_rx).await;
+    }))
 }
 
 // ---------------------------------------------------------------------------

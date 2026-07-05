@@ -79,6 +79,18 @@ pub(crate) enum ApiResponseContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+        #[allow(dead_code)]
+        signature: Option<String>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        #[allow(dead_code)]
+        data: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,6 +333,8 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
                     arguments: input.clone(),
                 });
             }
+            ApiResponseContentBlock::Thinking { .. }
+            | ApiResponseContentBlock::RedactedThinking { .. } => {}
         }
     }
 
