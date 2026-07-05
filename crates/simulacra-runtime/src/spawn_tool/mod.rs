@@ -4,9 +4,11 @@
 //! supervisor via an mpsc channel. `AgentTaskFactory` is the `TaskFactory`
 //! implementation that constructs child `AgentLoop` instances.
 
+mod child_control_tools;
 mod child_environment;
 mod factory;
 mod helpers;
+mod json_output;
 mod proc_runtime;
 mod prompt;
 mod provider_adapter;
@@ -16,12 +18,13 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use factory::AgentTaskFactory;
-pub use prompt::DEFAULT_SYSTEM_PROMPT;
-pub use tool::{
-    CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool, SpawnAgentTool,
+pub use child_control_tools::{
+    CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool,
     SteerChildAgentTool, WaitChildAgentTool,
 };
+pub use factory::AgentTaskFactory;
+pub use prompt::DEFAULT_SYSTEM_PROMPT;
+pub use tool::SpawnAgentTool;
 pub use types::{ChildCellConfigurator, ChildToolRegistrar, NoopContextStrategy, ProviderKind};
 
 use std::sync::atomic::AtomicU64;

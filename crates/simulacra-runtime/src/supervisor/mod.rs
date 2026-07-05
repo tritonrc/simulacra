@@ -1,4 +1,6 @@
 mod actor;
+mod child_queries;
+mod dispatch;
 mod restart;
 mod results;
 mod spawn;

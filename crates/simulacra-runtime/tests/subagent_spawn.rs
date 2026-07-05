@@ -1,12 +1,12 @@
 #![allow(clippy::type_complexity)]
 #![cfg(feature = "spawn")]
 
-include!("subagent_spawn/part_00.rs");
-include!("subagent_spawn/part_01.rs");
-include!("subagent_spawn/part_02.rs");
-include!("subagent_spawn/part_03.rs");
-include!("subagent_spawn/part_04.rs");
-include!("subagent_spawn/part_05.rs");
-include!("subagent_spawn/part_06.rs");
-include!("subagent_spawn/part_07.rs");
-include!("subagent_spawn/part_08.rs");
+include!("subagent_spawn/test_harness.rs");
+include!("subagent_spawn/fixtures.rs");
+include!("subagent_spawn/budget_limits.rs");
+include!("subagent_spawn/child_history.rs");
+include!("subagent_spawn/o11y_spans.rs");
+include!("subagent_spawn/capability_budget_exit.rs");
+include!("subagent_spawn/generic_spawn.rs");
+include!("subagent_spawn/tool_registry.rs");
+include!("subagent_spawn/tier_model.rs");

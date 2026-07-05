@@ -1,5 +1,5 @@
-include!("agent_supervisor/part_00.rs");
-include!("agent_supervisor/part_01.rs");
-include!("agent_supervisor/part_02.rs");
-include!("agent_supervisor/part_03.rs");
-include!("agent_supervisor/part_04.rs");
+include!("agent_supervisor/test_harness.rs");
+include!("agent_supervisor/fixtures.rs");
+include!("agent_supervisor/capability_and_restart.rs");
+include!("agent_supervisor/actor_loop.rs");
+include!("agent_supervisor/actor_join_and_retry.rs");
