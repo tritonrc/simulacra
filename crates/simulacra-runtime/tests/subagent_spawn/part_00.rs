@@ -5,11 +5,12 @@ use simulacra_config::{
     VfsConfig,
 };
 use simulacra_runtime::{
-    AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, AgentTaskFactory, BoxTaskFuture,
-    CancellationToken, ChildTerminalResult, DEFAULT_SYSTEM_PROMPT, InMemoryJournalStorage,
-    JoinChildAgentTool, MessagePriority, NoopActivitySink, ProviderKind, RestartStrategy,
-    RuntimeError, SpawnAck, SpawnAgentTool, SpawnConfig, SupervisorMessage, SupervisorPayload,
-    TaskFactory, TurnResult,
+    AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, AgentTaskFactory,
+    BoxTaskFuture, CancellationToken, ChildStatusTool, ChildTerminalResult, CloseChildAgentTool,
+    DEFAULT_SYSTEM_PROMPT, InMemoryJournalStorage, JoinChildAgentTool, MessagePriority,
+    NoopActivitySink, ProviderKind, RestartStrategy, RuntimeError, SpawnAck, SpawnAgentTool,
+    SpawnConfig, SupervisorMessage, SupervisorPayload, SteerChildAgentTool, TaskFactory,
+    TurnResult, WaitChildAgentTool,
 };
 use simulacra_tool::ToolRegistry;
 use simulacra_types::{

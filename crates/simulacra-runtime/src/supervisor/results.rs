@@ -11,6 +11,20 @@ impl AgentSupervisor {
         tracing::info!("agent cancellation signalled");
     }
 
+    /// Queue steering input for a live child agent.
+    pub fn steer_child(&self, child_id: &AgentId, message: String) -> Result<(), String> {
+        if let Some(handle) = lock_mutex(&self.child_inputs, "child_inputs").get(child_id) {
+            handle.enqueue(message)
+        } else if lock_mutex(&self.child_results, "child_results")
+            .get(child_id)
+            .is_some_and(|state| state.result.is_some())
+        {
+            Err(format!("child_id already completed: {}", child_id.0))
+        } else {
+            Err(format!("unknown child_id: {}", child_id.0))
+        }
+    }
+
     /// Deduct a child agent's resource usage from the parent budget.
     ///
     /// S006: When a child agent completes, its consumed tokens, turns, and cost

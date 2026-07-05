@@ -16,7 +16,7 @@
 
 S015 defines interactive mode as a REPL built on `AgentLoop`. S009 defines a supervisor actor that can spawn, cancel, and restart child agents with attenuated capabilities and bounded budgets. This spec connects those two pieces for interactive sessions: the parent agent running in the REPL can delegate a sub-task to a child agent via a `spawn_agent` tool call, the interactive host supervises that child, and the parent can later join or cancel the live child by handle.
 
-In interactive mode, `spawn_agent` is a non-blocking delegation primitive from the parent's point of view: the tool call returns after the child is accepted and started. Terminal child results are returned by `join_child_agent`; cancellation is requested with `cancel_child_agent`.
+In interactive mode, `spawn_agent` is a non-blocking delegation primitive from the parent's point of view: the tool call returns after the child is accepted and started. Terminal child results are returned by `join_child_agent`; cancellation is requested with `cancel_child_agent`. A parent may queue additional instructions for a still-running child with `steer_child_agent`; steering is applied before the child's next model turn and does not interrupt an in-flight provider request or tool call.
 
 ## Design
 
@@ -58,6 +58,11 @@ InteractiveSession (S015)
                     |
                     +--> SupervisorPayload::JoinChild(child_id)
                     +--> JSON terminal summary returned to parent AgentLoop
+           |
+           +--> ToolRegistry::call("steer_child_agent", { child_id, message })
+                    |
+                    +--> SupervisorPayload::SteerChild(child_id, message)
+                    +--> queued steering acknowledgement returned to parent AgentLoop
            |
            +--> parent continues with ToolResult message in conversation
 ```
@@ -154,12 +159,17 @@ InteractiveSession (S015)
 5c. The default restart strategy for interactive sub-agents is `LetCrash` — the child runs once, and if it fails the parent sees the error. No automatic restarts unless a future spec adds restart configuration to the tool schema.
 5d. `join_child_agent` accepts `{ "child_id": "..." }`, waits for the child terminal result if needed, and returns the former `spawn_agent` terminal summary shape: `child_id`, `agent_type`, `exit_reason`, `message`, and `token_usage`.
 5e. `cancel_child_agent` accepts `{ "child_id": "...", "reason": "optional" }`, signals that child only, and returns `{ "child_id": "...", "status": "cancel_requested" }`. Terminal cancellation is observed through `join_child_agent` and `ChildFinished`.
+5f. `steer_child_agent` accepts `{ "child_id": "...", "message": "..." }`, queues `message` into the live child's conversation before its next provider call, and returns `{ "child_id": "...", "status": "queued" }`.
+5g. Empty `child_id` or blank `message` is an invalid-arguments error.
+5h. Unknown child ids, completed child ids, and closed supervisor channels return error tool results.
+5i. Steering is cooperative turn-boundary input. It MUST NOT interrupt an in-flight provider request or tool call. Cancellation remains the only child-control operation with signal priority.
+5j. The queued child message is appended to the child conversation as a `user` message in FIFO order and does not replace the original delegated task. The parent observes steering only through the `steer_child_agent` tool result; the steering message is not appended to the parent conversation as a child message.
 
 ### Interactive host integration
 
 6. `InteractiveSession` MUST create and own one `AgentSupervisor` for the lifetime of the interactive session. The supervisor actor loop MUST be started when the session is initialized, before the first parent turn is executed.
 7. The interactive host MUST keep the supervisor actor loop alive across multiple parent turns in the same REPL session. It MUST NOT create a new supervisor per tool call.
-8. The parent `spawn_agent` tool implementation MUST communicate with the supervisor through its actor message channel using `SupervisorMessage { agent_id: parent_agent_id, priority: MessagePriority::Command, payload: SupervisorPayload::Spawn(...) }` per S009.
+8. The parent `spawn_agent` tool implementation MUST communicate with the supervisor through its actor message channel using `SupervisorMessage { agent_id: parent_agent_id, priority: MessagePriority::Command, payload: SupervisorPayload::Spawn(...) }` per S009. `steer_child_agent` MUST use `MessagePriority::Command`; `cancel_child_agent` remains `MessagePriority::Signal`.
 9. `SpawnConfig` is extended for interactive sub-agent delegation. In addition to the S009 fields (`agent_id`, `parent_id`, `capability`, `budget`, `restart_strategy`), the spawned work item MUST carry:
    - `agent_type: String` — the configured child type name selected from `simulacra.toml`;
    - `task: String` — the delegated task text passed to `AgentLoop::run(task)`.
@@ -260,6 +270,10 @@ Generic sub-agent spawning is specified in S023. The `spawn_agent` tool accepts 
 - [x] `join_child_agent` returns a terminal result whose JSON content includes `child_id`, `agent_type`, `exit_reason`, `message`, and `token_usage`.
 - [x] `cancel_child_agent` returns `status: "cancel_requested"` and causes the targeted child to observe cancellation.
 - [x] Child runtime failures (supervisor errors, child panics) return `Err(ToolError::ExecutionFailed(...))` so the AgentLoop marks the result as `is_error: true`. Capability violations from `can_spawn` also return `Err(ToolError)`.
+- [x] `steer_child_agent` is registered anywhere `spawn_agent`, `join_child_agent`, and `cancel_child_agent` are registered for spawn-capable agents.
+- [x] The `steer_child_agent` tool definition exposes required `child_id` and `message` string fields and disallows additional properties.
+- [x] A successful `steer_child_agent` call returns a tool result whose JSON content includes `child_id` and `status: "queued"`.
+- [x] Empty `child_id` or blank `message` returns `ToolError::InvalidArguments`.
 
 ### Interactive host and actor integration
 
@@ -271,6 +285,9 @@ Generic sub-agent spawning is specified in S023. The `spawn_agent` tool accepts 
 
 - [x] The parent receives exactly one handle tool result message per `spawn_agent` call.
 - [x] Child internal messages are not appended to the parent's conversation history.
+- [x] The parent sees steering only as the `steer_child_agent` tool result; queued child steering messages are not appended to the parent conversation.
+- [x] Queued steering messages are appended to the child conversation as `Role::User` messages in FIFO order before the next provider call.
+- [x] Steering after a child terminal result is rejected instead of accepted into a dead queue.
 - [x] The child is executed through a full `AgentLoop::run(task)` invocation created by `TaskFactory`, not a raw provider call. *(AgentTaskFactory::create_task builds a child AgentLoop and calls child_loop.run(&task).await)*
 - [x] Each child gets a fresh provider instance selected from the configured child agent type. *(AgentTaskFactory::create_task constructs a new Box<dyn Provider> from agent_type_config.model)*
 - [x] `SpawnAgentTool` receives the parent's `AgentId` at construction and passes it as `SpawnConfig.parent_id`.

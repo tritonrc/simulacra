@@ -9,6 +9,23 @@ pub type BoxTaskFuture =
 pub trait TaskFactory: Send + Sync {
     /// Create a task future for the given spawn configuration and cancellation token.
     fn create_task(&self, config: SpawnConfig, cancellation: CancellationToken) -> BoxTaskFuture;
+
+    /// Create a task future with a queue for cooperative child steering.
+    ///
+    /// Existing factories that do not run a real `AgentLoop` can ignore queued
+    /// input by relying on this default implementation.
+    fn create_task_with_input(
+        &self,
+        config: SpawnConfig,
+        cancellation: CancellationToken,
+        input_queue: AgentInputQueue,
+    ) -> BoxTaskFuture {
+        let task = self.create_task(config, cancellation);
+        Box::pin(async move {
+            let _input_queue = input_queue;
+            task.await
+        })
+    }
 }
 
 /// Restart strategy applied when a supervised agent fails.
@@ -77,6 +94,37 @@ pub struct ChildTerminalResult {
     pub result: Result<AgentLoopOutput, String>,
 }
 
+/// Stable metadata retained for each accepted child handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildMetadata {
+    pub child_id: AgentId,
+    pub agent_type: String,
+    pub task: String,
+    pub parent_id: AgentId,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+}
+
+/// Lightweight child status returned by child_status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildStatus {
+    pub child_id: AgentId,
+    pub agent_type: String,
+    pub status: String,
+    pub ready: bool,
+    pub elapsed_ms: u64,
+}
+
+/// Result returned by a bounded wait_child_agent request.
+#[derive(Debug, Clone)]
+pub struct WaitChildResult {
+    pub child_id: AgentId,
+    pub agent_type: Option<String>,
+    pub status: String,
+    pub ready: bool,
+    pub terminal: Option<ChildTerminalResult>,
+}
+
 /// Payload variants for supervisor messages.
 #[derive(Debug)]
 pub enum SupervisorPayload {
@@ -97,6 +145,25 @@ pub enum SupervisorPayload {
     ),
     /// Cancel a live child agent by id.
     CancelChild(AgentId, tokio::sync::oneshot::Sender<Result<(), String>>),
+    /// Queue steering input for a live child agent.
+    SteerChild(
+        AgentId,
+        String,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
+    /// Inspect a live or completed child handle by id.
+    ChildStatus(
+        AgentId,
+        tokio::sync::oneshot::Sender<Result<ChildStatus, String>>,
+    ),
+    /// Wait for a child up to a bounded timeout without consuming the result.
+    WaitChild(
+        AgentId,
+        Duration,
+        tokio::sync::oneshot::Sender<Result<WaitChildResult, String>>,
+    ),
+    /// Release a terminal child handle and cached result.
+    CloseChild(AgentId, tokio::sync::oneshot::Sender<Result<(), String>>),
     /// Cancel a running agent.
     Cancel,
 }

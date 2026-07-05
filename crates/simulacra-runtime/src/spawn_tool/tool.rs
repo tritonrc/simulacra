@@ -421,6 +421,292 @@ impl simulacra_types::Tool for JoinChildAgentTool {
     }
 }
 
+pub struct ChildStatusTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for ChildStatusTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "child_status".to_string(),
+            description: "Inspect the status of a live or completed child agent handle."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "child_id": {
+                        "type": "string",
+                        "description": "Child agent id returned by spawn_agent"
+                    }
+                },
+                "required": ["child_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let child_id = parse_required_child_id(&arguments)?;
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId(child_id.clone()),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::ChildStatus(AgentId(child_id.clone()), result_tx),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let status = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped child_status response channel".into(),
+                )
+            })?;
+            let status = status.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            Ok(child_status_json(status))
+        })
+    }
+}
+
+pub struct WaitChildAgentTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for WaitChildAgentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "wait_child_agent".to_string(),
+            description: "Wait for a child agent up to a bounded timeout without consuming its terminal result.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "child_id": {
+                        "type": "string",
+                        "description": "Child agent id returned by spawn_agent"
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Maximum time to wait in milliseconds. Zero polls once without waiting."
+                    }
+                },
+                "required": ["child_id", "timeout_ms"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let child_id = parse_required_child_id(&arguments)?;
+            let timeout_ms = arguments
+                .get("timeout_ms")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| {
+                    simulacra_types::ToolError::InvalidArguments(
+                        "missing or invalid required field: timeout_ms".into(),
+                    )
+                })?;
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId(child_id.clone()),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::WaitChild(
+                        AgentId(child_id.clone()),
+                        Duration::from_millis(timeout_ms),
+                        result_tx,
+                    ),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let wait = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped wait_child_agent response channel".into(),
+                )
+            })?;
+            let wait = wait.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            Ok(wait_child_json(wait))
+        })
+    }
+}
+
+pub struct CloseChildAgentTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for CloseChildAgentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "close_child_agent".to_string(),
+            description: "Release a completed child agent handle and its cached terminal result."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "child_id": {
+                        "type": "string",
+                        "description": "Child agent id returned by spawn_agent"
+                    }
+                },
+                "required": ["child_id"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let child_id = parse_required_child_id(&arguments)?;
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId(child_id.clone()),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::CloseChild(AgentId(child_id.clone()), result_tx),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let result = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped close_child_agent response channel".into(),
+                )
+            })?;
+            result.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            Ok(serde_json::json!({
+                "child_id": child_id,
+                "status": "closed"
+            }))
+        })
+    }
+}
+
+pub struct SteerChildAgentTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for SteerChildAgentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "steer_child_agent".to_string(),
+            description:
+                "Queue additional instructions for a live child agent before its next model turn."
+                    .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "child_id": {
+                        "type": "string",
+                        "description": "Child agent id returned by spawn_agent"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Additional instruction to queue for the child agent"
+                    }
+                },
+                "required": ["child_id", "message"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let child_id = arguments
+                .get("child_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    simulacra_types::ToolError::InvalidArguments(
+                        "missing required field: child_id".into(),
+                    )
+                })?
+                .to_string();
+            let message = arguments
+                .get("message")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    simulacra_types::ToolError::InvalidArguments(
+                        "missing required field: message".into(),
+                    )
+                })?
+                .to_string();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId(child_id.clone()),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::SteerChild(
+                        AgentId(child_id.clone()),
+                        message,
+                        result_tx,
+                    ),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let result = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped steer response channel".into(),
+                )
+            })?;
+            result.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            Ok(serde_json::json!({
+                "child_id": child_id,
+                "status": "queued"
+            }))
+        })
+    }
+}
+
 pub struct CancelChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
 }
@@ -495,6 +781,15 @@ impl simulacra_types::Tool for CancelChildAgentTool {
     }
 }
 
+fn parse_required_child_id(arguments: &serde_json::Value) -> Result<String, ToolError> {
+    arguments
+        .get("child_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| ToolError::InvalidArguments("missing required field: child_id".into()))
+}
+
 fn child_success_json(
     child_id: String,
     agent_type: String,
@@ -518,4 +813,47 @@ fn child_success_json(
             "output_tokens": output.token_usage.output_tokens
         }
     })
+}
+
+fn child_status_json(status: ChildStatus) -> serde_json::Value {
+    serde_json::json!({
+        "child_id": status.child_id.0,
+        "agent_type": status.agent_type,
+        "status": status.status,
+        "ready": status.ready,
+        "elapsed_ms": status.elapsed_ms
+    })
+}
+
+fn wait_child_json(wait: WaitChildResult) -> serde_json::Value {
+    if let Some(terminal) = wait.terminal {
+        match terminal.result {
+            Ok(output) => {
+                let mut json = child_success_json(terminal.child_id.0, terminal.agent_type, output);
+                if let serde_json::Value::Object(ref mut object) = json {
+                    object.insert("status".to_string(), serde_json::Value::String(wait.status));
+                    object.insert("ready".to_string(), serde_json::Value::Bool(true));
+                }
+                json
+            }
+            Err(error) => serde_json::json!({
+                "child_id": terminal.child_id.0,
+                "agent_type": terminal.agent_type,
+                "status": wait.status,
+                "ready": true,
+                "exit_reason": "failed",
+                "message": error,
+                "token_usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0
+                }
+            }),
+        }
+    } else {
+        serde_json::json!({
+            "child_id": wait.child_id.0,
+            "status": "running",
+            "ready": false
+        })
+    }
 }

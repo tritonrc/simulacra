@@ -207,13 +207,26 @@ fn interactive_sessions_register_spawn_agent_and_list_it_in_tools_output() {
 
     let view = session.dispatch_command("/tools");
 
+    for tool_name in [
+        "spawn_agent",
+        "join_child_agent",
+        "cancel_child_agent",
+        "steer_child_agent",
+        "child_status",
+        "wait_child_agent",
+        "close_child_agent",
+    ] {
+        assert!(
+            contains_text(&view.visible_output, tool_name),
+            "interactive /tools output should include {tool_name}"
+        );
+    }
     assert!(
-        contains_text(&view.visible_output, "spawn_agent")
-            && contains_text(
-                &view.visible_output,
-                "Spawn a supervised child agent to handle a delegated task"
-            ),
-        "interactive /tools output should include the documented spawn_agent tool"
+        contains_text(
+            &view.visible_output,
+            "Spawn a supervised child agent to handle a delegated task"
+        ),
+        "interactive /tools output should include the documented spawn_agent description"
     );
 }
 

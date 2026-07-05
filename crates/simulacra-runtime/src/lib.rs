@@ -29,9 +29,9 @@ pub use activity_sink::{
     ActivitySink, ChannelActivitySink, ForwardingActivitySink, NoopActivitySink,
 };
 pub use agent_loop::{
-    ActiveTurn, AgentHitlRuntime, AgentHitlSenders, AgentLoop, AgentLoopConfig, AgentLoopOutput,
-    REQUEST_INPUT_TOOL_NAME, RequestInputTool, StepContext, ToolApprovalResponse, TurnContext,
-    TurnResult, TurnState,
+    ActiveTurn, AgentHitlRuntime, AgentHitlSenders, AgentInputQueue, AgentLoop, AgentLoopConfig,
+    AgentLoopOutput, ChildInputHandle, REQUEST_INPUT_TOOL_NAME, RequestInputTool, StepContext,
+    ToolApprovalResponse, TurnContext, TurnResult, TurnState,
 };
 pub use error::RuntimeError;
 pub use guardrail::{GuardrailDecision, InputGuardrail, OutputGuardrail};
@@ -43,13 +43,14 @@ pub use session_file::FileSessionStorage;
 pub use session_sqlite::SqliteSessionStorage;
 #[cfg(feature = "spawn")]
 pub use spawn_tool::{
-    AgentTaskFactory, CancelChildAgentTool, ChildCellConfigurator, ChildToolRegistrar,
-    DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, NoopContextStrategy, ProviderKind, SpawnAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, ChildCellConfigurator, ChildStatusTool,
+    ChildToolRegistrar, CloseChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool,
+    NoopContextStrategy, ProviderKind, SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
 };
 pub use supervisor::{
-    AgentSupervisor, BoxTaskFuture, CancellationToken, ChildTerminalResult, MessagePriority,
-    RestartStrategy, SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload,
-    TaskFactory,
+    AgentSupervisor, BoxTaskFuture, CancellationToken, ChildMetadata, ChildStatus,
+    ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck, SpawnConfig, SpawnResult,
+    SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
 };
 #[cfg(feature = "spawn")]
 pub use vfs_hook::HookedVfsLayer;

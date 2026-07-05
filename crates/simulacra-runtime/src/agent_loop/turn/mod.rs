@@ -42,6 +42,7 @@ impl AgentLoop {
         if self.is_cancelled() {
             return Ok(Self::cancelled_execution());
         }
+        self.drain_input_queue(messages);
         let active_turn = self.active_turn();
 
         if let Err(exhausted) = self.budget.check_budget() {
@@ -249,6 +250,18 @@ impl AgentLoop {
         self.cancellation
             .as_ref()
             .is_some_and(crate::CancellationToken::is_cancelled)
+    }
+
+    fn drain_input_queue(&mut self, messages: &mut Vec<Message>) {
+        let Some(input_queue) = self.input_queue.as_mut() else {
+            return;
+        };
+        messages.extend(input_queue.drain().into_iter().map(|content| Message {
+            role: Role::User,
+            content,
+            tool_calls: vec![],
+            tool_call_id: None,
+        }));
     }
 
     fn cancelled_execution() -> TurnExecution {

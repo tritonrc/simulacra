@@ -6,6 +6,7 @@
 
 mod construct;
 mod hitl;
+mod input;
 mod journal;
 mod meters;
 mod replay_helpers;
@@ -22,6 +23,7 @@ pub use hitl::{
     AgentHitlRuntime, AgentHitlSenders, REQUEST_INPUT_TOOL_NAME, RequestInputTool,
     ToolApprovalResponse,
 };
+pub use input::{AgentInputQueue, ChildInputHandle};
 pub use types::{
     ActiveTurn, AgentLoopConfig, AgentLoopOutput, StepContext, TurnContext, TurnResult, TurnState,
 };
@@ -100,6 +102,8 @@ pub struct AgentLoop {
     /// Runtime-owned cancellation token shared with supervisors or interactive
     /// sessions.
     cancellation: Option<crate::CancellationToken>,
+    /// Optional queue for parent steering messages delivered to live child agents.
+    input_queue: Option<AgentInputQueue>,
     /// Optional human-in-the-loop channels for server-launched resumable waits.
     hitl: Option<AgentHitlRuntime>,
 }

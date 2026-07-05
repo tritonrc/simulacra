@@ -32,6 +32,7 @@ impl AgentLoop {
             journal_write_failures: AtomicU32::new(0),
             vfs: None,
             cancellation: None,
+            input_queue: None,
             hitl: None,
         }
     }
@@ -64,6 +65,7 @@ impl AgentLoop {
             journal_write_failures: AtomicU32::new(0),
             vfs: None,
             cancellation: None,
+            input_queue: None,
             hitl: None,
         }
     }
@@ -107,6 +109,11 @@ impl AgentLoop {
     /// Attach the runtime cancellation token observed by provider/tool dispatch.
     pub fn set_cancellation_token(&mut self, cancellation: crate::CancellationToken) {
         self.cancellation = Some(cancellation);
+    }
+
+    /// Attach a child steering input queue observed between model turns.
+    pub fn set_input_queue(&mut self, input_queue: AgentInputQueue) {
+        self.input_queue = Some(input_queue);
     }
 
     /// Attach human-in-the-loop channels used by server-launched resumable waits.

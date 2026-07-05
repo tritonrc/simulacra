@@ -52,8 +52,9 @@ pub type CliError = anyhow::Error;
 // Re-export ProviderKind publicly (it was pub in simulacra-cli before the move).
 pub use simulacra_runtime::ProviderKind;
 use simulacra_runtime::{
-    AgentTaskFactory, CancelChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool,
-    SpawnAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool,
+    DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, SpawnAgentTool, SteerChildAgentTool,
+    WaitChildAgentTool,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1160,6 +1161,26 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
         registry
             .register(Box::new(CancelChildAgentTool { sender: spawn_tx }))
             .context("failed to register cancel_child_agent tool")?;
+        registry
+            .register(Box::new(SteerChildAgentTool {
+                sender: spawn_tx_clone.clone(),
+            }))
+            .context("failed to register steer_child_agent tool")?;
+        registry
+            .register(Box::new(ChildStatusTool {
+                sender: spawn_tx_clone.clone(),
+            }))
+            .context("failed to register child_status tool")?;
+        registry
+            .register(Box::new(WaitChildAgentTool {
+                sender: spawn_tx_clone.clone(),
+            }))
+            .context("failed to register wait_child_agent tool")?;
+        registry
+            .register(Box::new(CloseChildAgentTool {
+                sender: spawn_tx_clone.clone(),
+            }))
+            .context("failed to register close_child_agent tool")?;
         spawn_rx = Some(rx);
         spawn_tx_for_factory = Some(spawn_tx_clone);
     }

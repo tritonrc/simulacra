@@ -13,4 +13,5 @@ include!("tests/provider_streaming.rs");
 include!("tests/streaming_replay.rs");
 include!("tests/streaming_cancellation.rs");
 include!("tests/hitl.rs");
+include!("tests/child_input.rs");
 mod otel_span_tests;

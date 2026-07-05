@@ -20,8 +20,9 @@ use simulacra_memory::{Embedder, HitIdCache, MemoryStore, VectorIndex};
 use simulacra_provider::{AnthropicProvider, OpenAiProvider};
 use simulacra_runtime::{
     ActivitySink, AgentHitlRuntime, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor,
-    AgentTaskFactory, CancelChildAgentTool, CountingJournalStorage, InMemoryJournalStorage,
-    JoinChildAgentTool, RequestInputTool, SpawnAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool,
+    CountingJournalStorage, InMemoryJournalStorage, JoinChildAgentTool, RequestInputTool,
+    SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
 };
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
 use simulacra_tool::{
@@ -1730,6 +1731,26 @@ impl SimulacraEngine {
                     registry
                         .register(Box::new(CancelChildAgentTool { sender: spawn_tx }))
                         .map_err(|e| format!("failed to register cancel_child_agent tool: {e}"))?;
+                    registry
+                        .register(Box::new(SteerChildAgentTool {
+                            sender: spawn_tx_clone.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register steer_child_agent tool: {e}"))?;
+                    registry
+                        .register(Box::new(ChildStatusTool {
+                            sender: spawn_tx_clone.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register child_status tool: {e}"))?;
+                    registry
+                        .register(Box::new(WaitChildAgentTool {
+                            sender: spawn_tx_clone.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register wait_child_agent tool: {e}"))?;
+                    registry
+                        .register(Box::new(CloseChildAgentTool {
+                            sender: spawn_tx_clone.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register close_child_agent tool: {e}"))?;
                     spawn_rx = Some(rx);
                     supervisor_tx_for_factory = Some(spawn_tx_clone);
                 }

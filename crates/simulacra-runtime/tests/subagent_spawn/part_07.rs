@@ -108,6 +108,103 @@ fn generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent() 
     assert_eq!(output.exit_reason, ExitReason::Complete);
 }
 
+#[test]
+fn configured_spawn_capable_child_registry_includes_all_child_control_tools() {
+    let _env_lock = openai_env_guard();
+    let server = FakeOpenAiServer::new(CannedResponse::json(serde_json::json!({
+        "id": "resp-child-controls-1",
+        "model": "child-model",
+        "choices": [{
+            "message": { "role": "assistant", "content": "done" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5 }
+    })));
+    let _base_url = EnvGuard::set("OPENAI_BASE_URL", &server.base_url());
+    let _api_base = EnvGuard::set("OPENAI_API_BASE", &server.base_url());
+    let _api_key = EnvGuard::set("OPENAI_API_KEY", "test-key");
+
+    let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    vfs.mkdir("/workspace")
+        .expect("workspace directory should be created");
+    let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
+    let parent_cap = CapabilityToken {
+        spawn_types: vec!["reviewer".into()],
+        ..Default::default()
+    };
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let mut config = task_factory_config(CapabilitiesConfig {
+        network: vec![],
+        mcp: vec![],
+        shell: false,
+        javascript: false,
+        python: false,
+        paths_read: vec![],
+        paths_write: vec![],
+        skill_patterns: vec![],
+        memory: None,
+    });
+    config
+        .agent_types
+        .get_mut("researcher")
+        .expect("researcher fixture should exist")
+        .can_spawn = vec!["reviewer".into()];
+    let factory = AgentTaskFactory {
+        config,
+        provider_kind: ProviderKind::OpenAI,
+        vfs,
+        journal,
+        activity_sink: Arc::new(NoopActivitySink),
+        parent_capability: parent_cap,
+        supervisor_sender: Some(tx),
+        parent_model: "parent-model".into(),
+        pipeline: None,
+        script_executor: None,
+        child_cell_configurator: None,
+        child_tool_registrar: None,
+    };
+
+    let mut spawn = spawn_config("child-controls-1", "parent-agent", child_budget(32, 1, 1));
+    spawn.agent_type = Some("researcher".into());
+
+    let output = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(factory.create_task(spawn, CancellationToken::new(Duration::from_secs(1))))
+        .expect("configured child should complete");
+    assert_eq!(output.exit_reason, ExitReason::Complete);
+
+    let request = server.first_request_json();
+    let tool_names: BTreeSet<String> = request
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .expect("configured child request should include tool definitions")
+        .iter()
+        .map(|tool| {
+            tool.pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .expect("tool definition should include function.name")
+                .to_string()
+        })
+        .collect();
+
+    for expected in [
+        "spawn_agent",
+        "join_child_agent",
+        "cancel_child_agent",
+        "steer_child_agent",
+        "child_status",
+        "wait_child_agent",
+        "close_child_agent",
+    ] {
+        assert!(
+            tool_names.contains(expected),
+            "spawn-capable configured child should include {expected}; tools were: {tool_names:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn generic_spawn_parent_max_sub_agents_zero_remains_unlimited() {
     let factory = RecordingTaskFactory::new(vec![Ok(child_success_output())]);

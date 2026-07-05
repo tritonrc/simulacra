@@ -169,6 +169,62 @@ async fn supervisor_actor_loop_processes_messages_by_priority() {
         .expect("actor loop task should shut down cleanly");
 }
 
+#[test]
+fn s054_cancel_priority_wins_over_status_wait_and_close_commands() {
+    let mut queue = std::collections::BinaryHeap::new();
+
+    let (status_tx, _) = tokio::sync::oneshot::channel();
+    queue.push(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::ChildStatus(AgentId("child-1".into()), status_tx),
+    });
+
+    let (wait_tx, _) = tokio::sync::oneshot::channel();
+    queue.push(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChild(
+            AgentId("child-1".into()),
+            Duration::from_millis(1),
+            wait_tx,
+        ),
+    });
+
+    let (close_tx, _) = tokio::sync::oneshot::channel();
+    queue.push(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CloseChild(AgentId("child-1".into()), close_tx),
+    });
+
+    let (cancel_tx, _) = tokio::sync::oneshot::channel();
+    queue.push(SupervisorMessage {
+        priority: MessagePriority::Signal,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CancelChild(AgentId("child-1".into()), cancel_tx),
+    });
+
+    let first = queue
+        .pop()
+        .expect("queued child-control messages should pop by priority");
+    assert!(
+        matches!(first.payload, SupervisorPayload::CancelChild(_, _)),
+        "signal-priority cancel must be processed before S054 command-priority probes"
+    );
+    assert!(
+        queue
+            .into_iter()
+            .all(|message| matches!(
+                message.payload,
+                SupervisorPayload::ChildStatus(_, _)
+                    | SupervisorPayload::WaitChild(_, _, _)
+                    | SupervisorPayload::CloseChild(_, _)
+            )),
+        "remaining S054 messages should all be command-priority probes"
+    );
+}
+
 // S009 RED Assertion: the supervisor should keep multiple child tasks alive concurrently.
 #[tokio::test]
 async fn supervisor_manages_multiple_concurrent_agents() {
@@ -565,4 +621,68 @@ async fn child_agents_communicate_via_mpsc() {
         .await
         .expect("actor loop should exit once the channel closes")
         .expect("actor loop task should shut down cleanly");
+}
+
+#[tokio::test]
+async fn steering_unknown_child_returns_error() {
+    let supervisor = AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(FakeTaskFactory::new()),
+    );
+
+    let result = supervisor.steer_child(&AgentId("missing-child".into()), "focus".into());
+    assert!(
+        matches!(result, Err(ref message) if message.contains("unknown child_id")),
+        "unknown child steering should fail: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn steering_live_child_is_accepted_and_completed_child_is_rejected() {
+    let release = Arc::new(Notify::new());
+    let factory = FakeTaskFactory::new();
+    factory.push_plan(
+        "live-child",
+        FakeTaskPlan::Complete {
+            release: Some(Arc::clone(&release)),
+            output: AgentLoopOutput {
+                exit_reason: ExitReason::Complete,
+                messages: vec![],
+                token_usage: TokenUsage::default(),
+                used_turns: 0,
+                used_cost: Decimal::ZERO,
+            },
+        },
+    );
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory.clone()),
+    );
+
+    supervisor
+        .spawn_agent(spawn_config(
+            "live-child",
+            "parent-agent",
+            CapabilityToken::default(),
+            default_budget(),
+            RestartStrategy::LetCrash,
+        ))
+        .expect("live child spawn should be accepted");
+    factory.wait_for_started_agents(1).await;
+
+    supervisor
+        .steer_child(&AgentId("live-child".into()), "add detail".into())
+        .expect("live child steering should enqueue");
+
+    release.notify_waiters();
+    factory.wait_for_completion("live-child").await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let completed = supervisor.steer_child(&AgentId("live-child".into()), "too late".into());
+    assert!(
+        matches!(completed, Err(ref message) if message.contains("already completed")),
+        "completed child steering should fail: {completed:?}"
+    );
 }

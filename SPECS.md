@@ -58,6 +58,7 @@ Each spec lives in `specs/` and is testable. If code and spec disagree, the spec
 | `specs/S051-agent-hitl-resume-runtime.md` | Active | Agent HITL resume runtime: input.response consumption, opt-in request_input tool, approval.respond resume, waiting task transitions, and replay-safe HITL behavior |
 | `specs/S052-workflow-runtime.md` | Active | Workflow runtime: QuickJS-restricted orchestration scripts, persisted workflow runs, worker fan-out/resume/cancel, events, server routes, and Workflow tool |
 | `specs/S053-async-quickjs-runtime-v2.md` | Active | Async QuickJS runtime v2: shared async substrate for js_exec and workflows, Promise-aware evaluation, static ESM prefetch, and restricted host profiles |
+| `specs/S054-child-agent-orchestration.md` | Active | Child agent orchestration: status, bounded wait, and close tools for supervised child handles |
 
 ## Spec Lifecycle
 

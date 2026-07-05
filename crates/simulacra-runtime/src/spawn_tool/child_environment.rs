@@ -107,7 +107,19 @@ fn build_child_registry(
         registry.register(Box::new(JoinChildAgentTool {
             sender: sender.clone(),
         }))?;
-        registry.register(Box::new(CancelChildAgentTool { sender }))?;
+        registry.register(Box::new(CancelChildAgentTool {
+            sender: sender.clone(),
+        }))?;
+        registry.register(Box::new(SteerChildAgentTool {
+            sender: sender.clone(),
+        }))?;
+        registry.register(Box::new(ChildStatusTool {
+            sender: sender.clone(),
+        }))?;
+        registry.register(Box::new(WaitChildAgentTool {
+            sender: sender.clone(),
+        }))?;
+        registry.register(Box::new(CloseChildAgentTool { sender }))?;
     }
     Ok(registry)
 }

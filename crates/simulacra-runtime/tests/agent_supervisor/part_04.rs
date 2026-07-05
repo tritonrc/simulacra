@@ -206,3 +206,427 @@ fn valid_spawn_without_task_factory_has_no_spawn_side_effects() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn child_status_wait_and_close_follow_handle_lifecycle() {
+    let factory = FakeTaskFactory::new();
+    let release = Arc::new(Notify::new());
+    factory.push_plan(
+        "child-orchestrated",
+        FakeTaskPlan::Complete {
+            release: Some(Arc::clone(&release)),
+            output: completed_output(),
+        },
+    );
+
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory.clone()),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    let mut config = spawn_config(
+        "child-orchestrated",
+        "parent-agent",
+        CapabilityToken::default(),
+        default_budget(),
+        RestartStrategy::LetCrash,
+    );
+    config.agent_type = Some("researcher".into());
+    config.task = "inspect lifecycle".into();
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::Spawn(Box::new(config), ack_tx),
+    })
+    .await
+    .expect("spawn message should send");
+    ack_rx
+        .await
+        .expect("spawn ack channel should stay open")
+        .expect("spawn should be accepted");
+    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_started_agents(1))
+        .await
+        .expect("child should start");
+
+    let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::ChildStatus(AgentId("child-orchestrated".into()), status_tx),
+    })
+    .await
+    .expect("status message should send");
+    let status = status_rx
+        .await
+        .expect("status response channel should stay open")
+        .expect("running child should have status");
+    assert_eq!(status.child_id.0, "child-orchestrated");
+    assert_eq!(status.agent_type, "researcher");
+    assert_eq!(status.status, "running");
+    assert!(!status.ready);
+
+    let (poll_tx, poll_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChild(
+            AgentId("child-orchestrated".into()),
+            Duration::ZERO,
+            poll_tx,
+        ),
+    })
+    .await
+    .expect("poll message should send");
+    let poll = poll_rx
+        .await
+        .expect("poll response channel should stay open")
+        .expect("poll should succeed");
+    assert_eq!(poll.status, "running");
+    assert!(!poll.ready);
+
+    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChild(
+            AgentId("child-orchestrated".into()),
+            Duration::from_millis(10),
+            timeout_tx,
+        ),
+    })
+    .await
+    .expect("bounded wait message should send");
+    let timeout = tokio::time::timeout(Duration::from_secs(1), timeout_rx)
+        .await
+        .expect("bounded wait should time out promptly")
+        .expect("timeout response channel should stay open")
+        .expect("timeout should be a non-error running result");
+    assert_eq!(timeout.status, "running");
+    assert!(!timeout.ready);
+
+    let (close_running_tx, close_running_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CloseChild(
+            AgentId("child-orchestrated".into()),
+            close_running_tx,
+        ),
+    })
+    .await
+    .expect("close-running message should send");
+    let close_running = close_running_rx
+        .await
+        .expect("close-running response channel should stay open");
+    assert!(
+        matches!(close_running, Err(ref message) if message.contains("still running")),
+        "close must reject running children: {close_running:?}"
+    );
+
+    let (terminal_wait_tx, terminal_wait_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChild(
+            AgentId("child-orchestrated".into()),
+            Duration::from_secs(1),
+            terminal_wait_tx,
+        ),
+    })
+    .await
+    .expect("terminal wait message should send");
+    release.notify_waiters();
+    let terminal_wait = terminal_wait_rx
+        .await
+        .expect("terminal wait response channel should stay open")
+        .expect("terminal wait should succeed");
+    assert_eq!(terminal_wait.status, "completed");
+    assert!(terminal_wait.ready);
+    assert_eq!(
+        terminal_wait
+            .terminal
+            .as_ref()
+            .expect("terminal result should be retained")
+            .agent_type,
+        "researcher"
+    );
+
+    let (terminal_poll_tx, terminal_poll_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChild(
+            AgentId("child-orchestrated".into()),
+            Duration::ZERO,
+            terminal_poll_tx,
+        ),
+    })
+    .await
+    .expect("terminal poll message should send");
+    let terminal_poll = terminal_poll_rx
+        .await
+        .expect("terminal poll response channel should stay open")
+        .expect("terminal poll should return the retained result immediately");
+    assert_eq!(terminal_poll.status, "completed");
+    assert!(terminal_poll.ready);
+    assert!(
+        terminal_poll.terminal.is_some(),
+        "zero-timeout wait should return terminal data when the child is already complete"
+    );
+
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::JoinChild(AgentId("child-orchestrated".into()), join_tx),
+    })
+    .await
+    .expect("join after wait message should send");
+    let joined = join_rx
+        .await
+        .expect("join response channel should stay open")
+        .expect("join should still see non-consumed terminal result");
+    assert_eq!(joined.result.unwrap().exit_reason, ExitReason::Complete);
+
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CloseChild(AgentId("child-orchestrated".into()), close_tx),
+    })
+    .await
+    .expect("close message should send");
+    close_rx
+        .await
+        .expect("close response channel should stay open")
+        .expect("close should release terminal child state");
+
+    let (unknown_close_tx, unknown_close_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CloseChild(
+            AgentId("child-orchestrated".into()),
+            unknown_close_tx,
+        ),
+    })
+    .await
+    .expect("unknown-close message should send");
+    let unknown_close = unknown_close_rx
+        .await
+        .expect("unknown-close response channel should stay open");
+    assert!(
+        matches!(unknown_close, Err(ref message) if message.contains("unknown or closed")),
+        "close should fail after terminal child state has been released: {unknown_close:?}"
+    );
+
+    let (closed_status_tx, closed_status_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::ChildStatus(
+            AgentId("child-orchestrated".into()),
+            closed_status_tx,
+        ),
+    })
+    .await
+    .expect("closed status message should send");
+    let closed_status = closed_status_rx
+        .await
+        .expect("closed status response channel should stay open");
+    assert!(
+        matches!(closed_status, Err(ref message) if message.contains("unknown or closed")),
+        "closed children should be unknown to status: {closed_status:?}"
+    );
+
+    let (closed_join_tx, closed_join_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::JoinChild(AgentId("child-orchestrated".into()), closed_join_tx),
+    })
+    .await
+    .expect("closed join message should send");
+    assert!(
+        closed_join_rx
+            .await
+            .expect("closed join response channel should stay open")
+            .is_err(),
+        "join should fail after close"
+    );
+
+    let (closed_wait_tx, closed_wait_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChild(
+            AgentId("child-orchestrated".into()),
+            Duration::ZERO,
+            closed_wait_tx,
+        ),
+    })
+    .await
+    .expect("closed wait message should send");
+    assert!(
+        closed_wait_rx
+            .await
+            .expect("closed wait response channel should stay open")
+            .is_err(),
+        "wait should fail after close"
+    );
+
+    let (closed_steer_tx, closed_steer_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::SteerChild(
+            AgentId("child-orchestrated".into()),
+            "more input".into(),
+            closed_steer_tx,
+        ),
+    })
+    .await
+    .expect("closed steer message should send");
+    assert!(
+        closed_steer_rx
+            .await
+            .expect("closed steer response channel should stay open")
+            .is_err(),
+        "steer should fail after close"
+    );
+
+    let (closed_cancel_tx, closed_cancel_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Signal,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CancelChild(
+            AgentId("child-orchestrated".into()),
+            closed_cancel_tx,
+        ),
+    })
+    .await
+    .expect("closed cancel message should send");
+    assert!(
+        closed_cancel_rx
+            .await
+            .expect("closed cancel response channel should stay open")
+            .is_err(),
+        "cancel should fail after close"
+    );
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor should exit after channel closes")
+        .expect("actor task should shut down cleanly");
+}
+
+#[tokio::test]
+async fn child_status_reports_failed_and_cancelled_terminal_states() {
+    let factory = FakeTaskFactory::new();
+    factory.push_plan(
+        "child-failed",
+        FakeTaskPlan::Fail {
+            error: RuntimeError::Session("boom".into()),
+        },
+    );
+    factory.push_plan(
+        "child-cancelled",
+        FakeTaskPlan::WaitForCancellation {
+            output: AgentLoopOutput {
+                exit_reason: ExitReason::Cancelled,
+                messages: vec![],
+                token_usage: TokenUsage::default(),
+                used_turns: 0,
+                used_cost: Decimal::ZERO,
+            },
+        },
+    );
+
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory.clone()),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    for child_id in ["child-failed", "child-cancelled"] {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("parent-agent".into()),
+            payload: SupervisorPayload::Spawn(
+                Box::new(spawn_config(
+                    child_id,
+                    "parent-agent",
+                    CapabilityToken::default(),
+                    default_budget(),
+                    RestartStrategy::LetCrash,
+                )),
+                ack_tx,
+            ),
+        })
+        .await
+        .expect("spawn message should send");
+        ack_rx
+            .await
+            .expect("spawn ack channel should stay open")
+            .expect("spawn should be accepted");
+    }
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Signal,
+        agent_id: AgentId("child-cancelled".into()),
+        payload: SupervisorPayload::CancelChild(AgentId("child-cancelled".into()), cancel_tx),
+    })
+    .await
+    .expect("cancel message should send");
+    cancel_rx
+        .await
+        .expect("cancel response channel should stay open")
+        .expect("cancel should succeed");
+
+    for (child_id, expected_status) in [
+        ("child-failed", "failed"),
+        ("child-cancelled", "cancelled"),
+    ] {
+        let (wait_tx, wait_rx) = tokio::sync::oneshot::channel();
+        tx.send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("parent-agent".into()),
+            payload: SupervisorPayload::WaitChild(
+                AgentId(child_id.into()),
+                Duration::from_secs(1),
+                wait_tx,
+            ),
+        })
+        .await
+        .expect("wait message should send");
+        let wait = tokio::time::timeout(Duration::from_secs(1), wait_rx)
+            .await
+            .expect("terminal wait should resolve")
+            .expect("wait response channel should stay open")
+            .expect("terminal wait should succeed");
+        assert_eq!(wait.status, expected_status);
+        assert!(wait.ready);
+    }
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor should exit after channel closes")
+        .expect("actor task should shut down cleanly");
+}

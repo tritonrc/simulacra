@@ -39,6 +39,16 @@ impl crate::TaskFactory for AgentTaskFactory {
         spawn_config: SpawnConfig,
         cancellation: CancellationToken,
     ) -> BoxTaskFuture {
+        let (input_queue, _input_handle) = AgentInputQueue::new();
+        self.create_task_with_input(spawn_config, cancellation, input_queue)
+    }
+
+    fn create_task_with_input(
+        &self,
+        spawn_config: SpawnConfig,
+        cancellation: CancellationToken,
+        input_queue: AgentInputQueue,
+    ) -> BoxTaskFuture {
         let agent_type_config = spawn_config
             .agent_type
             .as_ref()
@@ -60,6 +70,7 @@ impl crate::TaskFactory for AgentTaskFactory {
         let child_tool_registrar = self.child_tool_registrar.clone();
 
         Box::pin(async move {
+            let mut input_queue = Some(input_queue);
             // === GENERIC MODE ===
             if spawn_config.agent_type.is_none() {
                 let system_prompt = spawn_config
@@ -133,6 +144,9 @@ impl crate::TaskFactory for AgentTaskFactory {
                 );
                 child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
                 child_loop.set_cancellation_token(cancellation.clone());
+                if let Some(input_queue) = input_queue.take() {
+                    child_loop.set_input_queue(input_queue);
+                }
 
                 let result = child_loop.run(&task).await;
                 run_spawn_after_hook(pipeline.as_ref(), "generic", &result);
@@ -235,6 +249,9 @@ impl crate::TaskFactory for AgentTaskFactory {
             );
             child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
             child_loop.set_cancellation_token(cancellation);
+            if let Some(input_queue) = input_queue.take() {
+                child_loop.set_input_queue(input_queue);
+            }
 
             let result = child_loop.run(&task).await;
             run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);

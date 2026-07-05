@@ -230,17 +230,23 @@ impl AgentSupervisor {
         let token = CancellationToken::new(Duration::from_secs(5));
         let agent_id = config.agent_id.clone();
         let agent_id_for_map = agent_id.clone();
+        let started_at_ms = super::actor::now_ms();
         let spawn_start = Instant::now();
         let result_context = self.child_result_context(&config, spawn_start);
         let retry_config = config.clone();
-        let mut task_future = factory.create_task(config, token.clone());
+        let (input_queue, input_handle) = AgentInputQueue::new();
+        let mut task_future =
+            factory.create_task_with_input(config.clone(), token.clone(), input_queue);
         lock_mutex(&self.cancellation_tokens, "cancellation_tokens")
             .insert(agent_id.clone(), token.clone());
+        lock_mutex(&self.child_inputs, "child_inputs").insert(agent_id.clone(), input_handle);
         lock_mutex(&self.child_results, "child_results").insert(
             agent_id.clone(),
             ChildRunState {
+                metadata: super::actor::child_metadata(&config, started_at_ms),
                 result: None,
-                waiters: Vec::new(),
+                join_waiters: Vec::new(),
+                wait_waiters: Vec::new(),
             },
         );
 
@@ -276,6 +282,7 @@ impl AgentSupervisor {
             };
             Self::record_child_terminal_result(&self.child_results, terminal);
             lock_mutex(&self.cancellation_tokens, "cancellation_tokens").remove(&agent_id);
+            lock_mutex(&self.child_inputs, "child_inputs").remove(&agent_id);
             let handle: JoinHandle<()> = tokio::spawn(async {});
             lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
             if was_err && let Some(err) = err_for_return {
@@ -289,6 +296,7 @@ impl AgentSupervisor {
         let retry_counts = Arc::clone(&self.retry_counts_shared);
         let child_results = Arc::clone(&self.child_results);
         let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
+        let child_inputs = Arc::clone(&self.child_inputs);
         let handle: JoinHandle<()> = tokio::spawn(async move {
             let _guard = tracing::dispatcher::set_default(&dispatch);
             let result = super::restart::run_task_with_retries(
@@ -307,6 +315,7 @@ impl AgentSupervisor {
             Self::record_child_terminal_result(&child_results, terminal);
             lock_mutex(&cancellation_tokens, "cancellation_tokens")
                 .remove(&result_context.agent_id);
+            lock_mutex(&child_inputs, "child_inputs").remove(&result_context.agent_id);
         });
         lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
 

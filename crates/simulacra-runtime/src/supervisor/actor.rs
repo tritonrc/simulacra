@@ -113,19 +113,26 @@ impl AgentSupervisor {
     ) {
         let agent_id = config.agent_id.clone();
         let token = CancellationToken::new(Duration::from_secs(5));
-        let task_future = factory.create_task(config.clone(), token.clone());
+        let (input_queue, input_handle) = AgentInputQueue::new();
+        let task_future =
+            factory.create_task_with_input(config.clone(), token.clone(), input_queue);
+        let started_at_ms = now_ms();
         let result_context = self.child_result_context(&config, Instant::now());
         let retry_counts = Arc::clone(&self.retry_counts_shared);
         let child_results = Arc::clone(&self.child_results);
         let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
+        let child_inputs = Arc::clone(&self.child_inputs);
 
         lock_mutex(&self.cancellation_tokens, "cancellation_tokens")
             .insert(agent_id.clone(), token);
+        lock_mutex(&self.child_inputs, "child_inputs").insert(agent_id.clone(), input_handle);
         lock_mutex(&self.child_results, "child_results").insert(
             agent_id.clone(),
             ChildRunState {
+                metadata: child_metadata(&config, started_at_ms),
                 result: None,
-                waiters: Vec::new(),
+                join_waiters: Vec::new(),
+                wait_waiters: Vec::new(),
             },
         );
 
@@ -140,6 +147,7 @@ impl AgentSupervisor {
             AgentSupervisor::record_child_terminal_result(&child_results, terminal);
             lock_mutex(&cancellation_tokens, "cancellation_tokens")
                 .remove(&result_context.agent_id);
+            lock_mutex(&child_inputs, "child_inputs").remove(&result_context.agent_id);
         });
     }
 }
@@ -176,13 +184,22 @@ impl AgentSupervisor {
                         .clone()
                         .unwrap_or_else(|| "generic".to_string()),
                 };
-                if result_tx.send(Ok(ack)).is_ok() {
-                    tokio::task::yield_now().await;
-                }
+                let _ = result_tx.send(Ok(ack));
                 self.spawn_task_into(task_set, *config, factory);
             }
             SupervisorPayload::JoinChild(child_id, result_tx) => {
                 self.join_child(child_id, result_tx);
+            }
+            SupervisorPayload::ChildStatus(child_id, result_tx) => {
+                let result = self.child_status(&child_id);
+                let _ = result_tx.send(result);
+            }
+            SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
+                self.wait_child(child_id, timeout, result_tx);
+            }
+            SupervisorPayload::CloseChild(child_id, result_tx) => {
+                let result = self.close_child(&child_id);
+                let _ = result_tx.send(result);
             }
             SupervisorPayload::CancelChild(child_id, result_tx) => {
                 let result = if let Some(token) =
@@ -190,6 +207,21 @@ impl AgentSupervisor {
                 {
                     token.signal();
                     Ok(())
+                } else if lock_mutex(&self.child_results, "child_results")
+                    .get(&child_id)
+                    .is_some_and(|state| state.result.is_some())
+                {
+                    Err(format!("child_id already completed: {}", child_id.0))
+                } else {
+                    Err(format!("unknown child_id: {}", child_id.0))
+                };
+                let _ = result_tx.send(result);
+            }
+            SupervisorPayload::SteerChild(child_id, message, result_tx) => {
+                let result = if let Some(handle) =
+                    lock_mutex(&self.child_inputs, "child_inputs").get(&child_id)
+                {
+                    handle.enqueue(message)
                 } else if lock_mutex(&self.child_results, "child_results")
                     .get(&child_id)
                     .is_some_and(|state| state.result.is_some())
@@ -263,27 +295,184 @@ impl AgentSupervisor {
         if let Some(result) = state.result.clone() {
             let _ = result_tx.send(Ok(result));
         } else {
-            state.waiters.push(result_tx);
+            state.join_waiters.push(result_tx);
         }
+    }
+
+    fn child_status(&self, child_id: &AgentId) -> Result<ChildStatus, String> {
+        let results = lock_mutex(&self.child_results, "child_results");
+        let Some(state) = results.get(child_id) else {
+            return Err(format!("unknown or closed child_id: {}", child_id.0));
+        };
+        Ok(status_from_state(state))
+    }
+
+    fn wait_child(&self, child_id: AgentId, timeout: Duration, result_tx: ChildWaitSender) {
+        let mut results = lock_mutex(&self.child_results, "child_results");
+        let Some(state) = results.get_mut(&child_id) else {
+            let _ = result_tx.send(Err(format!("unknown or closed child_id: {}", child_id.0)));
+            return;
+        };
+        if let Some(terminal) = state.result.clone() {
+            let _ = result_tx.send(Ok(wait_result_terminal(terminal)));
+            return;
+        }
+        if timeout.is_zero() {
+            let _ = result_tx.send(Ok(wait_result_running(&state.metadata)));
+            return;
+        }
+
+        let waiter_id = self.wait_counter.fetch_add(1, Ordering::Relaxed);
+        state.wait_waiters.push(ChildWaiter {
+            id: waiter_id,
+            sender: result_tx,
+        });
+        drop(results);
+
+        let child_results = Arc::clone(&self.child_results);
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            let sender_and_metadata = {
+                let mut results = lock_mutex(&child_results, "child_results");
+                let Some(state) = results.get_mut(&child_id) else {
+                    return;
+                };
+                let Some(position) = state
+                    .wait_waiters
+                    .iter()
+                    .position(|waiter| waiter.id == waiter_id)
+                else {
+                    return;
+                };
+                let waiter = state.wait_waiters.swap_remove(position);
+                (waiter.sender, state.metadata.clone())
+            };
+            let (sender, metadata) = sender_and_metadata;
+            let _ = sender.send(Ok(wait_result_running(&metadata)));
+        });
+    }
+
+    fn close_child(&self, child_id: &AgentId) -> Result<(), String> {
+        let mut results = lock_mutex(&self.child_results, "child_results");
+        let Some(state) = results.get(child_id) else {
+            return Err(format!("unknown or closed child_id: {}", child_id.0));
+        };
+        if state.result.is_none() {
+            return Err(format!("child_id is still running: {}", child_id.0));
+        }
+        results.remove(child_id);
+        drop(results);
+        lock_mutex(&self.cancellation_tokens, "cancellation_tokens").remove(child_id);
+        lock_mutex(&self.child_inputs, "child_inputs").remove(child_id);
+        Ok(())
     }
 
     pub(super) fn record_child_terminal_result(
         child_results: &Arc<Mutex<HashMap<AgentId, ChildRunState>>>,
         terminal: ChildTerminalResult,
     ) {
-        let waiters = {
+        let (join_waiters, wait_waiters) = {
             let mut results = lock_mutex(child_results, "child_results");
+            let fallback_metadata = ChildMetadata {
+                child_id: terminal.child_id.clone(),
+                agent_type: terminal.agent_type.clone(),
+                task: String::new(),
+                parent_id: AgentId(String::new()),
+                started_at_ms: now_ms(),
+                finished_at_ms: None,
+            };
             let state = results
                 .entry(terminal.child_id.clone())
                 .or_insert_with(|| ChildRunState {
+                    metadata: fallback_metadata,
                     result: None,
-                    waiters: Vec::new(),
+                    join_waiters: Vec::new(),
+                    wait_waiters: Vec::new(),
                 });
+            state.metadata.finished_at_ms = Some(now_ms());
             state.result = Some(terminal.clone());
-            std::mem::take(&mut state.waiters)
+            (
+                std::mem::take(&mut state.join_waiters),
+                std::mem::take(&mut state.wait_waiters),
+            )
         };
-        for waiter in waiters {
+        for waiter in join_waiters {
             let _ = waiter.send(Ok(terminal.clone()));
         }
+        let wait_result = wait_result_terminal(terminal);
+        for waiter in wait_waiters {
+            let _ = waiter.sender.send(Ok(wait_result.clone()));
+        }
+    }
+}
+
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub(super) fn child_metadata(config: &SpawnConfig, started_at_ms: u64) -> ChildMetadata {
+    ChildMetadata {
+        child_id: config.agent_id.clone(),
+        agent_type: config
+            .agent_type
+            .clone()
+            .unwrap_or_else(|| "generic".to_string()),
+        task: config.task.clone(),
+        parent_id: config.parent_id.clone(),
+        started_at_ms,
+        finished_at_ms: None,
+    }
+}
+
+fn status_from_terminal(terminal: &ChildTerminalResult) -> String {
+    match &terminal.result {
+        Ok(output) if output.exit_reason == simulacra_types::ExitReason::Cancelled => {
+            "cancelled".to_string()
+        }
+        Ok(output) if matches!(output.exit_reason, simulacra_types::ExitReason::Error(_)) => {
+            "failed".to_string()
+        }
+        Ok(_) => "completed".to_string(),
+        Err(_) => "failed".to_string(),
+    }
+}
+
+fn status_from_state(state: &ChildRunState) -> ChildStatus {
+    let ready = state.result.is_some();
+    let status = state
+        .result
+        .as_ref()
+        .map(status_from_terminal)
+        .unwrap_or_else(|| "running".to_string());
+    let end_ms = state.metadata.finished_at_ms.unwrap_or_else(now_ms);
+    ChildStatus {
+        child_id: state.metadata.child_id.clone(),
+        agent_type: state.metadata.agent_type.clone(),
+        status,
+        ready,
+        elapsed_ms: end_ms.saturating_sub(state.metadata.started_at_ms),
+    }
+}
+
+fn wait_result_running(metadata: &ChildMetadata) -> WaitChildResult {
+    WaitChildResult {
+        child_id: metadata.child_id.clone(),
+        agent_type: None,
+        status: "running".to_string(),
+        ready: false,
+        terminal: None,
+    }
+}
+
+fn wait_result_terminal(terminal: ChildTerminalResult) -> WaitChildResult {
+    WaitChildResult {
+        child_id: terminal.child_id.clone(),
+        agent_type: Some(terminal.agent_type.clone()),
+        status: status_from_terminal(&terminal),
+        ready: true,
+        terminal: Some(terminal),
     }
 }

@@ -1084,16 +1084,24 @@ async fn catalog_spawn_capability_registers_spawn_agent_for_server_runs() {
     let first_call_tools = recorded_tools
         .first()
         .expect("provider should receive tools");
-    assert!(
-        first_call_tools
-            .iter()
-            .any(|tool| tool.name == "spawn_agent"),
-        "server-launched agents with spawn capability must receive spawn_agent; tools were: {:?}",
-        first_call_tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>()
-    );
+    let first_call_tool_names = first_call_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "spawn_agent",
+        "join_child_agent",
+        "cancel_child_agent",
+        "steer_child_agent",
+        "child_status",
+        "wait_child_agent",
+        "close_child_agent",
+    ] {
+        assert!(
+            first_call_tool_names.contains(&expected),
+            "server-launched agents with spawn capability must receive {expected}; tools were: {first_call_tool_names:?}"
+        );
+    }
 }
 
 #[tokio::test]

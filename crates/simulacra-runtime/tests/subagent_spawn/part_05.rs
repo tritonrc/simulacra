@@ -444,4 +444,455 @@ fn real_spawn_agent_tool_capabilities_schema_matches_spec_shape() {
     }
 }
 
+fn make_real_steer_child_agent_tool() -> SteerChildAgentTool {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    SteerChildAgentTool { sender }
+}
+
+fn make_real_child_status_tool() -> ChildStatusTool {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    ChildStatusTool { sender }
+}
+
+fn make_real_wait_child_agent_tool() -> WaitChildAgentTool {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    WaitChildAgentTool { sender }
+}
+
+fn make_real_close_child_agent_tool() -> CloseChildAgentTool {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    CloseChildAgentTool { sender }
+}
+
+#[test]
+fn real_steer_child_agent_tool_definition_has_documented_schema() {
+    let tool = make_real_steer_child_agent_tool();
+    let definition = tool.definition();
+    assert_eq!(definition.name, "steer_child_agent");
+    assert_eq!(
+        definition.input_schema["required"],
+        serde_json::json!(["child_id", "message"])
+    );
+    assert_eq!(definition.input_schema["additionalProperties"], false);
+    assert_eq!(
+        definition.input_schema["properties"]["child_id"]["type"],
+        "string"
+    );
+    assert_eq!(
+        definition.input_schema["properties"]["message"]["type"],
+        "string"
+    );
+}
+
+#[tokio::test]
+async fn steer_child_agent_tool_rejects_empty_child_id_and_blank_message() {
+    let tool = make_real_steer_child_agent_tool();
+    let empty_child = tool
+        .call(
+            serde_json::json!({ "child_id": "", "message": "keep going" }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        empty_child,
+        Err(ToolError::InvalidArguments(message)) if message.contains("child_id")
+    ));
+
+    let blank_message = tool
+        .call(
+            serde_json::json!({ "child_id": "child-1", "message": "   " }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        blank_message,
+        Err(ToolError::InvalidArguments(message)) if message.contains("message")
+    ));
+}
+
+#[tokio::test]
+async fn steer_child_agent_tool_sends_command_and_returns_queued_status() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = SteerChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_id": "child-1", "message": "look at tests" }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("steer tool should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::SteerChild(child_id, steer_message, result_tx) => {
+                assert_eq!(child_id.0, "child-1");
+                assert_eq!(steer_message, "look at tests");
+                result_tx
+                    .send(Ok(()))
+                    .expect("steer tool should await the queued ack");
+            }
+            other => panic!("expected SupervisorPayload::SteerChild, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    let result = result.expect("steer should return queued status");
+    assert_eq!(
+        result,
+        serde_json::json!({ "child_id": "child-1", "status": "queued" })
+    );
+}
+
+#[test]
+fn s054_child_orchestration_tools_have_documented_schemas() {
+    let status = make_real_child_status_tool().definition();
+    assert_eq!(status.name, "child_status");
+    assert_eq!(status.input_schema["required"], serde_json::json!(["child_id"]));
+    assert_eq!(status.input_schema["additionalProperties"], false);
+    assert_eq!(
+        status.input_schema["properties"]["child_id"]["type"],
+        "string"
+    );
+
+    let wait = make_real_wait_child_agent_tool().definition();
+    assert_eq!(wait.name, "wait_child_agent");
+    assert_eq!(
+        wait.input_schema["required"],
+        serde_json::json!(["child_id", "timeout_ms"])
+    );
+    assert_eq!(wait.input_schema["additionalProperties"], false);
+    assert_eq!(
+        wait.input_schema["properties"]["timeout_ms"]["minimum"],
+        serde_json::json!(0)
+    );
+
+    let close = make_real_close_child_agent_tool().definition();
+    assert_eq!(close.name, "close_child_agent");
+    assert_eq!(close.input_schema["required"], serde_json::json!(["child_id"]));
+    assert_eq!(close.input_schema["additionalProperties"], false);
+}
+
+#[tokio::test]
+async fn s054_child_orchestration_tools_reject_invalid_arguments() {
+    let status = make_real_child_status_tool()
+        .call(serde_json::json!({ "child_id": "" }), &CapabilityToken::default())
+        .await;
+    assert!(matches!(
+        status,
+        Err(ToolError::InvalidArguments(message)) if message.contains("child_id")
+    ));
+
+    let missing_timeout = make_real_wait_child_agent_tool()
+        .call(
+            serde_json::json!({ "child_id": "child-1" }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        missing_timeout,
+        Err(ToolError::InvalidArguments(message)) if message.contains("timeout_ms")
+    ));
+
+    let negative_timeout = make_real_wait_child_agent_tool()
+        .call(
+            serde_json::json!({ "child_id": "child-1", "timeout_ms": -1 }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        negative_timeout,
+        Err(ToolError::InvalidArguments(message)) if message.contains("timeout_ms")
+    ));
+
+    let close = make_real_close_child_agent_tool()
+        .call(serde_json::json!({}), &CapabilityToken::default())
+        .await;
+    assert!(matches!(
+        close,
+        Err(ToolError::InvalidArguments(message)) if message.contains("child_id")
+    ));
+}
+
+#[tokio::test]
+async fn child_status_tool_sends_command_and_returns_status_json() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = ChildStatusTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_id": "child-1" }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("child_status should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::ChildStatus(child_id, result_tx) => {
+                assert_eq!(child_id.0, "child-1");
+                result_tx
+                    .send(Ok(simulacra_runtime::ChildStatus {
+                        child_id,
+                        agent_type: "researcher".into(),
+                        status: "running".into(),
+                        ready: false,
+                        elapsed_ms: 12,
+                    }))
+                    .expect("child_status tool should await status response");
+            }
+            other => panic!("expected SupervisorPayload::ChildStatus, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("child_status should return status JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "running",
+            "ready": false,
+            "elapsed_ms": 12
+        })
+    );
+}
+
+#[tokio::test]
+async fn wait_child_agent_tool_sends_command_and_returns_running_or_terminal_json() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = WaitChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_id": "child-1", "timeout_ms": 0 }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("wait_child_agent should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
+                assert_eq!(child_id.0, "child-1");
+                assert_eq!(timeout, Duration::ZERO);
+                result_tx
+                    .send(Ok(simulacra_runtime::WaitChildResult {
+                        child_id,
+                        agent_type: None,
+                        status: "running".into(),
+                        ready: false,
+                        terminal: None,
+                    }))
+                    .expect("wait_child_agent tool should await wait response");
+            }
+            other => panic!("expected SupervisorPayload::WaitChild, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("running wait should be non-error JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "status": "running",
+            "ready": false
+        })
+    );
+}
+
+#[tokio::test]
+async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_join_shape() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = WaitChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_id": "child-1", "timeout_ms": 50 }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("wait_child_agent should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
+                assert_eq!(child_id.0, "child-1");
+                assert_eq!(timeout, Duration::from_millis(50));
+                result_tx
+                    .send(Ok(simulacra_runtime::WaitChildResult {
+                        child_id: child_id.clone(),
+                        agent_type: Some("researcher".into()),
+                        status: "completed".into(),
+                        ready: true,
+                        terminal: Some(ChildTerminalResult {
+                            child_id,
+                            agent_type: "researcher".into(),
+                            result: Ok(AgentLoopOutput {
+                                exit_reason: ExitReason::Complete,
+                                messages: vec![Message {
+                                    role: Role::Assistant,
+                                    content: "done".into(),
+                                    tool_calls: vec![],
+                                    tool_call_id: None,
+                                }],
+                                token_usage: TokenUsage {
+                                    input_tokens: 11,
+                                    output_tokens: 7,
+                                },
+                                used_turns: 1,
+                                used_cost: Decimal::ZERO,
+                            }),
+                        }),
+                    }))
+                    .expect("wait_child_agent tool should await wait response");
+            }
+            other => panic!("expected SupervisorPayload::WaitChild, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("terminal wait should be non-error JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "completed",
+            "ready": true,
+            "exit_reason": "completed",
+            "message": "done",
+            "token_usage": {
+                "input_tokens": 11,
+                "output_tokens": 7
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn wait_child_agent_tool_returns_failed_terminal_json() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = WaitChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_id": "child-1", "timeout_ms": 50 }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("wait_child_agent should send one supervisor message");
+        match message.payload {
+            SupervisorPayload::WaitChild(child_id, _, result_tx) => {
+                result_tx
+                    .send(Ok(simulacra_runtime::WaitChildResult {
+                        child_id: child_id.clone(),
+                        agent_type: Some("researcher".into()),
+                        status: "failed".into(),
+                        ready: true,
+                        terminal: Some(ChildTerminalResult {
+                            child_id,
+                            agent_type: "researcher".into(),
+                            result: Err("boom".into()),
+                        }),
+                    }))
+                    .expect("wait_child_agent tool should await wait response");
+            }
+            other => panic!("expected SupervisorPayload::WaitChild, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("failed terminal wait should be non-error JSON"),
+        serde_json::json!({
+            "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "failed",
+            "ready": true,
+            "exit_reason": "failed",
+            "message": "boom",
+            "token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn close_child_agent_tool_sends_command_and_returns_closed_status() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = CloseChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_id": "child-1" }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("close_child_agent should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::CloseChild(child_id, result_tx) => {
+                assert_eq!(child_id.0, "child-1");
+                result_tx
+                    .send(Ok(()))
+                    .expect("close_child_agent tool should await close response");
+            }
+            other => panic!("expected SupervisorPayload::CloseChild, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("close should return closed status"),
+        serde_json::json!({ "child_id": "child-1", "status": "closed" })
+    );
+}
+
+#[tokio::test]
+async fn s054_child_orchestration_tools_report_closed_supervisor_channels() {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    drop(receiver);
+
+    let result = ChildStatusTool {
+        sender: sender.clone(),
+    }
+    .call(
+        serde_json::json!({ "child_id": "child-1" }),
+        &CapabilityToken::default(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ToolError::ExecutionFailed(message)) if message.contains("supervisor channel closed")
+    ));
+
+    let result = WaitChildAgentTool {
+        sender: sender.clone(),
+    }
+    .call(
+        serde_json::json!({ "child_id": "child-1", "timeout_ms": 0 }),
+        &CapabilityToken::default(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ToolError::ExecutionFailed(message)) if message.contains("supervisor channel closed")
+    ));
+
+    let result = CloseChildAgentTool { sender }
+        .call(
+            serde_json::json!({ "child_id": "child-1" }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(ToolError::ExecutionFailed(message)) if message.contains("supervisor channel closed")
+    ));
+}
+
 // ── S023: Generic sub-agent tests ──────────────────────────────────────

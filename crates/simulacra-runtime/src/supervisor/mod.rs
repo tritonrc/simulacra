@@ -5,11 +5,13 @@ mod spawn;
 mod types;
 
 pub use types::{
-    BoxTaskFuture, CancellationToken, ChildTerminalResult, MessagePriority, RestartStrategy,
-    SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory,
+    BoxTaskFuture, CancellationToken, ChildMetadata, ChildStatus, ChildTerminalResult,
+    MessagePriority, RestartStrategy, SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage,
+    SupervisorPayload, TaskFactory, WaitChildResult,
 };
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::collections::BinaryHeap;
@@ -18,15 +20,26 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use crate::exit_reason::exit_reason_to_snake_case;
-use crate::{ActivitySink, AgentLoopOutput, NoopActivitySink, RuntimeError};
+use crate::{
+    ActivitySink, AgentInputQueue, AgentLoopOutput, ChildInputHandle, NoopActivitySink,
+    RuntimeError,
+};
 use simulacra_types::{ActivityEvent, AgentId, CapabilityToken, ResourceBudget};
 use tokio::task::JoinHandle;
 
 type ChildJoinSender = tokio::sync::oneshot::Sender<Result<ChildTerminalResult, String>>;
+type ChildWaitSender = tokio::sync::oneshot::Sender<Result<WaitChildResult, String>>;
 
 struct ChildRunState {
+    metadata: ChildMetadata,
     result: Option<ChildTerminalResult>,
-    waiters: Vec<ChildJoinSender>,
+    join_waiters: Vec<ChildJoinSender>,
+    wait_waiters: Vec<ChildWaiter>,
+}
+
+struct ChildWaiter {
+    id: u64,
+    sender: ChildWaitSender,
 }
 
 fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> std::sync::MutexGuard<'a, T> {
@@ -58,7 +71,9 @@ pub struct AgentSupervisor {
     retry_counts_shared: Arc<Mutex<HashMap<AgentId, usize>>>,
     children: Mutex<HashMap<AgentId, JoinHandle<()>>>,
     cancellation_tokens: Arc<Mutex<HashMap<AgentId, CancellationToken>>>,
+    child_inputs: Arc<Mutex<HashMap<AgentId, ChildInputHandle>>>,
     child_results: Arc<Mutex<HashMap<AgentId, ChildRunState>>>,
+    wait_counter: Arc<AtomicU64>,
     task_factory: Option<Arc<dyn TaskFactory>>,
     #[allow(dead_code)]
     spawn_configs: Mutex<HashMap<AgentId, SpawnConfig>>,
@@ -93,7 +108,9 @@ impl AgentSupervisor {
             retry_counts_shared: Arc::new(Mutex::new(HashMap::new())),
             children: Mutex::new(HashMap::new()),
             cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
+            child_inputs: Arc::new(Mutex::new(HashMap::new())),
             child_results: Arc::new(Mutex::new(HashMap::new())),
+            wait_counter: Arc::new(AtomicU64::new(1)),
             task_factory: None,
             spawn_configs: Mutex::new(HashMap::new()),
             journal_storage: None,
@@ -114,7 +131,9 @@ impl AgentSupervisor {
             retry_counts_shared: Arc::new(Mutex::new(HashMap::new())),
             children: Mutex::new(HashMap::new()),
             cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
+            child_inputs: Arc::new(Mutex::new(HashMap::new())),
             child_results: Arc::new(Mutex::new(HashMap::new())),
+            wait_counter: Arc::new(AtomicU64::new(1)),
             task_factory: Some(task_factory),
             spawn_configs: Mutex::new(HashMap::new()),
             journal_storage: None,
