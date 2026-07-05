@@ -361,6 +361,7 @@ fn cli_args(config_path: impl Into<String>, task: Option<&str>) -> CliArgs {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     }
 }
 

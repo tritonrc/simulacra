@@ -10,13 +10,16 @@ fn main() {
             stderr_content: format!("{e:#}"),
             exit_code: 1,
             telemetry_flushed: false,
+            streamed_to_stdout: false,
         },
     };
 
     if !output.stderr_content.is_empty() {
         eprintln!("{}", output.stderr_content);
     }
-    if !output.stdout_content.is_empty() {
+    // S055: in JSONL headless mode, stdout was already streamed line-by-line
+    // during `run`; reprinting `stdout_content` would duplicate the stream.
+    if !output.streamed_to_stdout && !output.stdout_content.is_empty() {
         print!("{}", output.stdout_content);
     }
 

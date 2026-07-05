@@ -282,6 +282,7 @@ fn agent_type_referencing_an_undiscoverable_skill_fails_startup_with_the_missing
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     });
 
     let error = match result {

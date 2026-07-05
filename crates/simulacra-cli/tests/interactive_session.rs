@@ -540,6 +540,7 @@ fn build_interactive_config(
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("headless bootstrap should provide the shared interactive components");
 
@@ -665,6 +666,7 @@ mod session_startup {
             max_tokens: None,
             max_cost: None,
             no_catalog: false,
+            output_format: simulacra_cli::OutputFormat::Text,
         })
         .expect("interactive mode should return cli output");
 

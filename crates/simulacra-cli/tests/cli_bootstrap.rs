@@ -334,6 +334,7 @@ fn args_with_task(config_path: String, task: &str) -> CliArgs {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     }
 }
 
@@ -400,6 +401,7 @@ fn interactive_mode_starts_successfully_after_phase_two() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("interactive mode should return cli output");
 
@@ -442,6 +444,7 @@ fn missing_task_in_args_and_config_exits_with_a_clear_error() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("missing task should be rendered as cli output");
 
@@ -475,6 +478,7 @@ fn valid_config_is_parsed_and_entry_agent_is_resolved() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should parse a valid config");
 
@@ -502,6 +506,7 @@ fn cli_task_overrides_the_task_from_config() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should prefer `--task` over `[task].task`");
 
@@ -563,6 +568,7 @@ fn invalid_toml_config_exits_with_a_parse_error_message() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("parse failures should become cli output");
 
@@ -591,6 +597,7 @@ fn capability_token_is_built_from_the_agent_capabilities_section() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should resolve capabilities");
 
@@ -623,6 +630,7 @@ fn resource_budget_is_built_from_agent_type_limits() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should resolve resource budget");
 
@@ -650,6 +658,7 @@ fn bootstrap_creates_a_vfs_and_preseeds_workspace_task_md() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should prepare the workspace vfs");
 
@@ -680,6 +689,7 @@ fn bootstrap_registers_the_six_builtin_tools_from_s012() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should register built-in tools");
 
@@ -740,6 +750,7 @@ fn provider_is_constructed_from_the_model_string_in_config() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should carry the configured model into provider construction");
 
@@ -789,6 +800,7 @@ fn headless_mode_prints_the_final_response_to_stdout_without_decoration() {
             max_tokens: None,
             max_cost: None,
             no_catalog: false,
+            output_format: simulacra_cli::OutputFormat::Text,
         },
         Box::new(FakeProvider::success("final answer")),
     )
@@ -815,6 +827,7 @@ fn log_output_goes_to_stderr_and_not_stdout() {
             max_tokens: None,
             max_cost: None,
             no_catalog: false,
+            output_format: simulacra_cli::OutputFormat::Text,
         },
         Box::new(FakeProvider::success("final answer")),
     )
@@ -851,6 +864,7 @@ fn successful_run_exits_with_code_zero() {
             max_tokens: None,
             max_cost: None,
             no_catalog: false,
+            output_format: simulacra_cli::OutputFormat::Text,
         },
         Box::new(FakeProvider::success("ok")),
     )
@@ -877,6 +891,7 @@ fn failed_run_exits_with_code_one_and_prints_a_human_readable_error() {
             max_tokens: None,
             max_cost: None,
             no_catalog: false,
+            output_format: simulacra_cli::OutputFormat::Text,
         },
         Box::new(FakeProvider::failure("provider boom")),
     )
@@ -907,6 +922,7 @@ fn otlp_endpoint_selects_the_otlp_tracing_backend() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should resolve tracing configuration");
 
@@ -934,6 +950,7 @@ fn without_otlp_endpoint_tracing_uses_the_stderr_fmt_subscriber() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should resolve tracing configuration");
 
@@ -957,6 +974,7 @@ fn verbose_mode_enables_debug_level_output() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should resolve tracing verbosity");
 
@@ -983,6 +1001,7 @@ fn cli_startup_emits_a_root_span_with_task_and_config_metadata() {
                 max_tokens: None,
                 max_cost: None,
                 no_catalog: false,
+                output_format: simulacra_cli::OutputFormat::Text,
             },
             Box::new(FakeProvider::success("done")),
         )
@@ -1026,6 +1045,7 @@ fn agent_loop_span_is_a_child_of_the_cli_root_span() {
                 max_tokens: None,
                 max_cost: None,
                 no_catalog: false,
+                output_format: simulacra_cli::OutputFormat::Text,
             },
             Box::new(FakeProvider::success("done")),
         )
@@ -1058,6 +1078,7 @@ fn cli_shutdown_flushes_the_otlp_exporter_before_exit() {
             max_tokens: None,
             max_cost: None,
             no_catalog: false,
+            output_format: simulacra_cli::OutputFormat::Text,
         },
         Box::new(FakeProvider::success("done")),
     )
@@ -1088,6 +1109,7 @@ fn headless_run_uses_a_tokio_multi_thread_runtime_and_captures_spawned_work() {
                 max_tokens: None,
                 max_cost: None,
                 no_catalog: false,
+                output_format: simulacra_cli::OutputFormat::Text,
             },
             Box::new(RuntimeCheckingProvider),
         )

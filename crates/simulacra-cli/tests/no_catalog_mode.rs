@@ -108,6 +108,7 @@ fn cli_args(no_catalog: bool) -> CliArgs {
         max_tokens: None,
         max_cost: None,
         no_catalog,
+        output_format: simulacra_cli::OutputFormat::Text,
     }
 }
 

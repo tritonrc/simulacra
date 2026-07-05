@@ -63,6 +63,16 @@ pub enum CliMode {
     Interactive,
 }
 
+/// S055: headless output format. `text` (default) prints the final assistant
+/// message to stdout. `jsonl` streams the activity event stream as one JSON
+/// envelope object per line plus a terminal `result` line. Ignored in
+/// interactive mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Jsonl,
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "simulacra", about = "AI agent framework")]
 struct RawCliArgs {
@@ -107,6 +117,10 @@ struct RawCliArgs {
         help = "Skip the SQLite catalog; resolve agents from simulacra.toml only"
     )]
     no_catalog: bool,
+
+    /// S055: headless output format (`text` or `jsonl`). Default `text`.
+    #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +138,8 @@ pub struct CliArgs {
     /// S042 Inc 3 Task 12: when `true`, the CLI bypasses the SQLite catalog
     /// entirely. See [`ensure_catalog`] and [`CliArgs::no_catalog`] CLI help.
     pub no_catalog: bool,
+    /// S055: headless output format. See [`OutputFormat`].
+    pub output_format: OutputFormat,
 }
 
 impl CliArgs {
@@ -147,6 +163,7 @@ impl CliArgs {
             max_tokens: raw.max_tokens,
             max_cost: raw.max_cost,
             no_catalog: raw.no_catalog,
+            output_format: raw.output_format,
         }
     }
 }
@@ -180,6 +197,7 @@ impl FromArgMatches for CliArgs {
             max_tokens: self.max_tokens,
             max_cost: self.max_cost,
             no_catalog: self.no_catalog,
+            output_format: self.output_format,
         };
         raw.update_from_arg_matches(matches)?;
         *self = Self::from_raw(raw);
@@ -428,6 +446,11 @@ pub struct CliOutput {
     pub stderr_content: String,
     pub exit_code: i32,
     pub telemetry_flushed: bool,
+    /// S055: when true, stdout was already streamed line-by-line to the real
+    /// process stdout during `run` (JSONL headless mode). Callers that print
+    /// `stdout_content` themselves (e.g. `main`) MUST skip the reprint when
+    /// this is true to avoid duplicating the stream.
+    pub streamed_to_stdout: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,7 +1144,9 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
     let (activity_sink, activity_rx): (
         Option<Arc<dyn simulacra_runtime::ActivitySink>>,
         Option<tokio::sync::mpsc::UnboundedReceiver<simulacra_types::ActivityEvent>>,
-    ) = if mode == CliMode::Interactive {
+    ) = if mode == CliMode::Interactive
+        || (mode == CliMode::Headless && args.output_format == OutputFormat::Jsonl)
+    {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         (
             Some(Arc::new(simulacra_runtime::ChannelActivitySink::new(tx))),
@@ -1416,6 +1441,7 @@ pub fn run(args: CliArgs) -> Result<CliOutput, CliError> {
                 stderr_content: e.to_string(),
                 exit_code: 1,
                 telemetry_flushed: false,
+                streamed_to_stdout: false,
             });
         }
         Ok(b) => b,
@@ -1429,6 +1455,7 @@ pub fn run(args: CliArgs) -> Result<CliOutput, CliError> {
                 stderr_content: e.to_string(),
                 exit_code: 1,
                 telemetry_flushed: false,
+                streamed_to_stdout: false,
             });
         }
     };
@@ -1447,6 +1474,7 @@ pub fn run_with_provider(
                 stderr_content: e.to_string(),
                 exit_code: 1,
                 telemetry_flushed: false,
+                streamed_to_stdout: false,
             });
         }
         Ok(b) => b,
@@ -1487,6 +1515,10 @@ fn run_booted(
         "simulacra.task" = task_for_span,
         "simulacra.config.path" = config_path.as_str(),
         "simulacra.project.root" = project_root_str.as_str(),
+        "simulacra.cli.output_format" = match args.output_format {
+            OutputFormat::Text => "text",
+            OutputFormat::Jsonl => "jsonl",
+        },
     );
 
     let _cli_guard = cli_span.enter();
@@ -1540,7 +1572,7 @@ fn run_booted(
     let budget_for_supervisor = boot.resource_budget.clone();
     let vfs_for_supervisor = Arc::clone(&boot.vfs);
 
-    let activity_sink = boot.activity_sink.clone();
+    let activity_sink = boot.activity_sink.take();
     let activity_rx = boot.activity_rx.take();
 
     let mut agent_loop = AgentLoop::new(
@@ -1594,6 +1626,7 @@ fn run_booted(
                     stderr_content,
                     exit_code: 1,
                     telemetry_flushed: has_otlp,
+                    streamed_to_stdout: false,
                 });
             }
         };
@@ -1638,6 +1671,7 @@ fn run_booted(
                         stderr_content,
                         exit_code: 1,
                         telemetry_flushed: has_otlp,
+                        streamed_to_stdout: false,
                     });
                 }
             };
@@ -1797,16 +1831,42 @@ fn run_booted(
                 stderr_content,
                 exit_code,
                 telemetry_flushed: has_otlp,
+                streamed_to_stdout: false,
             })
         }
         CliMode::Headless => {
-            // S038: Run the agent loop and unconditionally shut down the
-            // BackgroundEmbedder afterwards (success or failure). The shutdown
-            // MUST happen on both paths so background work is drained before
-            // run_booted returns.
+            // S055: JSONL output mode streams the activity event stream to
+            // stdout as one JSON envelope object per line, plus a terminal
+            // `result` line, so another program can consume the run in real
+            // time. Text mode (default) prints only the final message.
+            let jsonl = args.output_format == OutputFormat::Jsonl;
+            let boot_task = boot.task.clone();
             let integration_for_shutdown = boot.integration_registry_for_refresh.clone();
-            let (agent_result, shutdown_result) = runtime.block_on(async move {
-                let agent_result = agent_loop.run(&boot.task).await;
+            // `activity_sink` (every remaining sender ref) and `activity_rx`
+            // are moved into the runtime block so that, for JSONL mode, we
+            // can drop the senders after the run completes to close the
+            // channel and let the streamer drain to completion.
+            let (agent_result, shutdown_result, jsonl_stdout) = runtime.block_on(async move {
+                // S055: JSONL streamer. Drains activity events concurrently
+                // with the agent loop, writing one envelope line to real
+                // stdout (flushed per line) and mirroring into a buffer that
+                // becomes `CliOutput.stdout_content` for callers/tests.
+                let jsonl_stdout: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+                let streamer = if jsonl {
+                    let buf = Arc::clone(&jsonl_stdout);
+                    let mut rx = activity_rx;
+                    Some(tokio::spawn(async move {
+                        if let Some(rx) = rx.as_mut() {
+                            while let Some(event) = rx.recv().await {
+                                emit_jsonl_activity_line(&buf, &event);
+                            }
+                        }
+                    }))
+                } else {
+                    None
+                };
+
+                let agent_result = agent_loop.run(&boot_task).await;
                 // S033: Stop background OAuth2 refresh tasks before returning.
                 if let Some(ref reg) = integration_for_shutdown {
                     reg.shutdown().await;
@@ -1823,7 +1883,18 @@ fn run_booted(
                 } else {
                     Ok(())
                 };
-                (agent_result, shutdown_result)
+
+                // S055: Drop every remaining sender — `agent_loop` owns one
+                // Arc<ChannelActivitySink> ref, `activity_sink` holds another
+                // — so the channel closes and the streamer finishes draining
+                // every queued event before we emit the terminal result line.
+                drop(agent_loop);
+                drop(activity_sink);
+                if let Some(handle) = streamer {
+                    let _ = handle.await;
+                }
+
+                (agent_result, shutdown_result, jsonl_stdout)
             });
 
             if let Err(ref e) = shutdown_result {
@@ -1838,29 +1909,119 @@ fn run_booted(
                 stderr_content.push_str(&format!("memory: background embedder shutdown: {e}\n"));
             }
 
-            match agent_result {
-                Ok(output) => Ok(CliOutput {
-                    stdout_content: output
+            let streamed_to_stdout = jsonl;
+            let (stdout_content, exit_code) = match agent_result {
+                Ok(output) => {
+                    let final_message = output
                         .messages
                         .last()
                         .map(|m| m.content.clone())
-                        .unwrap_or_default(),
-                    stderr_content,
-                    exit_code: 0,
-                    telemetry_flushed: has_otlp,
-                }),
-                Err(e) => {
-                    stderr_content.push_str(&e.to_string());
-                    Ok(CliOutput {
-                        stdout_content: String::new(),
-                        stderr_content,
-                        exit_code: 1,
-                        telemetry_flushed: has_otlp,
-                    })
+                        .unwrap_or_default();
+                    if jsonl {
+                        emit_jsonl_result_line(
+                            &jsonl_stdout,
+                            true,
+                            Some(&final_message),
+                            None,
+                            output.used_turns,
+                            output.token_usage.total(),
+                            0,
+                        );
+                        (
+                            std::mem::take(&mut *jsonl_stdout.lock().expect("jsonl buffer")),
+                            0,
+                        )
+                    } else {
+                        (final_message, 0)
+                    }
                 }
-            }
+                Err(e) => {
+                    let error_string = e.to_string();
+                    if jsonl {
+                        emit_jsonl_result_line(
+                            &jsonl_stdout,
+                            false,
+                            None,
+                            Some(&error_string),
+                            0,
+                            0,
+                            1,
+                        );
+                        stderr_content.push_str(&error_string);
+                        (
+                            std::mem::take(&mut *jsonl_stdout.lock().expect("jsonl buffer")),
+                            1,
+                        )
+                    } else {
+                        stderr_content.push_str(&error_string);
+                        (String::new(), 1)
+                    }
+                }
+            };
+
+            Ok(CliOutput {
+                stdout_content,
+                stderr_content,
+                exit_code,
+                telemetry_flushed: has_otlp,
+                streamed_to_stdout,
+            })
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// S055: JSONL output helpers
+// ---------------------------------------------------------------------------
+
+/// Write one JSONL envelope line to real stdout (flushed) and mirror it into
+/// the in-memory buffer that becomes `CliOutput.stdout_content`.
+fn write_jsonl_line(buf: &Arc<Mutex<String>>, line: &str) {
+    {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        let _ = std::io::Write::write_all(&mut out, line.as_bytes());
+        let _ = std::io::Write::write_all(&mut out, b"\n");
+        let _ = std::io::Write::flush(&mut out);
+    }
+    let mut b = buf.lock().expect("jsonl buffer poisoned");
+    b.push_str(line);
+    b.push('\n');
+}
+
+/// Emit a `{"kind":"activity","event":<ActivityEvent>}` envelope line.
+fn emit_jsonl_activity_line(buf: &Arc<Mutex<String>>, event: &simulacra_types::ActivityEvent) {
+    let event_val = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+    let line = serde_json::to_string(&serde_json::json!({
+        "kind": "activity",
+        "event": event_val,
+    }))
+    .expect("jsonl activity envelope serializable");
+    write_jsonl_line(buf, &line);
+}
+
+/// Emit the terminal `{"kind":"result",...}` line. Always the last line.
+#[allow(clippy::too_many_arguments)]
+fn emit_jsonl_result_line(
+    buf: &Arc<Mutex<String>>,
+    ok: bool,
+    final_message: Option<&str>,
+    error: Option<&str>,
+    turns: u32,
+    tokens: u64,
+    exit_code: i32,
+) {
+    let line = serde_json::to_string(&serde_json::json!({
+        "kind": "result",
+        "ok": ok,
+        "final_message": final_message,
+        "error": error,
+        "turns": turns,
+        "tokens": tokens,
+        "exit_code": exit_code,
+    }))
+    .expect("jsonl result envelope serializable");
+    write_jsonl_line(buf, &line);
 }
 
 // ---------------------------------------------------------------------------

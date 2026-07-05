@@ -163,6 +163,7 @@ fn build_session() -> InteractiveSession<FakeProvider, TestIo> {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should succeed");
     let storage: Arc<dyn SessionStorage> = Arc::new(InMemorySessionStorage::new());
@@ -330,6 +331,7 @@ fn can_spawn_is_reflected_into_the_effective_capability_token_spawn_types() {
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should succeed");
 
@@ -470,6 +472,7 @@ task = "no spawn task"
         max_tokens: None,
         max_cost: None,
         no_catalog: false,
+        output_format: simulacra_cli::OutputFormat::Text,
     })
     .expect("bootstrap should succeed");
 
