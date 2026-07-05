@@ -496,13 +496,23 @@ impl simulacra_types::Tool for WaitChildAgentTool {
                         "type": "string",
                         "description": "Child agent id returned by spawn_agent"
                     },
+                    "child_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Child agent ids returned by spawn_agent. Waits until any listed child is terminal."
+                    },
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 0,
                         "description": "Maximum time to wait in milliseconds. Zero polls once without waiting."
                     }
                 },
-                "required": ["child_id", "timeout_ms"],
+                "required": ["timeout_ms"],
+                "oneOf": [
+                    { "required": ["child_id"], "not": { "required": ["child_ids"] } },
+                    { "required": ["child_ids"], "not": { "required": ["child_id"] } }
+                ],
                 "additionalProperties": false
             }),
         }
@@ -520,7 +530,7 @@ impl simulacra_types::Tool for WaitChildAgentTool {
         >,
     > {
         Box::pin(async move {
-            let child_id = parse_required_child_id(&arguments)?;
+            let target = parse_wait_target(&arguments)?;
             let timeout_ms = arguments
                 .get("timeout_ms")
                 .and_then(|value| value.as_u64())
@@ -529,28 +539,60 @@ impl simulacra_types::Tool for WaitChildAgentTool {
                         "missing or invalid required field: timeout_ms".into(),
                     )
                 })?;
-            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-            self.sender
-                .send(SupervisorMessage {
-                    agent_id: AgentId(child_id.clone()),
-                    priority: MessagePriority::Command,
-                    payload: SupervisorPayload::WaitChild(
-                        AgentId(child_id.clone()),
-                        Duration::from_millis(timeout_ms),
-                        result_tx,
-                    ),
-                })
-                .await
-                .map_err(|_| {
-                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
-                })?;
-            let wait = result_rx.await.map_err(|_| {
-                simulacra_types::ToolError::ExecutionFailed(
-                    "supervisor dropped wait_child_agent response channel".into(),
-                )
-            })?;
-            let wait = wait.map_err(simulacra_types::ToolError::ExecutionFailed)?;
-            Ok(wait_child_json(wait))
+            match target {
+                WaitTarget::Single(child_id) => {
+                    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                    self.sender
+                        .send(SupervisorMessage {
+                            agent_id: AgentId(child_id.clone()),
+                            priority: MessagePriority::Command,
+                            payload: SupervisorPayload::WaitChild(
+                                AgentId(child_id),
+                                Duration::from_millis(timeout_ms),
+                                result_tx,
+                            ),
+                        })
+                        .await
+                        .map_err(|_| {
+                            simulacra_types::ToolError::ExecutionFailed(
+                                "supervisor channel closed".into(),
+                            )
+                        })?;
+                    let wait = result_rx.await.map_err(|_| {
+                        simulacra_types::ToolError::ExecutionFailed(
+                            "supervisor dropped wait_child_agent response channel".into(),
+                        )
+                    })?;
+                    let wait = wait.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+                    Ok(wait_child_json(wait))
+                }
+                WaitTarget::Any(child_ids) => {
+                    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                    self.sender
+                        .send(SupervisorMessage {
+                            agent_id: AgentId(child_ids[0].clone()),
+                            priority: MessagePriority::Command,
+                            payload: SupervisorPayload::WaitChildren(
+                                child_ids.into_iter().map(AgentId).collect(),
+                                Duration::from_millis(timeout_ms),
+                                result_tx,
+                            ),
+                        })
+                        .await
+                        .map_err(|_| {
+                            simulacra_types::ToolError::ExecutionFailed(
+                                "supervisor channel closed".into(),
+                            )
+                        })?;
+                    let wait = result_rx.await.map_err(|_| {
+                        simulacra_types::ToolError::ExecutionFailed(
+                            "supervisor dropped wait_child_agent response channel".into(),
+                        )
+                    })?;
+                    let wait = wait.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+                    Ok(wait_children_json(wait))
+                }
+            }
         })
     }
 }
@@ -790,6 +832,46 @@ fn parse_required_child_id(arguments: &serde_json::Value) -> Result<String, Tool
         .ok_or_else(|| ToolError::InvalidArguments("missing required field: child_id".into()))
 }
 
+enum WaitTarget {
+    Single(String),
+    Any(Vec<String>),
+}
+
+fn parse_wait_target(arguments: &serde_json::Value) -> Result<WaitTarget, ToolError> {
+    let has_child_id = arguments.get("child_id").is_some();
+    let has_child_ids = arguments.get("child_ids").is_some();
+    if has_child_id == has_child_ids {
+        return Err(ToolError::InvalidArguments(
+            "provide exactly one of child_id or child_ids".into(),
+        ));
+    }
+
+    if has_child_id {
+        return parse_required_child_id(arguments).map(WaitTarget::Single);
+    }
+
+    let child_ids = arguments
+        .get("child_ids")
+        .and_then(|value| value.as_array())
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| {
+            ToolError::InvalidArguments("missing or invalid required field: child_ids".into())
+        })?;
+
+    let mut parsed = Vec::with_capacity(child_ids.len());
+    for child_id in child_ids {
+        let child_id = child_id
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ToolError::InvalidArguments("child_ids must contain non-empty strings".into())
+            })?;
+        parsed.push(child_id.to_string());
+    }
+
+    Ok(WaitTarget::Any(parsed))
+}
+
 fn child_success_json(
     child_id: String,
     agent_type: String,
@@ -852,6 +934,39 @@ fn wait_child_json(wait: WaitChildResult) -> serde_json::Value {
     } else {
         serde_json::json!({
             "child_id": wait.child_id.0,
+            "status": "running",
+            "ready": false
+        })
+    }
+}
+
+fn wait_children_json(wait: WaitChildrenResult) -> serde_json::Value {
+    if let Some(terminal) = wait.terminal {
+        match terminal.result {
+            Ok(output) => {
+                let mut json = child_success_json(terminal.child_id.0, terminal.agent_type, output);
+                if let serde_json::Value::Object(ref mut object) = json {
+                    object.insert("status".to_string(), serde_json::Value::String(wait.status));
+                    object.insert("ready".to_string(), serde_json::Value::Bool(true));
+                }
+                json
+            }
+            Err(error) => serde_json::json!({
+                "child_id": terminal.child_id.0,
+                "agent_type": terminal.agent_type,
+                "status": wait.status,
+                "ready": true,
+                "exit_reason": "failed",
+                "message": error,
+                "token_usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0
+                }
+            }),
+        }
+    } else {
+        serde_json::json!({
+            "child_ids": wait.child_ids.into_iter().map(|child_id| child_id.0).collect::<Vec<_>>(),
             "status": "running",
             "ready": false
         })

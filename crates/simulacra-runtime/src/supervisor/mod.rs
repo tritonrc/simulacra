@@ -7,7 +7,7 @@ mod types;
 pub use types::{
     BoxTaskFuture, CancellationToken, ChildMetadata, ChildStatus, ChildTerminalResult,
     MessagePriority, RestartStrategy, SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage,
-    SupervisorPayload, TaskFactory, WaitChildResult,
+    SupervisorPayload, TaskFactory, WaitChildResult, WaitChildrenResult,
 };
 
 use std::collections::HashMap;
@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 
 type ChildJoinSender = tokio::sync::oneshot::Sender<Result<ChildTerminalResult, String>>;
 type ChildWaitSender = tokio::sync::oneshot::Sender<Result<WaitChildResult, String>>;
+type ChildrenWaitSender = tokio::sync::oneshot::Sender<Result<WaitChildrenResult, String>>;
 
 struct ChildRunState {
     metadata: ChildMetadata,
@@ -39,7 +40,23 @@ struct ChildRunState {
 
 struct ChildWaiter {
     id: u64,
-    sender: ChildWaitSender,
+    child_ids: Vec<AgentId>,
+    sender: Arc<Mutex<Option<ChildWaiterSender>>>,
+}
+
+enum ChildWaiterSender {
+    Single(ChildWaitSender),
+    Any(ChildrenWaitSender),
+}
+
+impl Clone for ChildWaiter {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            child_ids: self.child_ids.clone(),
+            sender: Arc::clone(&self.sender),
+        }
+    }
 }
 
 fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> std::sync::MutexGuard<'a, T> {

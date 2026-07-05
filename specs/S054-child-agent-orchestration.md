@@ -46,19 +46,36 @@ semantics.
 
 ### `wait_child_agent`
 
-- [x] `wait_child_agent` accepts `{ "child_id": string, "timeout_ms": integer }`.
+- [x] `wait_child_agent` accepts `{ "child_id": string, "timeout_ms": integer }`
+  for a single child.
+- [x] `wait_child_agent` accepts `{ "child_ids": string[], "timeout_ms": integer }`
+  to wait for any listed child to become terminal.
 - [x] Empty or missing `child_id` returns `ToolError::InvalidArguments`.
+- [x] Empty, missing, or non-string `child_ids` entries return
+  `ToolError::InvalidArguments`.
+- [x] Providing both `child_id` and `child_ids` returns
+  `ToolError::InvalidArguments`.
 - [x] Missing, negative, or non-integer `timeout_ms` returns `ToolError::InvalidArguments`.
 - [x] `timeout_ms = 0` polls once without waiting.
 - [x] If the child is still running after the timeout, the tool returns
   `{ "child_id", "status": "running", "ready": false }` as a non-error result.
+- [x] If all listed children are still running after the timeout, the tool
+  returns `{ "child_ids", "status": "running", "ready": false }` as a non-error
+  result.
 - [x] If the child is terminal, the tool returns `{ "child_id", "status",
   "ready": true, "agent_type", "exit_reason", "message", "token_usage" }`,
   matching the `join_child_agent` terminal summary where applicable.
+- [x] If any listed child is terminal, the tool returns that child's terminal
+  summary shape with `child_id`, `status`, `ready`, `agent_type`,
+  `exit_reason`, `message`, and `token_usage`.
+- [x] If multiple listed children are already terminal when polled, the first
+  terminal child in `child_ids` order is returned.
 - [x] Waiting does not consume the terminal result; `join_child_agent` can still
   return the same terminal result later.
 - [x] `wait_child_agent` sends `SupervisorPayload::WaitChild` with
   `MessagePriority::Command`.
+- [x] Multi-child `wait_child_agent` sends `SupervisorPayload::WaitChildren`
+  with `MessagePriority::Command`.
 - [x] A closed supervisor channel returns an error tool result.
 
 ### `close_child_agent`

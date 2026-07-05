@@ -559,9 +559,17 @@ fn s054_child_orchestration_tools_have_documented_schemas() {
     assert_eq!(wait.name, "wait_child_agent");
     assert_eq!(
         wait.input_schema["required"],
-        serde_json::json!(["child_id", "timeout_ms"])
+        serde_json::json!(["timeout_ms"])
     );
     assert_eq!(wait.input_schema["additionalProperties"], false);
+    assert_eq!(
+        wait.input_schema["properties"]["child_id"]["type"],
+        serde_json::json!("string")
+    );
+    assert_eq!(
+        wait.input_schema["properties"]["child_ids"]["items"]["type"],
+        serde_json::json!("string")
+    );
     assert_eq!(
         wait.input_schema["properties"]["timeout_ms"]["minimum"],
         serde_json::json!(0)
@@ -603,6 +611,44 @@ async fn s054_child_orchestration_tools_reject_invalid_arguments() {
     assert!(matches!(
         negative_timeout,
         Err(ToolError::InvalidArguments(message)) if message.contains("timeout_ms")
+    ));
+
+    let both_wait_targets = make_real_wait_child_agent_tool()
+        .call(
+            serde_json::json!({
+                "child_id": "child-1",
+                "child_ids": ["child-1", "child-2"],
+                "timeout_ms": 0
+            }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        both_wait_targets,
+        Err(ToolError::InvalidArguments(message))
+            if message.contains("child_id") && message.contains("child_ids")
+    ));
+
+    let empty_child_ids = make_real_wait_child_agent_tool()
+        .call(
+            serde_json::json!({ "child_ids": [], "timeout_ms": 0 }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        empty_child_ids,
+        Err(ToolError::InvalidArguments(message)) if message.contains("child_ids")
+    ));
+
+    let empty_child_ids_entry = make_real_wait_child_agent_tool()
+        .call(
+            serde_json::json!({ "child_ids": ["child-1", ""], "timeout_ms": 0 }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        empty_child_ids_entry,
+        Err(ToolError::InvalidArguments(message)) if message.contains("child_ids")
     ));
 
     let close = make_real_close_child_agent_tool()
@@ -654,6 +700,54 @@ async fn child_status_tool_sends_command_and_returns_status_json() {
             "status": "running",
             "ready": false,
             "elapsed_ms": 12
+        })
+    );
+}
+
+#[tokio::test]
+async fn wait_child_agent_tool_sends_wait_children_command_and_returns_running_json() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = WaitChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_ids": ["child-1", "child-2"], "timeout_ms": 25 }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("wait_child_agent should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::WaitChildren(child_ids, timeout, result_tx) => {
+                assert_eq!(
+                    child_ids
+                        .iter()
+                        .map(|child_id| child_id.0.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["child-1", "child-2"]
+                );
+                assert_eq!(timeout, Duration::from_millis(25));
+                result_tx
+                    .send(Ok(simulacra_runtime::WaitChildrenResult {
+                        child_ids,
+                        status: "running".into(),
+                        ready: false,
+                        terminal: None,
+                    }))
+                    .expect("wait_child_agent tool should await wait-any response");
+            }
+            other => panic!("expected SupervisorPayload::WaitChildren, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("running wait-any should be non-error JSON"),
+        serde_json::json!({
+            "child_ids": ["child-1", "child-2"],
+            "status": "running",
+            "ready": false
         })
     );
 }
@@ -807,6 +901,56 @@ async fn wait_child_agent_tool_returns_failed_terminal_json() {
         result.expect("failed terminal wait should be non-error JSON"),
         serde_json::json!({
             "child_id": "child-1",
+            "agent_type": "researcher",
+            "status": "failed",
+            "ready": true,
+            "exit_reason": "failed",
+            "message": "boom",
+            "token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = WaitChildAgentTool { sender };
+    let call = tool.call(
+        serde_json::json!({ "child_ids": ["child-1", "child-2"], "timeout_ms": 50 }),
+        &CapabilityToken::default(),
+    );
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("wait_child_agent should send one supervisor message");
+        match message.payload {
+            SupervisorPayload::WaitChildren(child_ids, _, result_tx) => {
+                result_tx
+                    .send(Ok(simulacra_runtime::WaitChildrenResult {
+                        child_ids,
+                        status: "failed".into(),
+                        ready: true,
+                        terminal: Some(ChildTerminalResult {
+                            child_id: AgentId("child-2".into()),
+                            agent_type: "researcher".into(),
+                            result: Err("boom".into()),
+                        }),
+                    }))
+                    .expect("wait_child_agent tool should await wait-any response");
+            }
+            other => panic!("expected SupervisorPayload::WaitChildren, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("failed wait-any terminal should be non-error JSON"),
+        serde_json::json!({
+            "child_id": "child-2",
             "agent_type": "researcher",
             "status": "failed",
             "ready": true,

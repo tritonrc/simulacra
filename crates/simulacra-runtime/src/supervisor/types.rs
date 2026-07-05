@@ -125,6 +125,15 @@ pub struct WaitChildResult {
     pub terminal: Option<ChildTerminalResult>,
 }
 
+/// Result returned by a bounded wait_child_agent request over multiple children.
+#[derive(Debug, Clone)]
+pub struct WaitChildrenResult {
+    pub child_ids: Vec<AgentId>,
+    pub status: String,
+    pub ready: bool,
+    pub terminal: Option<ChildTerminalResult>,
+}
+
 /// Payload variants for supervisor messages.
 #[derive(Debug)]
 pub enum SupervisorPayload {
@@ -161,6 +170,12 @@ pub enum SupervisorPayload {
         AgentId,
         Duration,
         tokio::sync::oneshot::Sender<Result<WaitChildResult, String>>,
+    ),
+    /// Wait for any child in a set up to a bounded timeout without consuming results.
+    WaitChildren(
+        Vec<AgentId>,
+        Duration,
+        tokio::sync::oneshot::Sender<Result<WaitChildrenResult, String>>,
     ),
     /// Release a terminal child handle and cached result.
     CloseChild(AgentId, tokio::sync::oneshot::Sender<Result<(), String>>),

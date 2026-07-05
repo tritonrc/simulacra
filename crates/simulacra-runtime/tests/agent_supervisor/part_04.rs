@@ -630,3 +630,355 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
         .expect("actor should exit after channel closes")
         .expect("actor task should shut down cleanly");
 }
+
+#[tokio::test]
+async fn wait_children_returns_running_on_timeout_and_first_terminal_child() {
+    let release_a = Arc::new(Notify::new());
+    let release_b = Arc::new(Notify::new());
+    let factory = FakeTaskFactory::new();
+    factory.push_plan(
+        "child-a",
+        FakeTaskPlan::Complete {
+            release: Some(Arc::clone(&release_a)),
+            output: wait_any_output("child a done", 2, 3),
+        },
+    );
+    factory.push_plan(
+        "child-b",
+        FakeTaskPlan::Complete {
+            release: Some(Arc::clone(&release_b)),
+            output: wait_any_output("child b done", 7, 11),
+        },
+    );
+
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory.clone()),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    for child_id in ["child-a", "child-b"] {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("parent-agent".into()),
+            payload: SupervisorPayload::Spawn(
+                Box::new(spawn_config(
+                    child_id,
+                    "parent-agent",
+                    CapabilityToken::default(),
+                    wait_any_child_budget(),
+                    RestartStrategy::LetCrash,
+                )),
+                ack_tx,
+            ),
+        })
+        .await
+        .expect("spawn message should send");
+        ack_rx
+            .await
+            .expect("spawn ack channel should stay open")
+            .expect("spawn should be accepted");
+    }
+    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_started_agents(2))
+        .await
+        .expect("both children should start");
+
+    let (unknown_tx, unknown_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-a".into()), AgentId("missing-child".into())],
+            Duration::ZERO,
+            unknown_tx,
+        ),
+    })
+    .await
+    .expect("unknown-child wait-any message should send");
+    let unknown = unknown_rx
+        .await
+        .expect("unknown-child response channel should stay open");
+    assert!(
+        matches!(unknown, Err(ref message) if message.contains("unknown or closed")),
+        "wait-any should reject unknown children before registering waiters: {unknown:?}"
+    );
+
+    let (poll_tx, poll_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-a".into()), AgentId("child-b".into())],
+            Duration::ZERO,
+            poll_tx,
+        ),
+    })
+    .await
+    .expect("zero-timeout wait-any message should send");
+    let poll = poll_rx
+        .await
+        .expect("zero-timeout response channel should stay open")
+        .expect("zero-timeout running wait-any should succeed");
+    assert_eq!(poll.status, "running");
+    assert!(!poll.ready);
+    assert!(poll.terminal.is_none());
+
+    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-a".into()), AgentId("child-b".into())],
+            Duration::from_millis(10),
+            timeout_tx,
+        ),
+    })
+    .await
+    .expect("wait-any timeout message should send");
+    let timeout = tokio::time::timeout(Duration::from_secs(1), timeout_rx)
+        .await
+        .expect("wait-any should honor bounded timeout")
+        .expect("timeout response channel should stay open")
+        .expect("timeout should be a non-error running result");
+    assert_eq!(timeout.status, "running");
+    assert!(!timeout.ready);
+    assert_eq!(
+        timeout
+            .child_ids
+            .iter()
+            .map(|child_id| child_id.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["child-a", "child-b"]
+    );
+
+    let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-a".into()), AgentId("child-b".into())],
+            Duration::from_secs(1),
+            terminal_tx,
+        ),
+    })
+    .await
+    .expect("wait-any terminal message should send");
+    release_b.notify_waiters();
+    let terminal = terminal_rx
+        .await
+        .expect("terminal response channel should stay open")
+        .expect("terminal wait-any should succeed");
+    assert_eq!(terminal.status, "completed");
+    assert!(terminal.ready);
+    let terminal_result = terminal
+        .terminal
+        .as_ref()
+        .expect("terminal wait-any should include the completed child result");
+    assert_eq!(terminal_result.child_id.0, "child-b");
+    let output = terminal_result
+        .result
+        .as_ref()
+        .expect("child-b should complete successfully");
+    assert_eq!(output.messages.last().map(|message| message.content.as_str()), Some("child b done"));
+    assert_eq!(output.token_usage.input_tokens, 7);
+    assert_eq!(output.token_usage.output_tokens, 11);
+
+    let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::JoinChild(AgentId("child-b".into()), join_tx),
+    })
+    .await
+    .expect("join after wait-any message should send");
+    join_rx
+        .await
+        .expect("join response channel should stay open")
+        .expect("join should still see wait-any terminal result");
+
+    let (repeat_tx, repeat_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-a".into()), AgentId("child-b".into())],
+            Duration::ZERO,
+            repeat_tx,
+        ),
+    })
+    .await
+    .expect("repeat wait-any message should send");
+    let repeat = repeat_rx
+        .await
+        .expect("repeat response channel should stay open")
+        .expect("repeat wait-any should still see terminal result");
+    assert_eq!(
+        repeat
+            .terminal
+            .as_ref()
+            .expect("repeat wait-any should include terminal result")
+            .child_id
+            .0,
+        "child-b"
+    );
+
+    let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::CloseChild(AgentId("child-b".into()), close_tx),
+    })
+    .await
+    .expect("close after wait-any message should send");
+    close_rx
+        .await
+        .expect("close response channel should stay open")
+        .expect("close should release wait-any terminal child");
+
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-b".into())],
+            Duration::ZERO,
+            closed_tx,
+        ),
+    })
+    .await
+    .expect("closed-child wait-any message should send");
+    let closed = closed_rx
+        .await
+        .expect("closed-child response channel should stay open");
+    assert!(
+        matches!(closed, Err(ref message) if message.contains("unknown or closed")),
+        "wait-any should fail after a terminal child is closed: {closed:?}"
+    );
+
+    release_a.notify_waiters();
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor should exit after channel closes")
+        .expect("actor task should shut down cleanly");
+}
+
+#[tokio::test]
+async fn wait_children_zero_timeout_returns_first_already_terminal_child_in_input_order() {
+    let factory = FakeTaskFactory::new();
+    factory.push_plan(
+        "child-a",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: wait_any_output("child a done", 2, 3),
+        },
+    );
+    factory.push_plan(
+        "child-b",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: wait_any_output("child b done", 7, 11),
+        },
+    );
+
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        Arc::new(factory.clone()),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    for child_id in ["child-a", "child-b"] {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("parent-agent".into()),
+            payload: SupervisorPayload::Spawn(
+                Box::new(spawn_config(
+                    child_id,
+                    "parent-agent",
+                    CapabilityToken::default(),
+                    wait_any_child_budget(),
+                    RestartStrategy::LetCrash,
+                )),
+                ack_tx,
+            ),
+        })
+        .await
+        .expect("spawn message should send");
+        ack_rx
+            .await
+            .expect("spawn ack channel should stay open")
+            .expect("spawn should be accepted");
+    }
+    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_completion("child-a"))
+        .await
+        .expect("child-a should complete");
+    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_completion("child-b"))
+        .await
+        .expect("child-b should complete");
+
+    let (wait_tx, wait_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-b".into()), AgentId("child-a".into())],
+            Duration::ZERO,
+            wait_tx,
+        ),
+    })
+    .await
+    .expect("zero-timeout wait-any message should send");
+    let wait = wait_rx
+        .await
+        .expect("wait-any response channel should stay open")
+        .expect("already-terminal wait-any should succeed");
+    assert_eq!(
+        wait.terminal
+            .as_ref()
+            .expect("terminal result should be present")
+            .child_id
+            .0,
+        "child-b",
+        "when multiple children are already terminal, input order chooses the result"
+    );
+
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor should exit after channel closes")
+        .expect("actor task should shut down cleanly");
+}
+
+fn wait_any_output(message: &str, input_tokens: u64, output_tokens: u64) -> AgentLoopOutput {
+    AgentLoopOutput {
+        exit_reason: ExitReason::Complete,
+        messages: vec![Message {
+            role: Role::Assistant,
+            content: message.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }],
+        token_usage: TokenUsage {
+            input_tokens,
+            output_tokens,
+        },
+        used_turns: 1,
+        used_cost: Decimal::ZERO,
+    }
+}
+
+fn wait_any_child_budget() -> ResourceBudget {
+    ResourceBudget::new(1_000, 1, Decimal::new(100, 0), 1)
+}

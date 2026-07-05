@@ -197,6 +197,9 @@ impl AgentSupervisor {
             SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
                 self.wait_child(child_id, timeout, result_tx);
             }
+            SupervisorPayload::WaitChildren(child_ids, timeout, result_tx) => {
+                self.wait_children(child_ids, timeout, result_tx);
+            }
             SupervisorPayload::CloseChild(child_id, result_tx) => {
                 let result = self.close_child(&child_id);
                 let _ = result_tx.send(result);
@@ -325,7 +328,8 @@ impl AgentSupervisor {
         let waiter_id = self.wait_counter.fetch_add(1, Ordering::Relaxed);
         state.wait_waiters.push(ChildWaiter {
             id: waiter_id,
-            sender: result_tx,
+            child_ids: vec![child_id.clone()],
+            sender: Arc::new(Mutex::new(Some(ChildWaiterSender::Single(result_tx)))),
         });
         drop(results);
 
@@ -345,10 +349,90 @@ impl AgentSupervisor {
                     return;
                 };
                 let waiter = state.wait_waiters.swap_remove(position);
-                (waiter.sender, state.metadata.clone())
+                let sender = waiter
+                    .sender
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                (sender, state.metadata.clone())
             };
             let (sender, metadata) = sender_and_metadata;
-            let _ = sender.send(Ok(wait_result_running(&metadata)));
+            if let Some(ChildWaiterSender::Single(sender)) = sender {
+                let _ = sender.send(Ok(wait_result_running(&metadata)));
+            }
+        });
+    }
+
+    // Timeout and terminal completion intentionally race to take the same
+    // sender. A timeout may return "running" even if completion is being
+    // recorded concurrently; callers can re-wait or join without losing data.
+    fn wait_children(
+        &self,
+        child_ids: Vec<AgentId>,
+        timeout: Duration,
+        result_tx: ChildrenWaitSender,
+    ) {
+        if child_ids.is_empty() {
+            let _ = result_tx.send(Err("missing required field: child_ids".into()));
+            return;
+        }
+
+        let mut results = lock_mutex(&self.child_results, "child_results");
+        for child_id in &child_ids {
+            if !results.contains_key(child_id) {
+                let _ = result_tx.send(Err(format!("unknown or closed child_id: {}", child_id.0)));
+                return;
+            }
+        }
+
+        for child_id in &child_ids {
+            let state = results
+                .get(child_id)
+                .expect("child existence checked before terminal scan");
+            if let Some(terminal) = state.result.clone() {
+                let _ = result_tx.send(Ok(wait_children_result_terminal(child_ids, terminal)));
+                return;
+            }
+        }
+
+        if timeout.is_zero() {
+            let _ = result_tx.send(Ok(wait_children_result_running(child_ids)));
+            return;
+        }
+
+        let waiter_id = self.wait_counter.fetch_add(1, Ordering::Relaxed);
+        let shared_sender = Arc::new(Mutex::new(Some(ChildWaiterSender::Any(result_tx))));
+        for child_id in &child_ids {
+            let state = results
+                .get_mut(child_id)
+                .expect("child existence checked before waiter registration");
+            state.wait_waiters.push(ChildWaiter {
+                id: waiter_id,
+                child_ids: child_ids.clone(),
+                sender: Arc::clone(&shared_sender),
+            });
+        }
+        drop(results);
+
+        let child_results = Arc::clone(&self.child_results);
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            let sender = {
+                let mut results = lock_mutex(&child_results, "child_results");
+                for child_id in &child_ids {
+                    let Some(state) = results.get_mut(child_id) else {
+                        continue;
+                    };
+                    state.wait_waiters.retain(|waiter| waiter.id != waiter_id);
+                }
+                shared_sender
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+            };
+            if let Some(ChildWaiterSender::Any(sender)) = sender {
+                let _ = sender.send(Ok(wait_children_result_running(child_ids)));
+            }
         });
     }
 
@@ -391,17 +475,43 @@ impl AgentSupervisor {
                 });
             state.metadata.finished_at_ms = Some(now_ms());
             state.result = Some(terminal.clone());
-            (
-                std::mem::take(&mut state.join_waiters),
-                std::mem::take(&mut state.wait_waiters),
-            )
+            let join_waiters = std::mem::take(&mut state.join_waiters);
+            let wait_waiters = std::mem::take(&mut state.wait_waiters);
+            for waiter in &wait_waiters {
+                for waited_child_id in &waiter.child_ids {
+                    if waited_child_id == &terminal.child_id {
+                        continue;
+                    }
+                    if let Some(waited_state) = results.get_mut(waited_child_id) {
+                        waited_state
+                            .wait_waiters
+                            .retain(|candidate| candidate.id != waiter.id);
+                    }
+                }
+            }
+            (join_waiters, wait_waiters)
         };
         for waiter in join_waiters {
             let _ = waiter.send(Ok(terminal.clone()));
         }
-        let wait_result = wait_result_terminal(terminal);
         for waiter in wait_waiters {
-            let _ = waiter.sender.send(Ok(wait_result.clone()));
+            let sender = waiter
+                .sender
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            match sender {
+                Some(ChildWaiterSender::Single(sender)) => {
+                    let _ = sender.send(Ok(wait_result_terminal(terminal.clone())));
+                }
+                Some(ChildWaiterSender::Any(sender)) => {
+                    let _ = sender.send(Ok(wait_children_result_terminal(
+                        waiter.child_ids,
+                        terminal.clone(),
+                    )));
+                }
+                None => {}
+            }
         }
     }
 }
@@ -471,6 +581,27 @@ fn wait_result_terminal(terminal: ChildTerminalResult) -> WaitChildResult {
     WaitChildResult {
         child_id: terminal.child_id.clone(),
         agent_type: Some(terminal.agent_type.clone()),
+        status: status_from_terminal(&terminal),
+        ready: true,
+        terminal: Some(terminal),
+    }
+}
+
+fn wait_children_result_running(child_ids: Vec<AgentId>) -> WaitChildrenResult {
+    WaitChildrenResult {
+        child_ids,
+        status: "running".to_string(),
+        ready: false,
+        terminal: None,
+    }
+}
+
+fn wait_children_result_terminal(
+    child_ids: Vec<AgentId>,
+    terminal: ChildTerminalResult,
+) -> WaitChildrenResult {
+    WaitChildrenResult {
+        child_ids,
         status: status_from_terminal(&terminal),
         ready: true,
         terminal: Some(terminal),

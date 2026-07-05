@@ -191,6 +191,17 @@ fn s054_cancel_priority_wins_over_status_wait_and_close_commands() {
         ),
     });
 
+    let (wait_any_tx, _) = tokio::sync::oneshot::channel();
+    queue.push(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::WaitChildren(
+            vec![AgentId("child-1".into()), AgentId("child-2".into())],
+            Duration::from_millis(1),
+            wait_any_tx,
+        ),
+    });
+
     let (close_tx, _) = tokio::sync::oneshot::channel();
     queue.push(SupervisorMessage {
         priority: MessagePriority::Command,
@@ -219,6 +230,7 @@ fn s054_cancel_priority_wins_over_status_wait_and_close_commands() {
                 message.payload,
                 SupervisorPayload::ChildStatus(_, _)
                     | SupervisorPayload::WaitChild(_, _, _)
+                    | SupervisorPayload::WaitChildren(_, _, _)
                     | SupervisorPayload::CloseChild(_, _)
             )),
         "remaining S054 messages should all be command-priority probes"
