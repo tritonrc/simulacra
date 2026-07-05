@@ -45,8 +45,8 @@ task = """
 Act like a code-agent lead validating the child-agent orchestration implementation.
 
 Immediately spawn two children in parallel using configured agent types and these exact child budgets:
-1. spawn_agent with agent_type "researcher", budget max_tokens 12000, max_turns 5, max_cost "0", max_sub_agents 0, to inspect the mounted runtime/CLI source paths for how spawn_agent, child_status, wait_child_agent, join_child_agent, steer_child_agent, and close_child_agent are wired.
-2. spawn_agent with agent_type "reviewer", budget max_tokens 12000, max_turns 5, max_cost "0", max_sub_agents 0, to inspect the mounted subagent_spawn tests for missing behavioral coverage or brittle assertions.
+1. spawn_agent with agent_type "researcher", budget max_tokens 64000, max_turns 30, max_cost "0", max_sub_agents 0, to inspect the mounted runtime/CLI source paths for how spawn_agent, child_status, wait_child_agent, join_child_agent, steer_child_agent, and close_child_agent are wired.
+2. spawn_agent with agent_type "reviewer", budget max_tokens 64000, max_turns 30, max_cost "0", max_sub_agents 0, to inspect the mounted subagent_spawn tests for missing behavioral coverage or brittle assertions.
 
 After both spawns return handles, do your own parent-side scan of these exact files while the children run:
 - /workspace/specs/S054-child-agent-orchestration.md
@@ -74,8 +74,8 @@ paths_write = ["/workspace/**"]
 
 [agent_types.researcher]
 model = "claude-sonnet-5"
-max_turns = 5
-max_tokens = 12000
+max_turns = 30
+max_tokens = 64000
 max_sub_agents = 0
 system_prompt = "prompts/researcher.md"
 
@@ -90,8 +90,8 @@ paths_write = ["/workspace/tmp/**"]
 
 [agent_types.reviewer]
 model = "claude-sonnet-5"
-max_turns = 5
-max_tokens = 12000
+max_turns = 30
+max_tokens = 64000
 max_sub_agents = 0
 system_prompt = "prompts/reviewer.md"
 

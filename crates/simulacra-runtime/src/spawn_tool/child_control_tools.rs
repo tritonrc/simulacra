@@ -189,10 +189,6 @@ impl simulacra_types::Tool for WaitChildAgentTool {
                     }
                 },
                 "required": ["timeout_ms"],
-                "oneOf": [
-                    { "required": ["child_id"], "not": { "required": ["child_ids"] } },
-                    { "required": ["child_ids"], "not": { "required": ["child_id"] } }
-                ],
                 "additionalProperties": false
             }),
         }

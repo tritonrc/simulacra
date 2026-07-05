@@ -753,6 +753,12 @@ fn s054_child_orchestration_tools_have_documented_schemas() {
         wait.input_schema["properties"]["timeout_ms"]["minimum"],
         serde_json::json!(0)
     );
+    for unsupported_top_level_keyword in ["oneOf", "allOf", "anyOf"] {
+        assert!(
+            wait.input_schema.get(unsupported_top_level_keyword).is_none(),
+            "wait_child_agent schema should avoid top-level {unsupported_top_level_keyword} for Anthropic compatibility; runtime validation still enforces exactly one wait target"
+        );
+    }
 
     let close = make_real_close_child_agent_tool().definition();
     assert_eq!(close.name, "close_child_agent");
