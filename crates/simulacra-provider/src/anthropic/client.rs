@@ -283,10 +283,10 @@ struct AnthropicSseAccumulator<'a> {
     stop_reason: Option<String>,
     pending_tool_blocks: std::collections::BTreeMap<u64, (String, String, String)>,
     pending_thinking_blocks: std::collections::BTreeMap<u64, (String, Option<String>)>,
+    completed_provider_blocks: std::collections::BTreeMap<u64, ProviderContentBlock>,
     tool_block_indices: std::collections::BTreeSet<u64>,
     thinking_indices: std::collections::BTreeSet<u64>,
     tool_calls: Vec<simulacra_types::ToolCallMessage>,
-    provider_content: Vec<ProviderContentBlock>,
 }
 
 impl<'a> AnthropicSseAccumulator<'a> {
@@ -301,10 +301,10 @@ impl<'a> AnthropicSseAccumulator<'a> {
             stop_reason: None,
             pending_tool_blocks: std::collections::BTreeMap::new(),
             pending_thinking_blocks: std::collections::BTreeMap::new(),
+            completed_provider_blocks: std::collections::BTreeMap::new(),
             tool_block_indices: std::collections::BTreeSet::new(),
             thinking_indices: std::collections::BTreeSet::new(),
             tool_calls: Vec::new(),
-            provider_content: Vec::new(),
         }
     }
 
@@ -389,13 +389,16 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 }
             }
             "redacted_thinking" => {
-                self.provider_content.push(ProviderContentBlock {
-                    provider: "anthropic".to_string(),
-                    value: serde_json::json!({
-                        "type": "redacted_thinking",
-                        "data": block.get("data").and_then(|v| v.as_str()).unwrap_or(""),
-                    }),
-                });
+                self.completed_provider_blocks.insert(
+                    index,
+                    ProviderContentBlock {
+                        provider: "anthropic".to_string(),
+                        value: serde_json::json!({
+                            "type": "redacted_thinking",
+                            "data": block.get("data").and_then(|v| v.as_str()).unwrap_or(""),
+                        }),
+                    },
+                );
             }
             _ => {}
         }
@@ -499,14 +502,22 @@ impl<'a> AnthropicSseAccumulator<'a> {
         if self.thinking_indices.remove(&index)
             && let Some((thinking, signature)) = self.pending_thinking_blocks.remove(&index)
         {
-            self.provider_content.push(ProviderContentBlock {
-                provider: "anthropic".to_string(),
-                value: serde_json::json!({
-                    "type": "thinking",
-                    "thinking": thinking,
-                    "signature": signature,
-                }),
-            });
+            if signature.is_none() {
+                tracing::warn!(
+                    "Anthropic streaming thinking block ended without a signature_delta; continued requests may be rejected"
+                );
+            }
+            self.completed_provider_blocks.insert(
+                index,
+                ProviderContentBlock {
+                    provider: "anthropic".to_string(),
+                    value: serde_json::json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }),
+                },
+            );
             if let Some(provider_sink) = self.provider_sink {
                 provider_sink.emit(ProviderStreamEvent::ThinkingEnd);
             }
@@ -535,6 +546,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
             Some("stop_sequence") => FinishReason::StopSequence,
             _ => FinishReason::EndTurn,
         };
+        let provider_content = self.completed_provider_blocks.into_values().collect();
 
         ProviderResponse {
             message: Message {
@@ -542,7 +554,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 content: self.content,
                 tool_calls: self.tool_calls,
                 tool_call_id: None,
-                provider_content: self.provider_content,
+                provider_content,
             },
             token_usage: TokenUsage {
                 input_tokens: self.input_tokens,
@@ -1301,19 +1313,23 @@ mod tests {
             "event: message_start\n",
             "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_thinking_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-fable-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n",
             "event: content_block_start\n",
-            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"inspect inputs\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-stream\"}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"encrypted-stream\"}}\n\n",
             "event: content_block_stop\n",
             "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "event: content_block_start\n",
-            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_thinking_stream\",\"name\":\"file_read\",\"input\":{}}}\n\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
             "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/workspace/AGENTS.md\\\"}\"}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"inspect inputs\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-stream\"}}\n\n",
             "event: content_block_stop\n",
             "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_thinking_stream\",\"name\":\"file_read\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"/workspace/AGENTS.md\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
             "event: message_delta\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":9}}\n\n",
             "event: message_stop\n",
@@ -1873,10 +1889,18 @@ mod tests {
             .collect();
         assert_eq!(thinking_deltas, vec!["inspect inputs"]);
         assert_eq!(resp.finish_reason, FinishReason::ToolUse);
-        assert_eq!(resp.message.provider_content.len(), 1);
+        assert_eq!(resp.message.provider_content.len(), 2);
         assert_eq!(resp.message.provider_content[0].provider, "anthropic");
         assert_eq!(
             resp.message.provider_content[0].value,
+            serde_json::json!({
+                "type": "redacted_thinking",
+                "data": "encrypted-stream"
+            })
+        );
+        assert_eq!(resp.message.provider_content[1].provider, "anthropic");
+        assert_eq!(
+            resp.message.provider_content[1].value,
             serde_json::json!({
                 "type": "thinking",
                 "thinking": "inspect inputs",
@@ -1885,6 +1909,42 @@ mod tests {
         );
         assert_eq!(resp.message.tool_calls.len(), 1);
         assert_eq!(resp.message.tool_calls[0].id, "toolu_thinking_stream");
+
+        let follow_up = Message {
+            role: simulacra_types::Role::Tool,
+            content: "file contents".into(),
+            tool_calls: vec![],
+            tool_call_id: Some("toolu_thinking_stream".into()),
+            provider_content: vec![],
+        };
+        let request_messages = vec![resp.message.clone(), follow_up];
+        let request =
+            api_types::build_request_parts(&request_messages, &[], "claude-fable-5", 1024);
+        let request_json =
+            serde_json::to_value(&request).expect("Anthropic request should serialize");
+
+        let assistant_blocks = request_json["messages"][0]["content"]
+            .as_array()
+            .expect("assistant message should serialize as content blocks");
+        assert_eq!(
+            assistant_blocks[0],
+            serde_json::json!({
+                "type": "redacted_thinking",
+                "data": "encrypted-stream"
+            })
+        );
+        assert!(assistant_blocks.iter().any(|block| {
+            block["type"] == "thinking"
+                && block["thinking"] == "inspect inputs"
+                && block["signature"] == "sig-stream"
+        }));
+        assert!(assistant_blocks.iter().any(|block| {
+            block["type"] == "tool_use" && block["id"] == "toolu_thinking_stream"
+        }));
+        assert_eq!(
+            request_json["messages"][1]["content"][0]["tool_use_id"],
+            serde_json::json!("toolu_thinking_stream")
+        );
     }
 
     fn streaming_tool_use_body() -> Vec<u8> {
@@ -1955,21 +2015,18 @@ mod tests {
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("toolu_abc".into()),
-
                     name: Some("get_weather".into()),
                     arguments_delta: String::new(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("toolu_abc".into()),
-
                     name: Some("get_weather".into()),
                     arguments_delta: "{\"location".into(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("toolu_abc".into()),
-
                     name: Some("get_weather".into()),
                     arguments_delta: "\":\"SF\"}".into(),
                 },

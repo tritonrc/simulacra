@@ -202,6 +202,8 @@ fn message_sequence_changed(original: &[Message], normalized: &[Message]) -> boo
 }
 
 fn messages_equal(left: &Message, right: &Message) -> bool {
+    // Provider-native content is part of message identity because Anthropic
+    // requires thinking blocks to be returned verbatim in tool-use transcripts.
     left.role == right.role
         && left.content == right.content
         && left.tool_call_id == right.tool_call_id
@@ -226,19 +228,27 @@ fn anthropic_provider_blocks(
         .filter(|block| block.provider == "anthropic")
         .filter_map(
             |block| match block.value.get("type").and_then(|value| value.as_str()) {
-                Some("thinking") => Some(ApiRequestContentBlock::Thinking {
-                    thinking: block
-                        .value
-                        .get("thinking")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    signature: block
+                Some("thinking") => {
+                    let signature = block
                         .value
                         .get("signature")
                         .and_then(|value| value.as_str())
-                        .map(ToString::to_string),
-                }),
+                        .map(ToString::to_string);
+                    if signature.is_none() {
+                        tracing::warn!(
+                            "Anthropic thinking block is missing a signature; Anthropic will likely reject the continued request"
+                        );
+                    }
+                    Some(ApiRequestContentBlock::Thinking {
+                        thinking: block
+                            .value
+                            .get("thinking")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        signature,
+                    })
+                }
                 Some("redacted_thinking") => Some(ApiRequestContentBlock::RedactedThinking {
                     data: block
                         .value
@@ -544,6 +554,21 @@ mod tests {
         })
     }
 
+    fn has_unsigned_thinking(api_message: &ApiMessage) -> bool {
+        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
+            return false;
+        };
+        blocks.iter().any(|block| {
+            matches!(
+                block,
+                ApiRequestContentBlock::Thinking {
+                    signature: None,
+                    ..
+                }
+            )
+        })
+    }
+
     fn has_redacted_thinking(api_message: &ApiMessage, data: &str) -> bool {
         let ApiMessageContent::Blocks(blocks) = &api_message.content else {
             return false;
@@ -771,6 +796,37 @@ mod tests {
 
         assert_eq!(request.messages.len(), 1);
         assert!(has_thinking(&request.messages[0], "sig-only"));
+    }
+
+    #[test]
+    fn build_request_parts_warns_for_unsigned_anthropic_thinking_blocks() {
+        use tracing_subscriber::prelude::*;
+
+        let assistant = Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![ProviderContentBlock {
+                provider: "anthropic".to_string(),
+                value: json!({
+                    "type": "thinking",
+                    "thinking": "unsigned"
+                }),
+            }],
+        };
+        let captured = CapturedEvents::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let messages = vec![assistant];
+
+        let request = tracing::subscriber::with_default(subscriber, || {
+            build_request_parts(&messages, &[], "claude-fable-5", 1024)
+        });
+
+        assert!(has_unsigned_thinking(&request.messages[0]));
+        let events = captured.0.lock().expect("captured events mutex poisoned");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("thinking block is missing a signature"));
     }
 
     #[test]

@@ -432,6 +432,8 @@ impl OpenAiProvider {
                 content,
                 tool_calls,
                 tool_call_id: None,
+                // OpenAI responses do not include provider-native continuation
+                // blocks; Anthropic-only sidecars are intentionally not minted here.
                 provider_content: vec![],
             },
             token_usage: TokenUsage {
@@ -615,6 +617,7 @@ impl<'a> OpenAiSseAccumulator<'a> {
                 content: self.content,
                 tool_calls,
                 tool_call_id: None,
+                // OpenAI streams do not carry Anthropic-style thinking blocks.
                 provider_content: vec![],
             },
             token_usage: TokenUsage {
@@ -1242,21 +1245,18 @@ mod tests {
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("call_tc1".into()),
-
                     name: Some("get_weather".into()),
                     arguments_delta: String::new(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("call_tc1".into()),
-
                     name: Some("get_weather".into()),
                     arguments_delta: "{\"loc".into(),
                 },
                 simulacra_types::ProviderStreamEvent::ToolCallDelta {
                     index: 0,
                     tool_call_id: Some("call_tc1".into()),
-
                     name: Some("get_weather".into()),
                     arguments_delta: "ation\":\"SF\"}".into(),
                 },

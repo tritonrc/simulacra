@@ -11,6 +11,8 @@
 4. `ProviderResponse` includes `message`, `token_usage`, `finish_reason`, and `provider_response_id`.
 5. Streaming responses are delivered through the S050 provider streaming contract; final `ProviderResponse` is assembled from the stream.
 6. Provider errors are typed: `RateLimit`, `AuthError`, `BadRequest`, `ServerError`, `BudgetExhausted`.
+7. Provider-native response blocks that are required for continuation (for example Anthropic `thinking` and `redacted_thinking` blocks) are preserved on `Message.provider_content`.
+8. Anthropic signed thinking blocks keep their `signature`; redacted thinking blocks keep their encrypted `data`. Continued tool-use requests send those provider-native blocks back before the assistant tool-use block.
 
 ## Assertions
 
@@ -25,6 +27,11 @@
 - [x] `BadRequest` is not retryable. **Tested in `bad_request_400_is_not_retryable`.**
 - [x] Provider does not mutate budget — caller is responsible for updating usage. **Tested in `provider_returns_usage_without_mutating_budget`.**
 - [x] Multiple provider backends can be selected by configuration (Anthropic, OpenAI, etc.). **Stub OpenAiProvider added. Tested in `crate_exposes_multiple_backends_for_configuration_selection`.**
+- [x] Anthropic `thinking` and `redacted_thinking` response blocks are parsed into provider-native message content without becoming visible assistant text. **Tested in `thinking_response_blocks_do_not_break_text_mapping` and `thinking_response_blocks_do_not_break_tool_use_mapping`.**
+- [x] Anthropic streaming preserves thinking text, `signature_delta`, and redacted thinking blocks on the final `ProviderResponse`. **Tested in `streaming_thinking_blocks_round_trip_on_final_response`.**
+- [x] Anthropic tool-use continuation requests reserialize provider-native thinking blocks. **Tested in `build_request_parts_preserves_anthropic_thinking_blocks_on_assistant_tool_use` and `streaming_thinking_blocks_round_trip_on_final_response`.**
+- [x] Runtime history, journaling, and replay resume preserve provider-native content across a tool-use round trip. **Tested in `provider_native_content_survives_tool_round_trip` and `replay_resume_preserves_provider_native_content_for_live_continuation`.**
+- [x] Missing Anthropic thinking signatures are surfaced as a warning before request serialization. **Tested in `build_request_parts_warns_for_unsigned_anthropic_thinking_blocks`.**
 
 ## Observability (see S010 for conventions)
 
