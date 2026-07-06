@@ -190,6 +190,32 @@ impl SimulacraConfig {
     /// or by hand can call this to enforce the same invariants as
     /// `from_file`.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // Agent type validation.
+        for (name, agent_type) in &self.agent_types {
+            match agent_type.backend {
+                AgentBackend::Native => {
+                    if agent_type.model.trim().is_empty() {
+                        return Err(ConfigError::Validation(format!(
+                            "agent type '{name}': native backend requires non-empty model"
+                        )));
+                    }
+                }
+                AgentBackend::Acp => {
+                    if agent_type
+                        .acp_profile
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "agent type '{name}': ACP backend requires non-empty acp_profile"
+                        )));
+                    }
+                }
+            }
+        }
+
         // MCP server validation.
         if let Some(ref mcp) = self.mcp {
             let mut seen: std::collections::HashSet<&str> =
@@ -258,7 +284,12 @@ pub struct ProjectConfig {
 /// Configuration for a single agent type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTypeConfig {
+    #[serde(default)]
+    pub backend: AgentBackend,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub acp_profile: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
@@ -275,6 +306,15 @@ pub struct AgentTypeConfig {
     pub restart_policy: Option<String>,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesConfig>,
+}
+
+/// Child runtime backend for a configured agent type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentBackend {
+    #[default]
+    Native,
+    Acp,
 }
 
 /// Capability grants for an agent type.
@@ -766,12 +806,159 @@ url = "http://localhost:3000"
         );
     }
 
+    #[test]
+    fn s056_agent_backend_defaults_to_native_and_existing_native_configs_parse_unchanged() {
+        let toml_str = r#"
+[project]
+name = "s056"
+
+[agent_types.worker]
+model = "claude-sonnet-4-20250514"
+system_prompt = "prompts/worker.md"
+can_spawn = ["reviewer"]
+"#;
+
+        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
+        config.validate().expect("native config should validate");
+
+        let worker = config.agent_types.get("worker").expect("worker agent");
+        assert_eq!(worker.backend, AgentBackend::Native);
+        assert_eq!(worker.model, "claude-sonnet-4-20250514");
+        assert_eq!(worker.acp_profile, None);
+        assert_eq!(worker.can_spawn, vec!["reviewer"]);
+    }
+
+    #[test]
+    fn s056_agent_backend_native_explicitly_selects_native_runtime() {
+        let toml_str = r#"
+[project]
+name = "s056"
+
+[agent_types.worker]
+backend = "native"
+model = "claude-sonnet-4-20250514"
+"#;
+
+        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
+        config.validate().expect("native config should validate");
+
+        assert_eq!(
+            config.agent_types.get("worker").expect("worker").backend,
+            AgentBackend::Native
+        );
+    }
+
+    #[test]
+    fn s056_acp_agent_type_does_not_require_model_but_requires_profile() {
+        let toml_str = r#"
+[project]
+name = "s056"
+
+[agent_types.remote_reviewer]
+backend = "acp"
+acp_profile = "codex-local"
+"#;
+
+        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
+        config.validate().expect("ACP config should validate");
+
+        let agent = config
+            .agent_types
+            .get("remote_reviewer")
+            .expect("remote_reviewer agent");
+        assert_eq!(agent.backend, AgentBackend::Acp);
+        assert_eq!(agent.model, "");
+        assert_eq!(agent.acp_profile.as_deref(), Some("codex-local"));
+    }
+
+    #[test]
+    fn s056_native_agent_type_rejects_empty_model() {
+        let toml_str = r#"
+[project]
+name = "s056"
+
+[agent_types.worker]
+backend = "native"
+model = "   "
+"#;
+
+        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
+        let err = config
+            .validate()
+            .expect_err("native backend must reject an empty model");
+        let message = err.to_string();
+
+        assert!(message.contains("worker"));
+        assert!(message.contains("native backend requires non-empty model"));
+    }
+
+    #[test]
+    fn s056_acp_agent_type_rejects_missing_or_empty_profile() {
+        let missing_profile = r#"
+[project]
+name = "s056"
+
+[agent_types.remote_reviewer]
+backend = "acp"
+"#;
+
+        let config: SimulacraConfig = toml::from_str(missing_profile).expect("config should parse");
+        let err = config
+            .validate()
+            .expect_err("ACP backend must reject missing acp_profile");
+        assert!(
+            err.to_string()
+                .contains("ACP backend requires non-empty acp_profile")
+        );
+
+        let empty_profile = r#"
+[project]
+name = "s056"
+
+[agent_types.remote_reviewer]
+backend = "acp"
+acp_profile = "   "
+"#;
+
+        let config: SimulacraConfig = toml::from_str(empty_profile).expect("config should parse");
+        let err = config
+            .validate()
+            .expect_err("ACP backend must reject empty acp_profile");
+        assert!(
+            err.to_string()
+                .contains("ACP backend requires non-empty acp_profile")
+        );
+    }
+
+    #[test]
+    fn s056_unknown_backend_value_is_rejected_with_actionable_error() {
+        let toml_str = r#"
+[project]
+name = "s056"
+
+[agent_types.worker]
+backend = "remote"
+model = "claude-sonnet-4-20250514"
+"#;
+
+        let err =
+            toml::from_str::<SimulacraConfig>(toml_str).expect_err("unknown backend is rejected");
+        let message = err.to_string();
+
+        assert!(message.contains("backend"));
+        assert!(message.contains("remote"));
+        assert!(message.contains("native"));
+        assert!(message.contains("acp"));
+    }
+
     // ── C1: build_capability_token ──────────────────────────────────────
 
     #[test]
     fn build_capability_token_without_capabilities_returns_default() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "test-model".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -798,7 +985,9 @@ url = "http://localhost:3000"
     #[test]
     fn build_capability_token_maps_network_permissions() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -836,7 +1025,9 @@ url = "http://localhost:3000"
     #[test]
     fn build_capability_token_maps_mcp_tools() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -866,7 +1057,9 @@ url = "http://localhost:3000"
     #[test]
     fn build_capability_token_maps_boolean_capabilities() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -898,7 +1091,9 @@ url = "http://localhost:3000"
     #[test]
     fn build_capability_token_maps_path_patterns() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -938,7 +1133,9 @@ url = "http://localhost:3000"
         // planner/supervisor would refuse the spawn at runtime even though
         // the config clearly authorises it.
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -957,7 +1154,9 @@ url = "http://localhost:3000"
     #[test]
     fn build_capability_token_maps_spawn_types_from_can_spawn() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
@@ -987,7 +1186,9 @@ url = "http://localhost:3000"
     #[test]
     fn build_capability_token_maps_skill_patterns_from_capabilities() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "m".into(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec!["rust-dev".into()],
             max_turns: None,
@@ -1054,7 +1255,9 @@ skill_patterns = ["skill:rust-*", "reviewer"]
     #[test]
     fn build_capability_token_with_all_fields_populated() {
         let agent = AgentTypeConfig {
+            backend: AgentBackend::Native,
             model: "claude-sonnet-4-20250514".into(),
+            acp_profile: None,
             system_prompt: Some("prompt.md".into()),
             skills: vec!["skill:code-review".into()],
             max_turns: Some(50),

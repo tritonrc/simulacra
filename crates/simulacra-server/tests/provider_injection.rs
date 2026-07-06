@@ -1047,7 +1047,9 @@ async fn catalog_spawn_capability_registers_spawn_agent_for_server_runs() {
     config.agent_types.insert(
         "worker".to_string(),
         simulacra_config::AgentTypeConfig {
+            backend: Default::default(),
             model: "claude-3-5-sonnet".to_string(),
+            acp_profile: None,
             system_prompt: Some("Handle delegated work.".to_string()),
             skills: vec![],
             max_turns: Some(2),
@@ -1183,11 +1185,21 @@ async fn server_task_returns_live_generic_subagent_handle_and_resumes_parent() {
         "server stream should record the child spawn before child output; events: {events:?}"
     );
 
-    let parent_calls = provider.recorded_messages();
+    let recorded_calls = provider.recorded_messages();
+    let parent_calls = recorded_calls
+        .iter()
+        .filter(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .content
+                    .contains("Use a sub-agent for the specialist part")
+            })
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         parent_calls.len(),
         2,
-        "master provider should spawn, then synthesize after receiving the live child handle"
+        "master provider should spawn, then synthesize after receiving the live child handle; all calls were: {recorded_calls:?}"
     );
     let resumed_messages = parent_calls
         .get(1)

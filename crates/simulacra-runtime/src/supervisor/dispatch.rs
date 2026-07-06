@@ -21,6 +21,10 @@ impl AgentSupervisor {
                     let _ = result_tx.send(Err(RuntimeError::SpawnMissingTask));
                     return;
                 };
+                if let Err(err) = factory.validate_spawn_config(&config) {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
                 if let Err(err) = self.prepare_spawn(&config) {
                     let _ = result_tx.send(Err(err));
                     return;

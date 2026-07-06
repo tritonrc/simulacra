@@ -1815,6 +1815,7 @@ impl SimulacraEngine {
                         child_cell_configurator,
                         child_tool_registrar,
                         child_provider_factory,
+                        acp_child_runtime: None,
                     });
                     let mut supervisor = AgentSupervisor::with_task_factory(
                         capability_token.clone(),
@@ -1888,6 +1889,7 @@ impl SimulacraEngine {
                             exit_reason: simulacra_types::ExitReason::Cancelled,
                             messages: vec![],
                             token_usage: Default::default(),
+                            reported_tool_uses: None,
                             used_turns: 0,
                             used_cost: Decimal::ZERO,
                         })

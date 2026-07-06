@@ -42,6 +42,13 @@ pub enum RuntimeError {
     /// (or `set_task_factory` when wired) before calling `spawn_agent`.
     #[error("spawn_agent called on a supervisor with no task factory configured")]
     SpawnMissingTask,
+    #[error(
+        "ACP backend requested for agent_type '{agent_type}' with acp_profile '{acp_profile}', but no ACP child runtime was injected; configure an AcpChildRuntime before spawning ACP children"
+    )]
+    AcpChildRuntimeMissing {
+        agent_type: String,
+        acp_profile: String,
+    },
 }
 
 impl RuntimeError {

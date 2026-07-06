@@ -32,6 +32,7 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
             input_tokens: 10,
             output_tokens: 5,
         },
+            reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };
@@ -99,6 +100,7 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_child_prompt_and_mod
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
     let spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));
 
@@ -212,6 +214,7 @@ fn agent_task_factory_applies_child_cell_and_tool_hooks_before_provider_call() {
             Ok(())
         })),
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
     let spawn = spawn_config("child-hooks-1", "parent-agent", child_budget(32, 1, 0));
 
@@ -300,6 +303,7 @@ fn agent_task_factory_intersects_child_type_capability_with_the_spawn_override()
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
     let mut spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));
     spawn.capability = Some(CapabilityToken::default());

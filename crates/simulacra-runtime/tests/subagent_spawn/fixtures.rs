@@ -60,6 +60,7 @@ fn child_success_output() -> AgentLoopOutput {
             input_tokens: 3,
             output_tokens: 2,
         },
+            reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::new(15, 2),
     }
@@ -85,6 +86,7 @@ impl TaskFactory for NoopFactory {
                 exit_reason: ExitReason::Complete,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             })
@@ -244,6 +246,7 @@ impl TaskFactory for RecordingTaskFactory {
                     exit_reason: ExitReason::Complete,
                     messages: vec![],
                     token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
                     used_turns: 0,
                     used_cost: Decimal::ZERO,
                 })
@@ -330,7 +333,9 @@ fn task_factory_config(child_capabilities: CapabilitiesConfig) -> SimulacraConfi
     agent_types.insert(
         "researcher".into(),
         AgentTypeConfig {
+            backend: Default::default(),
             model: "child-model".into(),
+            acp_profile: None,
             system_prompt: Some("You are the child researcher.".into()),
             skills: vec![],
             max_turns: Some(3),

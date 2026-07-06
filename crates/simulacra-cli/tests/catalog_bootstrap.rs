@@ -39,7 +39,9 @@ fn base_config() -> SimulacraConfig {
 
 fn agent_with(model: &str, prompt: Option<&str>) -> AgentTypeConfig {
     AgentTypeConfig {
+        backend: Default::default(),
         model: model.into(),
+        acp_profile: None,
         system_prompt: prompt.map(str::to_owned),
         skills: vec![],
         max_turns: None,

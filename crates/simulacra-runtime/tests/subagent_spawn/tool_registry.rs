@@ -54,6 +54,7 @@ fn generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent() 
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     let spawn = generic_spawn_config(
@@ -164,6 +165,7 @@ fn configured_spawn_capable_child_registry_includes_all_child_control_tools() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     let mut spawn = spawn_config("child-controls-1", "parent-agent", child_budget(32, 1, 1));
@@ -438,6 +440,7 @@ fn generic_child_invoke_agent_span_nests_under_parent_trace() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     let (_, spans, _) = capture_trace(|| {
