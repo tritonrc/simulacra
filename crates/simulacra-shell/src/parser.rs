@@ -61,7 +61,7 @@ pub enum RedirectStream {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirectTarget {
-    File(String),
+    File(String, bool),
     Stdout,
     Stderr,
 }
@@ -442,7 +442,7 @@ fn parse_command(tokens: &[&Token]) -> Command {
                     redirects.push(Redirect {
                         stream,
                         kind,
-                        target: RedirectTarget::File(w.clone()),
+                        target: RedirectTarget::File(w.clone(), is_literal),
                     });
                 } else if program.is_empty() {
                     program = w.clone();

@@ -21,8 +21,12 @@ pub(crate) fn apply_redirects(
         let target = match &redirect.target {
             RedirectTarget::Stdout => stdout_dest.clone(),
             RedirectTarget::Stderr => stderr_dest.clone(),
-            RedirectTarget::File(target) => {
-                let target = expand(target);
+            RedirectTarget::File(target, literal) => {
+                let target = if *literal {
+                    target.clone()
+                } else {
+                    expand(target)
+                };
                 let target = crate::executor::resolve_against_cwd(&target, cwd);
                 if target == DEV_NULL {
                     RedirectDestination::Null

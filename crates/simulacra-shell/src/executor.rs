@@ -17,6 +17,7 @@ pub struct ShellExecutor<'a> {
     env: HashMap<String, String>,
     http_proxy: Option<&'a dyn ShellHttpProxy>,
     external: Option<&'a dyn ShellExternalCommand>,
+    last_status: i32,
     /// Current working directory. Always normalized to an absolute path.
     /// `cd` updates it; `pwd` reads it; relative path arguments to `ls`
     /// (and other path-using builtins) are resolved against it.
@@ -39,6 +40,7 @@ impl<'a> ShellExecutor<'a> {
             env,
             http_proxy,
             external: None,
+            last_status: 0,
             cwd: "/".to_string(),
         }
     }
@@ -118,6 +120,7 @@ impl<'a> ShellExecutor<'a> {
                 accumulated_stdout.push_str(&result.stdout);
                 accumulated_stderr.push_str(&result.stderr);
                 last_exit_code = result.exit_code;
+                self.last_status = last_exit_code;
 
                 match item.connector {
                     Some(Connector::And) => {
@@ -335,73 +338,11 @@ impl<'a> ShellExecutor<'a> {
         }
     }
 
-    /// Expand `$VAR`, `${VAR}`, and `$(cmd)` in a string.
+    /// Expand `$VAR`, `${VAR}`, `$?`, and `$(cmd)` in a string.
     fn expand_vars(&mut self, input: &str) -> String {
-        let chars: Vec<char> = input.chars().collect();
-        let len = chars.len();
-        let mut result = String::new();
-        let mut i = 0;
-
-        while i < len {
-            if chars[i] == '$' && i + 1 < len {
-                // $(cmd) — command substitution
-                if chars[i + 1] == '(' {
-                    i += 2;
-                    let mut depth = 1;
-                    let mut cmd_str = String::new();
-                    while i < len && depth > 0 {
-                        if chars[i] == '(' {
-                            depth += 1;
-                        } else if chars[i] == ')' {
-                            depth -= 1;
-                            if depth == 0 {
-                                i += 1;
-                                break;
-                            }
-                        }
-                        cmd_str.push(chars[i]);
-                        i += 1;
-                    }
-                    let sub_result = self.run(&cmd_str);
-                    // Strip trailing newline from command substitution
-                    let out = sub_result.stdout.trim_end_matches('\n').to_string();
-                    result.push_str(&out);
-                    continue;
-                }
-
-                // ${VAR}
-                if chars[i + 1] == '{' {
-                    i += 2;
-                    let mut var_name = String::new();
-                    while i < len && chars[i] != '}' {
-                        var_name.push(chars[i]);
-                        i += 1;
-                    }
-                    if i < len {
-                        i += 1; // skip }
-                    }
-                    let val = self.env.get(&var_name).cloned().unwrap_or_default();
-                    result.push_str(&val);
-                    continue;
-                }
-
-                // $VAR
-                i += 1;
-                let mut var_name = String::new();
-                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                    var_name.push(chars[i]);
-                    i += 1;
-                }
-                let val = self.env.get(&var_name).cloned().unwrap_or_default();
-                result.push_str(&val);
-                continue;
-            }
-
-            result.push(chars[i]);
-            i += 1;
-        }
-
-        result
+        let env = self.env.clone();
+        let last_status = self.last_status;
+        crate::expansion::expand_vars(input, &env, last_status, |cmd| self.run(cmd))
     }
 }
 

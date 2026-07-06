@@ -10,7 +10,7 @@
 3. Redirects: `>` and `1>` truncate and write stdout, `>>` appends stdout, and `2>` redirects stderr. Target file is created if it doesn't exist. Compatibility redirects `2>&1`, `1>&2`, `&>`, and `&>>` are supported for common agent shell fragments.
 4. Heredocs (`<<EOF` and `<<'EOF'`) provide stdin to the command that declares them, including when that command is part of a pipeline.
 5. `&&` executes right only if left exits 0. `||` executes right only if left exits non-zero. `;` and newlines separate commands and always continue to the next command.
-6. `$VAR` and `${VAR}` expand environment variables. Undefined vars expand to empty string.
+6. `$VAR` and `${VAR}` expand environment variables. Undefined vars expand to empty string. `$?` and `${?}` expand to the previous executed pipeline's exit code.
 7. `$(cmd)` captures stdout of cmd as a string value (command substitution).
 8. Unknown commands return exit code 127 and stderr "command not found: <name>".
 9. All builtins write to virtual stdout/stderr, never to real file descriptors.
@@ -49,6 +49,7 @@ resolved against the current shell `cwd`.
 - [x] `false && echo yes` → no output (short-circuit).
 - [x] `false || echo fallback` → stdout "fallback\n".
 - [x] `$VAR` expansion replaces with env value; undefined expands to empty string. **Tested in `dollar_var_expansion_replaces_with_env_value` and `undefined_variable_expands_to_empty_string`.**
+- [x] `$?` and `${?}` expansion report the previous executed pipeline status, including rightmost-command pipeline status and skipped short-circuit behavior, and single quotes suppress them. **Tested in `dollar_question_tracks_true_and_false_across_semicolons`, `dollar_question_after_pipeline_uses_rightmost_exit_code`, `dollar_question_preserves_status_across_skipped_short_circuit_commands`, `brace_dollar_question_expands_last_status`, and `single_quoted_dollar_question_stays_literal`.**
 - [x] `$(echo inner)` command substitution captures stdout. **Tested in `command_substitution_captures_stdout`.**
 - [x] Each Phase 1 builtin (`cat`, `mkdir`, `cp`, `mv`, `rm`, `head`, `tail`, `grep`, `rg`, `sed`, `wc`, `find`, `sort`, `uniq`, `cut`, `tr`, `tee`) has at least one test. **All builtins covered with dedicated tests.**
 - [x] Shell commands against VFS never touch real filesystem. **Tested in `shell_commands_never_touch_real_filesystem`.**

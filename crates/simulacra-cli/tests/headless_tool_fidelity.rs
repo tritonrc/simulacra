@@ -166,6 +166,7 @@ fn headless_mode_executes_common_agent_tool_fragments_without_recovery_failures(
     let config = TempConfig::write(config_toml());
     let shell_probe = r#"missing_tool 2>/dev/null || printf 'dev-null-ok\n'
 sleep 0 && printf 'sleep-ok\n'
+true; echo "status:$?"; false; echo "status:$?"
 printf 'left right third\n' | grep -oP '(?<=\s)\S+'
 mkdir -p /workspace/src /workspace/docs
 printf 'alpha\nneedle here\n' > /workspace/src/lib.rs
@@ -213,6 +214,10 @@ console.log(readFileSync('/workspace/js.txt'));"#;
     assert!(
         tool_output.contains("sleep-ok"),
         "sleep should support short telemetry-wait snippets: {tool_output}"
+    );
+    assert!(
+        tool_output.contains("status:0") && tool_output.contains("status:1"),
+        "last-exit-status expansion should support shell probe reporting: {tool_output}"
     );
     assert!(
         tool_output.contains("right") && tool_output.contains("third"),

@@ -148,6 +148,111 @@ fn false_or_echo_fallback_executes_right_hand_side() {
 }
 
 #[test]
+fn dollar_question_tracks_true_and_false_across_semicolons() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "true ; echo $? ; false ; echo $?");
+
+    assert_eq!(result.stdout, "0\n1\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn dollar_question_after_pipeline_uses_rightmost_exit_code() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        HashMap::new(),
+        "false | true ; echo $? ; true | false ; echo $?",
+    );
+
+    assert_eq!(result.stdout, "0\n1\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn dollar_question_preserves_status_across_skipped_short_circuit_commands() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        HashMap::new(),
+        "false && echo skipped ; echo $? ; true || echo skipped ; echo $?",
+    );
+
+    assert_eq!(result.stdout, "1\n0\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn dollar_question_after_command_substitution_uses_substitution_status_in_same_word() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), r#"false ; echo "$(true)$?""#);
+
+    assert_eq!(result.stdout, "0\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn brace_dollar_question_expands_last_status() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "false ; echo ${?}");
+
+    assert_eq!(result.stdout, "1\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn single_quoted_dollar_question_stays_literal() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "false ; echo '$?'");
+
+    assert_eq!(result.stdout, "$?\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn single_quoted_dollar_question_redirect_target_stays_literal() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        HashMap::new(),
+        "false ; echo x > '$?' ; cat '$?' ; test ! -f /1",
+    );
+
+    assert_eq!(result.stdout, "x\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(vfs.read("/$?").unwrap(), b"x\n");
+    assert!(vfs.read("/1").is_err());
+}
+
+#[test]
 fn shell_command_execution_emits_span_with_command_and_exit_code() {
     let fs = MemoryFs::new();
     let vfs: &dyn VirtualFs = &fs;

@@ -53,7 +53,7 @@ fn parser_redirect_truncate() {
     assert_eq!(cmd.redirects[0].kind, crate::RedirectKind::Truncate);
     assert_eq!(
         cmd.redirects[0].target,
-        crate::RedirectTarget::File("/out.txt".to_string())
+        crate::RedirectTarget::File("/out.txt".to_string(), false)
     );
 }
 
@@ -66,7 +66,7 @@ fn parser_redirect_append() {
     assert_eq!(cmd.redirects[0].kind, crate::RedirectKind::Append);
     assert_eq!(
         cmd.redirects[0].target,
-        crate::RedirectTarget::File("/out.txt".to_string())
+        crate::RedirectTarget::File("/out.txt".to_string(), false)
     );
 }
 

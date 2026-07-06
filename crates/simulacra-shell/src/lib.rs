@@ -6,6 +6,7 @@
 mod awk;
 mod builtins;
 mod executor;
+mod expansion;
 mod heredoc;
 mod http_proxy;
 mod parser;
