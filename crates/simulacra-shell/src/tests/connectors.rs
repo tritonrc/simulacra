@@ -33,6 +33,92 @@ fn and_does_not_run_rhs_when_lhs_fails() {
 }
 
 #[test]
+fn false_and_echo_then_or_echo_runs_or_fallback() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "false && echo x || echo y");
+
+    assert_eq!(result.stdout, "y\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn true_or_echo_then_and_echo_runs_final_and_rhs() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "true || echo x && echo y");
+
+    assert_eq!(result.stdout, "y\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn skipped_and_rhs_does_not_block_following_or_chain() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        HashMap::new(),
+        "false && echo should-not-run || echo fallback && echo after",
+    );
+
+    assert_eq!(result.stdout, "fallback\nafter\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn skipped_or_rhs_does_not_block_following_and_chain() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        HashMap::new(),
+        "true || echo should-not-run && echo after || echo fallback",
+    );
+
+    assert_eq!(result.stdout, "after\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn executed_failure_in_mixed_chain_runs_following_or_rhs() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "true && false || echo recovered");
+
+    assert_eq!(result.stdout, "recovered\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn executed_success_in_mixed_chain_runs_following_and_rhs() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "false || true && echo continued");
+
+    assert_eq!(result.stdout, "continued\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
 fn and_long_chain_runs_all_when_each_succeeds() {
     let _guard = test_guard();
     let fs = MemoryFs::new();

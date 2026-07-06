@@ -48,6 +48,7 @@ resolved against the current shell `cwd`.
 - [x] `nonexistent_cmd` → exit 127, stderr contains "command not found".
 - [x] `false && echo yes` → no output (short-circuit).
 - [x] `false || echo fallback` → stdout "fallback\n".
+- [x] Mixed `&&`/`||` chains are evaluated left-to-right using the last executed pipeline status, so `false && echo x || echo y` prints "y\n" and `true || echo x && echo y` prints "y\n". **Tested in `false_and_echo_then_or_echo_runs_or_fallback`, `true_or_echo_then_and_echo_runs_final_and_rhs`, `skipped_and_rhs_does_not_block_following_or_chain`, `skipped_or_rhs_does_not_block_following_and_chain`, `executed_failure_in_mixed_chain_runs_following_or_rhs`, and `executed_success_in_mixed_chain_runs_following_and_rhs`.**
 - [x] `$VAR` expansion replaces with env value; undefined expands to empty string. **Tested in `dollar_var_expansion_replaces_with_env_value` and `undefined_variable_expands_to_empty_string`.**
 - [x] `$?` and `${?}` expansion report the previous executed pipeline status, including rightmost-command pipeline status and skipped short-circuit behavior, and single quotes suppress them. **Tested in `dollar_question_tracks_true_and_false_across_semicolons`, `dollar_question_after_pipeline_uses_rightmost_exit_code`, `dollar_question_preserves_status_across_skipped_short_circuit_commands`, `brace_dollar_question_expands_last_status`, and `single_quoted_dollar_question_stays_literal`.**
 - [x] `$(echo inner)` command substitution captures stdout. **Tested in `command_substitution_captures_stdout`.**

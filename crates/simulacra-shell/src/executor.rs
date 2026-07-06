@@ -112,34 +112,24 @@ impl<'a> ShellExecutor<'a> {
         let mut accumulated_stderr = String::new();
         let mut last_exit_code = 0;
 
-        let mut skipping = false;
+        let mut previous_connector = None;
 
         for item in &line.items {
-            if !skipping {
+            let should_execute = match previous_connector {
+                None | Some(Connector::Semicolon) => true,
+                Some(Connector::And) => last_exit_code == 0,
+                Some(Connector::Or) => last_exit_code != 0,
+            };
+
+            if should_execute {
                 let result = self.execute_pipeline(&item.pipeline);
                 accumulated_stdout.push_str(&result.stdout);
                 accumulated_stderr.push_str(&result.stderr);
                 last_exit_code = result.exit_code;
                 self.last_status = last_exit_code;
-
-                match item.connector {
-                    Some(Connector::And) => {
-                        if last_exit_code != 0 {
-                            skipping = true;
-                        }
-                    }
-                    Some(Connector::Or) => {
-                        if last_exit_code == 0 {
-                            skipping = true;
-                        }
-                    }
-                    Some(Connector::Semicolon) | None => {}
-                }
-            } else {
-                if matches!(item.connector, Some(Connector::Semicolon) | None) {
-                    skipping = false;
-                }
             }
+
+            previous_connector = item.connector;
         }
 
         CommandResult {
