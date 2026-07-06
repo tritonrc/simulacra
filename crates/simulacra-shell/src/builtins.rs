@@ -51,7 +51,7 @@ pub(crate) fn try_builtin(
         "wc" => Some(builtin_wc(args, stdin, vfs, cwd)),
         "find" => Some(builtin_find(args, vfs, cwd)),
         "sort" => Some(builtin_sort(args, stdin)),
-        "uniq" => Some(builtin_uniq(stdin)),
+        "uniq" => Some(builtin_uniq(args, stdin)),
         "cut" => Some(builtin_cut(args, stdin)),
         "tr" => Some(builtin_tr(args, stdin)),
         "tee" => Some(builtin_tee(args, stdin, vfs, cwd)),

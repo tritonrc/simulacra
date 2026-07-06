@@ -68,6 +68,7 @@ the current shell `cwd`.
 - [x] `sleep 0` and `sleep 1` cover common telemetry-wait snippets without leaving the shell emulator. **Tested in `builtin_commands.rs`.**
 - [x] `grep -rn`, `find -type f (...) -name`, `sed -n 's///p'`, and `grep -oP '(?<=\\s)\\S+'` cover common source-search and shell-recovery snippets. **Tested in `agent_shell_fidelity.rs`.**
 - [x] `rg`, `rg --files`, `rg -l`, and `rg -g '*.rs'` cover Codex-style source search snippets without leaving the VFS. **Tested in `agent_shell_fidelity.rs`.**
+- [x] `uniq -c` emits adjacent-run counts using coreutils-style right-justified count prefixes, and `sort -n`, `sort -r`, and `sort -nr` cover common coding-agent aggregation snippets such as `sort | uniq -c | sort -nr`. **Tested in `builtin_commands.rs` and `agent_shell_fidelity.rs`.**
 - [x] Multiline shell fragments split on newlines like `;`, while backslash-newline continues a command. **Tested in `parser_newline_splits_into_separate_items`, `newline_runs_rhs_after_lhs_like_semicolon`, and existing continuation tests.**
 - [x] Heredocs feed command stdin for file-writing and pipeline fragments. **Tested in `heredoc_writes_file_through_redirect`, `heredoc_feeds_pipeline_stdin`, and `headless_tool_fidelity.rs`.**
 

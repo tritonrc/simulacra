@@ -454,3 +454,30 @@ fn grep_only_matching_perl_whitespace_pattern_extracts_following_fields() {
     assert_eq!(result.stderr, "");
     assert_eq!(result.exit_code, 0);
 }
+
+#[test]
+fn uniq_count_prefixes_adjacent_duplicate_counts() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, "printf 'api\\napi\\nweb\\n' | uniq -c");
+
+    assert_eq!(result.stdout, "      2 api\n      1 web\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn sort_numeric_reverse_ranks_uniq_counts_for_agent_triage() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        "printf 'api\\nweb\\napi\\ncli\\napi\\nweb\\n' | sort | uniq -c | sort -nr",
+    );
+
+    assert_eq!(result.stdout, "      3 api\n      2 web\n      1 cli\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}

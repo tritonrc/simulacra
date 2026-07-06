@@ -201,7 +201,8 @@ EOF
 cat /workspace/heredoc.txt
 find /workspace -type f \( -name '*.rs' -o -name '*.md' \)
 printf 'keep a\nskip\nkeep b\n' | sed -n 's/^keep //p'
-printf 'a,b,c\nx,y,z\n' | awk -F, '{print $NF}'"#;
+printf 'a,b,c\nx,y,z\n' | awk -F, '{print $NF}'
+printf 'api\nweb\napi\ncli\napi\nweb\n' | sort | uniq -c | sort -nr"#;
     let js_probe = r#"import { readFileSync, writeFileSync } from 'fs';
 writeFileSync('/workspace/js.txt', 'js-sync-ok');
 console.log(readFileSync('/workspace/js.txt'));"#;
@@ -286,6 +287,10 @@ console.log(readFileSync('/workspace/js.txt'));"#;
     assert!(
         tool_output.contains("c") && tool_output.contains("z"),
         "awk field extraction should work over piped input: {tool_output}"
+    );
+    assert!(
+        shell_stdout.contains("      3 api\n      2 web\n      1 cli\n"),
+        "sort | uniq -c | sort -nr should support common aggregation triage snippets: {shell_stdout}"
     );
     assert!(
         tool_output.contains("js-sync-ok"),

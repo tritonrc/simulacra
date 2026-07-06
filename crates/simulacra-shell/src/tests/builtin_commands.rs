@@ -381,6 +381,34 @@ fn sort_orders_lines_alphabetically() {
 }
 
 #[test]
+fn sort_dash_r_orders_lines_reverse_alphabetically() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "printf 'b\\na\\nc\\n' | sort -r");
+
+    assert_eq!(result.stdout, "c\nb\na\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn sort_dash_n_orders_signed_integer_prefixes_numerically() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(
+        vfs,
+        HashMap::new(),
+        "printf '10 x\\n-2 y\\n9 z\\n' | sort -n",
+    );
+
+    assert_eq!(result.stdout, "-2 y\n9 z\n10 x\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
 fn uniq_removes_adjacent_duplicates() {
     let _guard = test_guard();
     let fs = MemoryFs::new();
@@ -390,6 +418,18 @@ fn uniq_removes_adjacent_duplicates() {
     let result = run_shell(vfs, HashMap::new(), "cat /f.txt | uniq");
 
     assert_eq!(result.stdout, "a\nb\nc\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn uniq_dash_c_counts_adjacent_runs_only() {
+    let _guard = test_guard();
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, HashMap::new(), "printf 'a\\na\\nb\\na\\n' | uniq -c");
+
+    assert_eq!(result.stdout, "      2 a\n      1 b\n      1 a\n");
     assert_eq!(result.exit_code, 0);
 }
 

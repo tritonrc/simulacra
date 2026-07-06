@@ -1,8 +1,27 @@
 use crate::CommandResult;
 
-pub(crate) fn builtin_sort(_args: &[String], stdin: &str) -> CommandResult {
+pub(crate) fn builtin_sort(args: &[String], stdin: &str) -> CommandResult {
     let mut lines: Vec<&str> = stdin.lines().collect();
-    lines.sort();
+    let numeric = args.iter().any(|arg| flag_contains(arg, 'n'));
+    let reverse = args.iter().any(|arg| flag_contains(arg, 'r'));
+
+    if numeric {
+        lines.sort_by(|left, right| {
+            let left_key = leading_number(left);
+            let right_key = leading_number(right);
+            let numeric_order = if reverse {
+                right_key.cmp(&left_key)
+            } else {
+                left_key.cmp(&right_key)
+            };
+            numeric_order.then_with(|| left.trim_start().cmp(right.trim_start()))
+        });
+    } else if reverse {
+        lines.sort_by(|left, right| right.cmp(left));
+    } else {
+        lines.sort();
+    }
+
     if lines.is_empty() {
         CommandResult::success("")
     } else {
@@ -10,17 +29,66 @@ pub(crate) fn builtin_sort(_args: &[String], stdin: &str) -> CommandResult {
     }
 }
 
-pub(crate) fn builtin_uniq(stdin: &str) -> CommandResult {
+pub(crate) fn builtin_uniq(args: &[String], stdin: &str) -> CommandResult {
+    let count = args.iter().any(|arg| flag_contains(arg, 'c'));
     let mut out = String::new();
     let mut prev: Option<&str> = None;
+    let mut run_count = 0usize;
+
     for line in stdin.lines() {
-        if prev != Some(line) {
-            out.push_str(line);
-            out.push('\n');
-            prev = Some(line);
+        if prev == Some(line) {
+            run_count += 1;
+            continue;
         }
+        if let Some(value) = prev {
+            push_uniq_line(&mut out, value, run_count, count);
+        }
+        prev = Some(line);
+        run_count = 1;
+    }
+    if let Some(value) = prev {
+        push_uniq_line(&mut out, value, run_count, count);
     }
     CommandResult::success(out)
+}
+
+fn flag_contains(arg: &str, flag: char) -> bool {
+    if let Some(short_flags) = arg.strip_prefix('-')
+        && !short_flags.starts_with('-')
+    {
+        return short_flags.chars().any(|candidate| candidate == flag);
+    }
+
+    matches!(
+        (flag, arg),
+        ('n', "--numeric-sort") | ('r', "--reverse") | ('c', "--count")
+    )
+}
+
+fn leading_number(line: &str) -> i64 {
+    let trimmed = line.trim_start();
+    let mut end = 0usize;
+    for (index, ch) in trimmed.char_indices() {
+        if index == 0 && matches!(ch, '+' | '-') {
+            end = ch.len_utf8();
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    trimmed[..end].parse().unwrap_or(0)
+}
+
+fn push_uniq_line(out: &mut String, line: &str, count: usize, show_count: bool) {
+    if show_count {
+        out.push_str(&format!("{count:7}"));
+        out.push(' ');
+    }
+    out.push_str(line);
+    out.push('\n');
 }
 
 pub(crate) fn builtin_cut(args: &[String], stdin: &str) -> CommandResult {
