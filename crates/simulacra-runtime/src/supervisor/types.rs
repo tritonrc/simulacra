@@ -7,6 +7,12 @@ pub type BoxTaskFuture =
 /// Factory for creating agent tasks. Allows the supervisor to spawn child
 /// agents without knowing the concrete task implementation.
 pub trait TaskFactory: Send + Sync {
+    /// Validate that the factory can accept this spawn before the supervisor
+    /// returns a live child handle.
+    fn validate_spawn_config(&self, _config: &SpawnConfig) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     /// Create a task future for the given spawn configuration and cancellation token.
     fn create_task(&self, config: SpawnConfig, cancellation: CancellationToken) -> BoxTaskFuture;
 

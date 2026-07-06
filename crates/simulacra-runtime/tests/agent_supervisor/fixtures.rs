@@ -66,6 +66,7 @@ impl TaskFactory for NoopTaskFactory {
                 exit_reason: ExitReason::Complete,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             })
@@ -287,6 +288,7 @@ fn completed_output() -> AgentLoopOutput {
             input_tokens: 4,
             output_tokens: 3,
         },
+            reported_tool_uses: None,
         used_turns: 2,
         used_cost: rust_decimal::Decimal::new(15, 1),
     }

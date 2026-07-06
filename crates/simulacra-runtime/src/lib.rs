@@ -4,6 +4,7 @@
 //! loop, and guardrail traits. This is the top-level orchestration layer that
 //! composes sandbox, provider, context, and MCP capabilities.
 
+mod acp_child;
 mod activity_sink;
 mod agent_loop;
 mod error;
@@ -25,6 +26,7 @@ mod tests;
 mod vfs_hook;
 
 // Re-export all public types at the crate root.
+pub use acp_child::{AcpChildFuture, AcpChildRequest, AcpChildRuntime};
 pub use activity_sink::{
     ActivitySink, ChannelActivitySink, ForwardingActivitySink, NoopActivitySink,
 };

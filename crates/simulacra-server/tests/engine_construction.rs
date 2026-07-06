@@ -14,7 +14,9 @@ fn valid_engine_config() -> SimulacraConfig {
     agent_types.insert(
         "worker".to_string(),
         AgentTypeConfig {
+            backend: Default::default(),
             model: "ollama:llama3".to_string(),
+            acp_profile: None,
             system_prompt: Some("You are the worker.".to_string()),
             skills: vec![],
             max_turns: Some(8),

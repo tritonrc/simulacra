@@ -20,7 +20,9 @@ fn engine_config_with_tenants(tenants: HashMap<String, SimulacraTenantConfig>) -
     agent_types.insert(
         "worker".to_string(),
         AgentTypeConfig {
+            backend: Default::default(),
             model: "ollama:llama3".to_string(),
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: Some(5),

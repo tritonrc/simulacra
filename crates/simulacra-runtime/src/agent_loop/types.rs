@@ -16,6 +16,9 @@ pub struct AgentLoopOutput {
     pub exit_reason: ExitReason,
     pub messages: Vec<Message>,
     pub token_usage: TokenUsage,
+    /// Optional structured tool-use count reported by a non-native child
+    /// runtime, such as ACP.
+    pub reported_tool_uses: Option<u64>,
     /// Total turns consumed by this agent loop invocation.
     pub used_turns: u32,
     /// Total cost consumed by this agent loop invocation.

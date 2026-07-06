@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rust_decimal::Decimal;
-use simulacra_config::{SimulacraConfig, TierMap, build_capability_token};
+use simulacra_config::{AgentBackend, SimulacraConfig, TierMap, build_capability_token};
 use simulacra_types::{
     AgentId, CapabilityToken, ContextStrategy, JournalStorage, Message, NetworkPermission,
     PathPattern, Provider, ResourceBudget, ToolDefinition, ToolError, VirtualFs,
@@ -45,9 +45,10 @@ use simulacra_vfs::{HookLister, ProcFs, ProcState, ToolLister};
 use crate::exit_reason::exit_reason_to_snake_case;
 use crate::supervisor::{ChildStatus, ChildTerminalResult, WaitChildResult, WaitChildrenResult};
 use crate::{
-    ActivitySink, AgentInputQueue, AgentLoop, AgentLoopConfig, AgentLoopOutput, BoxTaskFuture,
-    CancellationToken, CountingJournalStorage, ForwardingActivitySink, MessagePriority,
-    RuntimeError, SpawnConfig, SupervisorMessage, SupervisorPayload,
+    AcpChildRequest, AcpChildRuntime, ActivitySink, AgentInputQueue, AgentLoop, AgentLoopConfig,
+    AgentLoopOutput, BoxTaskFuture, CancellationToken, CountingJournalStorage,
+    ForwardingActivitySink, MessagePriority, RuntimeError, SpawnConfig, SupervisorMessage,
+    SupervisorPayload,
 };
 
 use child_environment::{ChildEnvironmentSpec, ChildSpawnToolSpec, build_child_environment};

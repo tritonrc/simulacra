@@ -13,6 +13,7 @@ async fn spawn_agent_tool_exit_reason_max_turns_uses_snake_case_format_per_spec(
             input_tokens: 5,
             output_tokens: 3,
         },
+            reported_tool_uses: None,
         used_turns: 3,
         used_cost: Decimal::ZERO,
     };
@@ -94,6 +95,7 @@ fn agent_task_factory_performs_three_way_capability_intersection_parent_config_a
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     // Override grants: shell=true, javascript=false
@@ -257,6 +259,7 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_has_no_assista
             input_tokens: 5,
             output_tokens: 0,
         },
+            reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     };
@@ -278,6 +281,7 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_messages_list_
         exit_reason: ExitReason::Complete,
         messages: vec![],
         token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     };
@@ -307,6 +311,7 @@ async fn join_child_agent_returns_structured_terminal_success_metadata() {
             input_tokens: 9,
             output_tokens: 4,
         },
+            reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };
@@ -1024,6 +1029,7 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
                                     input_tokens: 11,
                                     output_tokens: 7,
                                 },
+            reported_tool_uses: None,
                                 used_turns: 1,
                                 used_cost: Decimal::ZERO,
                             }),

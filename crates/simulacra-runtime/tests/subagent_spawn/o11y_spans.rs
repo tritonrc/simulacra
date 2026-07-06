@@ -101,6 +101,7 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
             input_tokens: 8,
             output_tokens: 5,
         },
+            reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     })]);
@@ -398,6 +399,7 @@ async fn spawn_agent_tool_exit_reason_uses_snake_case_format_per_spec() {
             input_tokens: 5,
             output_tokens: 3,
         },
+            reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };
@@ -427,6 +429,7 @@ async fn spawn_agent_tool_exit_reason_completed_uses_snake_case_format_per_spec(
             input_tokens: 5,
             output_tokens: 3,
         },
+            reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };

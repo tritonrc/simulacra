@@ -2072,6 +2072,7 @@ fn start_supervisor_actor(
         child_cell_configurator,
         child_tool_registrar,
         child_provider_factory: parts.child_provider_factory,
+        acp_child_runtime: None,
     });
     let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory(
         parts.parent_capability,
@@ -2180,7 +2181,9 @@ fn default_config(task: &str) -> SimulacraConfig {
     agent_types.insert(
         "default".to_string(),
         AgentTypeConfig {
+            backend: Default::default(),
             model,
+            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: Some(50),

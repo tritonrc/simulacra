@@ -545,6 +545,7 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
                 exit_reason: ExitReason::Cancelled,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             },
@@ -674,6 +675,7 @@ async fn join_child_terminal_result_includes_elapsed_ms_and_structured_tool_use_
                     input_tokens: 3,
                     output_tokens: 2,
                 },
+            reported_tool_uses: None,
                 used_turns: 1,
                 used_cost: Decimal::ZERO,
             },
@@ -1083,6 +1085,7 @@ fn wait_any_output(message: &str, input_tokens: u64, output_tokens: u64) -> Agen
             input_tokens,
             output_tokens,
         },
+            reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     }

@@ -156,7 +156,9 @@ fn simulacra_config(base_url: &str) -> SimulacraConfig {
     agent_types.insert(
         "worker".to_string(),
         AgentTypeConfig {
+            backend: Default::default(),
             model: "ollama:llama3".to_string(),
+            acp_profile: None,
             system_prompt: Some("Use the available tools to produce the requested report.".into()),
             skills: vec![],
             max_turns: Some(8),

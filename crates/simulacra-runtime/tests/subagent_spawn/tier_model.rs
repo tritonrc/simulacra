@@ -51,6 +51,7 @@ fn generic_spawn_with_tier_uses_tier_model() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     let mut spawn = generic_spawn_config(
@@ -124,6 +125,7 @@ fn generic_spawn_without_tier_inherits_parent_model() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     let spawn = generic_spawn_config(
@@ -323,6 +325,7 @@ fn generic_spawn_empty_system_prompt_uses_default() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     // Empty system_prompt — should fall back to DEFAULT_SYSTEM_PROMPT

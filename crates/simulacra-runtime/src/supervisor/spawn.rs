@@ -224,6 +224,7 @@ impl AgentSupervisor {
         let Some(factory) = self.task_factory.clone() else {
             return Err(RuntimeError::SpawnMissingTask);
         };
+        factory.validate_spawn_config(&config)?;
 
         self.prepare_spawn(&config)?;
 
@@ -458,6 +459,9 @@ impl AgentSupervisor {
 }
 
 pub(super) fn count_tool_uses(output: &AgentLoopOutput) -> u64 {
+    if let Some(reported) = output.reported_tool_uses {
+        return reported;
+    }
     // Tool-result messages are the structured child-output record of tool invocations.
     output
         .messages

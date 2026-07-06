@@ -117,7 +117,9 @@ async fn main() {
     agent_types.insert(
         "default".to_string(),
         simulacra_config::AgentTypeConfig {
+            backend: Default::default(),
             model: "claude-sonnet-4-6".into(),
+            acp_profile: None,
             system_prompt: None,
             max_turns: Some(25),
             max_tokens: Some(80000),

@@ -67,6 +67,7 @@ fn generic_spawn_with_system_prompt_creates_child() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     let spawn = generic_spawn_config(
@@ -144,6 +145,7 @@ fn agent_task_factory_attaches_child_cancellation_token() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
     let token = CancellationToken::new(Duration::from_secs(1));
     token.signal();
@@ -357,6 +359,7 @@ fn generic_spawn_inherits_parent_capabilities() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     // Generic spawn with no capability override
@@ -449,6 +452,7 @@ fn generic_spawn_with_capability_override_intersects_parent() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            acp_child_runtime: None,
     };
 
     // Generic spawn with override: javascript=false

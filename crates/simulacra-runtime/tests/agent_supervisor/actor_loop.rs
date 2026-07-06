@@ -368,6 +368,7 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
                     exit_reason: ExitReason::Cancelled,
                     messages: vec![],
                     token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
                     used_turns: 0,
                     used_cost: Decimal::ZERO,
                 })
@@ -662,6 +663,7 @@ async fn steering_live_child_is_accepted_and_completed_child_is_rejected() {
                 exit_reason: ExitReason::Complete,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             },

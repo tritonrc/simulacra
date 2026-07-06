@@ -1,5 +1,29 @@
 use super::*;
 
+struct CountingActivitySink {
+    inner: Arc<dyn ActivitySink>,
+    tool_finishes: Arc<AtomicU64>,
+}
+
+impl CountingActivitySink {
+    fn new(inner: Arc<dyn ActivitySink>, tool_finishes: Arc<AtomicU64>) -> Self {
+        Self {
+            inner,
+            tool_finishes,
+        }
+    }
+}
+
+impl ActivitySink for CountingActivitySink {
+    fn emit(&self, event: simulacra_types::ActivityEvent) {
+        if matches!(event, simulacra_types::ActivityEvent::ToolFinish { .. }) {
+            self.tool_finishes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.inner.emit(event);
+    }
+}
+
 /// Factory that creates child AgentLoop instances for the supervisor.
 pub struct AgentTaskFactory {
     pub config: SimulacraConfig,
@@ -35,9 +59,30 @@ pub struct AgentTaskFactory {
     /// this unset so children use the normal provider adapter; tests and
     /// headless harnesses can inject scripted child providers.
     pub child_provider_factory: Option<ChildProviderFactory>,
+    /// Optional ACP runtime for agent types configured with `backend = "acp"`.
+    pub acp_child_runtime: Option<Arc<dyn AcpChildRuntime>>,
 }
 
 impl crate::TaskFactory for AgentTaskFactory {
+    fn validate_spawn_config(&self, spawn_config: &SpawnConfig) -> Result<(), RuntimeError> {
+        let Some(agent_type_name) = spawn_config.agent_type.as_deref() else {
+            return Ok(());
+        };
+        let Some(agent_type_config) = self.config.agent_types.get(agent_type_name) else {
+            return Ok(());
+        };
+        if agent_type_config.backend == AgentBackend::Acp && self.acp_child_runtime.is_none() {
+            return Err(RuntimeError::AcpChildRuntimeMissing {
+                agent_type: agent_type_name.to_string(),
+                acp_profile: agent_type_config
+                    .acp_profile
+                    .clone()
+                    .unwrap_or_else(|| "<missing>".to_string()),
+            });
+        }
+        Ok(())
+    }
+
     fn create_task(
         &self,
         spawn_config: SpawnConfig,
@@ -73,6 +118,7 @@ impl crate::TaskFactory for AgentTaskFactory {
         let child_cell_configurator = self.child_cell_configurator.clone();
         let child_tool_registrar = self.child_tool_registrar.clone();
         let child_provider_factory = self.child_provider_factory.clone();
+        let acp_child_runtime = self.acp_child_runtime.clone();
 
         Box::pin(async move {
             let mut input_queue = Some(input_queue);
@@ -171,23 +217,11 @@ impl crate::TaskFactory for AgentTaskFactory {
                 ))
             })?;
 
-            let model = agent_type_config.model.clone();
-            let system_prompt = agent_type_config
-                .system_prompt
+            let agent_type_name = spawn_config
+                .agent_type
                 .clone()
-                .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-
+                .unwrap_or_else(|| "generic".to_string());
             let capability = build_capability_token(&agent_type_config);
-
-            // Capability intersection per spec §22:
-            // - When spawn_config.capability is Some, three-way: config ∩ override ∩ parent
-            // - When None (LLM omitted capabilities field), two-way: config ∩ parent
-            //
-            // W1: when the override doesn't author memory, inherit the configured
-            // agent type's memory before intersecting. The agent_type config is the
-            // authoritative source of memory grants for configured spawns; without
-            // this, an LLM-supplied capabilities override would strip the configured
-            // memory grants by intersecting with default-empty memory.
             let effective_capability = match spawn_config.capability {
                 Some(ref override_cap) => {
                     let override_with_memory =
@@ -198,6 +232,69 @@ impl crate::TaskFactory for AgentTaskFactory {
                 }
                 None => capability.intersect(&parent_capability),
             };
+
+            if agent_type_config.backend == AgentBackend::Acp {
+                let hook_system_prompt = agent_type_config.system_prompt.as_deref().unwrap_or("");
+                run_spawn_before_hook(
+                    pipeline.as_ref(),
+                    &agent_type_name,
+                    hook_system_prompt,
+                    &spawn_config.budget,
+                )?;
+
+                let acp_profile = agent_type_config
+                    .acp_profile
+                    .clone()
+                    .filter(|profile| !profile.trim().is_empty())
+                    .ok_or_else(|| {
+                        RuntimeError::Session(format!(
+                            "agent_type {agent_type_name} uses ACP backend but has no acp_profile"
+                        ))
+                    })?;
+                let runtime =
+                    acp_child_runtime.ok_or_else(|| RuntimeError::AcpChildRuntimeMissing {
+                        agent_type: agent_type_name.clone(),
+                        acp_profile: acp_profile.clone(),
+                    })?;
+                let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
+                    spawn_config.agent_id.0.clone(),
+                    agent_type_name.clone(),
+                    parent_sink,
+                ));
+                let tool_finishes = Arc::new(AtomicU64::new(0));
+                let sink: Arc<dyn ActivitySink> =
+                    Arc::new(CountingActivitySink::new(sink, Arc::clone(&tool_finishes)));
+                let request = AcpChildRequest {
+                    child_id: spawn_config.agent_id.clone(),
+                    parent_id: spawn_config.parent_id.clone(),
+                    agent_type: agent_type_name.clone(),
+                    acp_profile,
+                    task: task.clone(),
+                    budget: spawn_config.budget.clone(),
+                    capability: effective_capability,
+                };
+                let result = runtime.start_child(request, cancellation, sink).await;
+                run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);
+                let mut output = result?;
+                let activity_tool_uses = tool_finishes.load(std::sync::atomic::Ordering::Relaxed);
+                if activity_tool_uses > 0 {
+                    let output_tool_uses = output.reported_tool_uses.unwrap_or_else(|| {
+                        output
+                            .messages
+                            .iter()
+                            .filter(|message| message.role == simulacra_types::Role::Tool)
+                            .count() as u64
+                    });
+                    output.reported_tool_uses = Some(output_tool_uses.max(activity_tool_uses));
+                }
+                return Ok(output);
+            }
+
+            let model = agent_type_config.model.clone();
+            let system_prompt = agent_type_config
+                .system_prompt
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
 
             // Check before moving effective_capability into child_config.
             let child_can_spawn = !effective_capability.spawn_types.is_empty();
@@ -210,10 +307,6 @@ impl crate::TaskFactory for AgentTaskFactory {
                 capability: effective_capability,
             };
 
-            let agent_type_name = spawn_config
-                .agent_type
-                .clone()
-                .unwrap_or_else(|| "generic".to_string());
             let provider = build_child_provider(
                 child_provider_factory.as_ref(),
                 &provider_kind,

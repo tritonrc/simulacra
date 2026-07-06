@@ -31,7 +31,9 @@ pub(super) fn test_config(
 
 pub(super) fn empty_agent_type() -> simulacra_config::AgentTypeConfig {
     simulacra_config::AgentTypeConfig {
+        backend: Default::default(),
         model: "test-model".to_string(),
+        acp_profile: None,
         system_prompt: None,
         skills: vec![],
         max_turns: None,

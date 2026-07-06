@@ -21,6 +21,7 @@ impl TaskFactory for NoopTaskFactory {
                 exit_reason: ExitReason::Complete,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
+                reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             })

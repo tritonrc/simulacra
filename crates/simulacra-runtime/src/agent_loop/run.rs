@@ -112,6 +112,7 @@ impl AgentLoop {
                         exit_reason,
                         messages,
                         token_usage: total_usage,
+                        reported_tool_uses: None,
                         used_turns: self.budget.used_turns,
                         used_cost: self.budget.used_cost,
                     });
@@ -144,6 +145,7 @@ impl AgentLoop {
                         exit_reason,
                         messages,
                         token_usage: total_usage,
+                        reported_tool_uses: None,
                         used_turns: self.budget.used_turns,
                         used_cost: self.budget.used_cost,
                     });
@@ -157,6 +159,7 @@ impl AgentLoop {
             exit_reason: ExitReason::MaxTurns,
             messages,
             token_usage: total_usage,
+            reported_tool_uses: None,
             used_turns: self.budget.used_turns,
             used_cost: self.budget.used_cost,
         })

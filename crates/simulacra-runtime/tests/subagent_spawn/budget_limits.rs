@@ -211,6 +211,7 @@ async fn child_token_usage_is_rolled_up_from_agent_loop_output_not_stale_spawn_b
             input_tokens: 19,
             output_tokens: 23,
         },
+            reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     })]);
@@ -243,6 +244,7 @@ async fn child_turn_and_cost_usage_are_rolled_up_from_agent_loop_output_not_stal
         exit_reason: ExitReason::Complete,
         messages: vec![],
         token_usage: TokenUsage::default(),
+            reported_tool_uses: None,
         used_turns: 2,
         used_cost: Decimal::new(375, 2),
     })]);

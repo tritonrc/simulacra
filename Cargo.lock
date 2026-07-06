@@ -4487,6 +4487,7 @@ dependencies = [
  "simulacra-vfs",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

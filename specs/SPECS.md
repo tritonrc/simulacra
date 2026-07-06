@@ -30,3 +30,4 @@
 | [S051](S051-agent-hitl-resume-runtime.md) | Agent HITL Resume Runtime | Active | `simulacra-runtime`, `simulacra-server` |
 | [S052](S052-workflow-runtime.md) | Workflow Runtime | Active | `simulacra-types`, `simulacra-runtime`, `simulacra-workflow`, `simulacra-server` |
 | [S054](S054-child-agent-orchestration.md) | Child Agent Orchestration | Active | `simulacra-cli`, `simulacra-runtime`, `simulacra-server` |
+| [S056](S056-acp-child-agents.md) | ACP Child Agents | Active | `simulacra-config`, `simulacra-runtime`, `simulacra-cli`, `simulacra-server` |

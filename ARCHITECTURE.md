@@ -6,6 +6,13 @@ This document defines architectural positions and system invariants. It is the h
 
 Simulacra is a single Rust binary that creates sandboxed agent environments with a virtual filesystem, shell emulator, and QuickJS runtime. No containers. No VMs. Agents configured via TOML.
 
+ACP child agents are an explicit child-runtime boundary exception to the local
+execution identity above. When a configured child agent uses the ACP backend,
+Simulacra supervises the handle, budget reservation, cancellation, journaling,
+activity forwarding, and terminal summary, but the incorporating system supplies
+the ACP transport/runtime. ACP child execution location, sandboxing, tools, and
+filesystem authority are opaque to Simulacra.
+
 ## Crate Dependency Graph
 
 ```
@@ -62,6 +69,18 @@ These are behavioral constraints that apply across all specs. They are non-negot
 - MCP servers are accessed via HTTP/SSE (now) or WASM in-process (future).
 - **Why:** Single-binary philosophy. Spawning a child process implicitly requires that binary (and possibly Node.js or Python) on the host. This breaks the "cargo install simulacra and you're running" promise.
 - **ADR:** See `docs/decisions/001-http-only-mcp.md`.
+
+### ACP Child Runtime Boundary
+
+- ACP child agents are not MCP servers and are not governed by MCP transport
+  restrictions.
+- Simulacra does not require local VFS construction, `AgentCell` construction,
+  native tool registration, or sandbox inspection for ACP child execution.
+- The ACP profile identifier is opaque configuration. Simulacra passes it to an
+  injected ACP runtime port and does not interpret filesystem, tool, transport,
+  or sandbox authority behind that profile.
+- If no ACP runtime is injected, spawning an ACP child fails before native child
+  execution machinery is constructed.
 
 ### Capabilities at the Call Site
 
