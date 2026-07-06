@@ -10,7 +10,8 @@
 1. The QuickJS runtime uses a custom module resolver that distinguishes three specifier classes by prefix:
    - **`simulacra:`** prefix — local standard library modules provided by the host (e.g., `import { readFile } from "simulacra:fs"`).
    - **`http://` or `https://`** prefix — remote modules fetched over the network (e.g., `import lodash from "https://esm.sh/lodash"`).
-   - **Bare specifiers** (anything else) — rejected with a clear error: `"Bare specifier 'foo' is not allowed. Use 'simulacra:' for built-in modules or 'http(s)://' for remote modules."`.
+   - **Node-like built-in aliases** (`fs`, `console`, `process`, `path`, `crypto`) — resolved to the corresponding `simulacra:` module.
+   - **Other bare specifiers** — rejected with a clear error: `"Bare specifier 'foo' is not allowed. Built-in module aliases are available for: fs, console, process, path, crypto. Use 'simulacra:' for built-in modules or 'http(s)://' for remote modules."`.
 2. `require()` remains unavailable. Attempting `require()` throws an error (unchanged from S003).
 3. Relative specifiers (`./foo.js`, `../bar.js`) resolve relative to the importing module's path within the VFS. Only VFS-resident modules may use relative imports.
 
@@ -18,11 +19,13 @@
 
 4. Simulacra-provided modules are registered at runtime startup as synthetic ESM modules backed by Rust host functions. They are NOT loaded from VFS files — they are compiled into the runtime.
 5. Initial `simulacra:` modules:
-   - `simulacra:fs` — exports `readFile(path)`, `writeFile(path, data)`. These delegate through the `AgentCell` proxy (same as S003's `fs.readFileSync` / `fs.writeFileSync`, but async and ESM).
-   - `simulacra:console` — exports `log(...args)`. Delegates to the same virtual stdout capture as the `console` global.
+   - `simulacra:fs` — exports `readFile(path)`, `writeFile(path, data)`, `readFileSync(path)`, `writeFileSync(path, data)`, `existsSync(path)`, `mkdirSync(path)`, `readdirSync(path)`, `statSync(path)`, `unlinkSync(path)`, `renameSync(oldPath, newPath)`, and `appendFileSync(path, data)`. These delegate through the `AgentCell` proxy.
+   - `simulacra:console` — exports `log(...args)`, `error(...args)`, `warn(...args)`, `info(...args)`, and `debug(...args)`. Delegates to the same virtual stdout capture as the `console` global.
    - `simulacra:process` — exports `env`, `cwd()`, `exit(code)`. Same semantics as S003's `process` global.
-6. The existing `fs`, `process`, and `console` globals (S003) remain available as legacy convenience for simple scripts. The `simulacra:` modules are the canonical API. New host APIs (e.g., `simulacra:http`) are added ONLY as `simulacra:` modules — never as new globals.
-7. Importing an unknown `simulacra:` module (e.g., `simulacra:crypto`) produces an error: `"Unknown simulacra module: 'crypto'. Available: fs, console, process."`.
+   - `simulacra:path` — exports path helpers backed by Rust host functions.
+   - `simulacra:crypto` — exports supported crypto helpers backed by Rust host functions.
+6. The existing `fs`, `process`, and `console` globals (S003) remain available as legacy convenience for simple scripts. The `simulacra:` modules are the canonical API. Built-in bare aliases are compatibility imports for these same modules, not package resolution. New host APIs (e.g., `simulacra:http`) are added ONLY as `simulacra:` modules — never as new globals.
+7. Importing an unknown `simulacra:` module (e.g., `simulacra:nonexistent`) produces an error: `"Unknown simulacra module: 'nonexistent'. Available: fs, console, process, path, crypto."`.
 
 ### Remote Modules (`http://` / `https://`)
 

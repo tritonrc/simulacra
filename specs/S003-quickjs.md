@@ -8,6 +8,7 @@
 1. Each `AgentCell` gets exactly one `JsRuntime` wrapper for host configuration and caches, but each `eval` creates a fresh QuickJS runtime/context. JS globals, prototypes, monkey patches, and module instances are never shared across tool calls.
 2. JS code runs in ESM mode. `require()` is not available.
 3. Host functions (`fs.readFileSync`, `fs.writeFileSync`, `console.log`) are implemented in Rust, not JS polyfills.
+3a. Built-in modules can be imported with either `simulacra:*` names or Node-like aliases for the same mediated modules (`fs`, `console`, `process`, `path`, `crypto`). Arbitrary bare package imports remain unsupported.
 4. **Golden Rule delegation:** `simulacra-quickjs` itself does NOT check capabilities, budgets, or write journal entries. It is a pure execution environment. All Golden Rule enforcement happens at the `AgentCell` proxy layer (see S011). Host functions that perform side effects (fs, fetch) call back through `AgentCell` proxy methods, which enforce the full chain.
 5. `console.log(...)` writes to the agent's virtual stdout, not real stdout. Output formatting follows Node.js/browser conventions (not `JSON.stringify`, not Rust Debug):
    - Strings: bare (no quotes) at top level, single-quoted when nested inside arrays/objects.
@@ -21,6 +22,7 @@
    - Item truncation: after 100 entries, `... N more items`.
 6. `fs.readFileSync(path)` reads from the VirtualFs (via callback to `AgentCell`). Returns string (UTF-8).
 7. `fs.writeFileSync(path, data)` writes to the VirtualFs (via callback to `AgentCell`). Creates parent dirs implicitly.
+7a. `simulacra:fs` and `fs` ESM module imports expose `readFileSync` and `writeFileSync` aliases in addition to the existing `readFile` and `writeFile` exports.
 8. Uncaught JS exceptions produce an error result with the exception message and stack trace.
 9. Infinite loops are bounded by a fuel/interrupt mechanism. Timeout is configurable.
 
@@ -41,6 +43,8 @@ Fetch API behavior is specified in S021. The `fetch()` global, `Headers`, `Reque
 - [x] Uncaught exception returns error with message.
 - [x] Host function respects VFS path resolution (no escape from virtual root).
 - [x] `require()` is not available (throws error). **Tested in `require_is_not_available_and_throws_error`.**
+- [x] ESM imports of built-in modules work with both `simulacra:*` names and Node-like aliases. **Tested in `bare_fs_default_import_aliases_simulacra_fs` and `bare_fs_named_import_aliases_simulacra_fs`.**
+- [x] `simulacra:fs` exposes `readFileSync` and `writeFileSync` as named and default-export methods. **Tested in `simulacra_fs_sync_named_import_style_is_supported` and `simulacra_fs_default_export_exposes_sync_aliases`.**
 - [x] Infinite loop is interrupted by timeout/fuel mechanism. **Tested in `infinite_loop_is_interrupted_by_timeout`.**
 - [x] Host functions for `fs` delegate to `AgentCell` proxy (not directly to VFS). **Tested in `fs_host_functions_delegate_through_agentcell_proxy_instead_of_direct_vfs_spans`. Implemented via `FsProxy` trait (S011).**
 - [x] `fs.writeFileSync` and `fs.readFileSync` are registered as host functions (Rust, not polyfills). **Tested in `fs_host_functions_are_native_not_js_polyfills`.**

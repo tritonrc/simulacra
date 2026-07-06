@@ -16,7 +16,7 @@ fn simulacra_fs_namespace_object_keys_list_all_expected_exports() {
     assert_eq!(
         output.result.as_deref(),
         Some(
-            r#"["appendFileSync","default","existsSync","mkdirSync","readFile","readdirSync","renameSync","statSync","unlinkSync","writeFile"]"#
+            r#"["appendFileSync","default","existsSync","mkdirSync","readFile","readFileSync","readdirSync","renameSync","statSync","unlinkSync","writeFile","writeFileSync"]"#
         )
     );
 }
@@ -37,7 +37,7 @@ fn simulacra_fs_namespace_get_own_property_names_include_all_exports() {
     assert_eq!(
         output.result.as_deref(),
         Some(
-            r#"["appendFileSync","default","existsSync","mkdirSync","readFile","readdirSync","renameSync","statSync","unlinkSync","writeFile"]"#
+            r#"["appendFileSync","default","existsSync","mkdirSync","readFile","readFileSync","readdirSync","renameSync","statSync","unlinkSync","writeFile","writeFileSync"]"#
         )
     );
 }
@@ -261,4 +261,139 @@ fn new_native_exports_are_available_after_s016() {
         .expect("existsSync and mkdirSync should be available after S016 implementation");
 
     assert_eq!(output.result.as_deref(), Some("function|function"));
+}
+
+#[test]
+fn simulacra_fs_sync_named_import_style_is_supported() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import { readFileSync, writeFileSync } from "simulacra:fs";
+            writeFileSync("/workspace/sync-named.txt", "sync named");
+            readFileSync("/workspace/sync-named.txt");
+            "#,
+        )
+        .expect("sync named imports from simulacra:fs should succeed");
+
+    assert_eq!(output.result.as_deref(), Some("sync named"));
+}
+
+#[test]
+fn simulacra_fs_default_export_exposes_sync_aliases() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import fs from "simulacra:fs";
+            fs.writeFileSync("/workspace/sync-default.txt", "sync default");
+            fs.readFileSync("/workspace/sync-default.txt");
+            "#,
+        )
+        .expect("simulacra:fs default export should expose sync aliases");
+
+    assert_eq!(output.result.as_deref(), Some("sync default"));
+}
+
+#[test]
+fn bare_fs_default_import_aliases_simulacra_fs() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import fs from "fs";
+            fs.writeFileSync("/workspace/bare-default.txt", "bare default");
+            fs.readFileSync("/workspace/bare-default.txt");
+            "#,
+        )
+        .expect("bare fs default import should alias simulacra:fs");
+
+    assert_eq!(output.result.as_deref(), Some("bare default"));
+}
+
+#[test]
+fn bare_fs_named_import_aliases_simulacra_fs() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import { readFileSync, writeFileSync } from "fs";
+            writeFileSync("/workspace/bare-named.txt", "bare named");
+            readFileSync("/workspace/bare-named.txt");
+            "#,
+        )
+        .expect("bare fs named imports should alias simulacra:fs");
+
+    assert_eq!(output.result.as_deref(), Some("bare named"));
+}
+
+#[test]
+fn bare_console_alias_imports_simulacra_console() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import { log } from "console";
+            log("bare console");
+            "#,
+        )
+        .expect("bare console import should alias simulacra:console");
+
+    assert_eq!(output.stdout, "bare console\n");
+}
+
+#[test]
+fn bare_process_alias_imports_simulacra_process() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import process from "process";
+            process.cwd();
+            "#,
+        )
+        .expect("bare process import should alias simulacra:process");
+
+    assert_eq!(output.result.as_deref(), Some("/workspace"));
+}
+
+#[test]
+fn bare_path_alias_imports_simulacra_path() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import path from "path";
+            path.join("a", "b");
+            "#,
+        )
+        .expect("bare path import should alias simulacra:path");
+
+    assert_eq!(output.result.as_deref(), Some("a/b"));
+}
+
+#[test]
+fn bare_crypto_alias_imports_simulacra_crypto() {
+    let (runtime, _) = make_runtime();
+
+    let output = runtime
+        .eval(
+            r#"
+            import { createHash } from "crypto";
+            createHash("sha256").update("hello").digest("hex");
+            "#,
+        )
+        .expect("bare crypto import should alias simulacra:crypto");
+
+    assert_eq!(
+        output.result.as_deref(),
+        Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    );
 }

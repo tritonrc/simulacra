@@ -49,7 +49,7 @@ fn simulacra_process_module_can_be_imported() {
 }
 
 #[test]
-fn bare_specifier_imports_are_rejected_with_a_clear_error() {
+fn unknown_bare_specifier_imports_are_rejected_with_a_clear_error() {
     let (runtime, _) = make_runtime();
 
     let error = execution_message(
@@ -68,6 +68,30 @@ fn bare_specifier_imports_are_rejected_with_a_clear_error() {
         &[
             "Bare specifier 'bare-specifier' is not allowed",
             "Use 'simulacra:' for built-in modules or 'http(s)://' for remote modules",
+        ],
+    );
+}
+
+#[test]
+fn builtin_subpath_bare_specifier_imports_are_rejected_with_a_clear_error() {
+    let (runtime, _) = make_runtime();
+
+    let error = execution_message(
+        runtime
+            .eval(
+                r#"
+                import fsPromises from "fs/promises";
+                fsPromises;
+                "#,
+            )
+            .expect_err("unsupported builtin subpath import should fail"),
+    );
+
+    assert_contains_all(
+        &error,
+        &[
+            "Bare specifier 'fs/promises' is not allowed",
+            "Built-in module aliases are available for: fs, console, process, path, crypto",
         ],
     );
 }
@@ -241,7 +265,7 @@ fn unknown_simulacra_modules_list_available_modules() {
         &error,
         &[
             "Unknown simulacra module: 'nonexistent'",
-            "Available: fs, console, process",
+            "Available: fs, console, process, path, crypto",
         ],
     );
 }

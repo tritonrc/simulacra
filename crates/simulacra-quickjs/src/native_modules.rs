@@ -3,8 +3,9 @@ use rquickjs::{Function, Object};
 
 /// Native module definition for `simulacra:fs`.
 ///
-/// Exports: `readFile`, `writeFile`, `existsSync`, `mkdirSync`,
-/// `readdirSync`, `statSync`, `unlinkSync`, `renameSync`, `appendFileSync`, `default`.
+/// Exports: `readFile`, `writeFile`, `readFileSync`, `writeFileSync`,
+/// `existsSync`, `mkdirSync`, `readdirSync`, `statSync`, `unlinkSync`,
+/// `renameSync`, `appendFileSync`, `default`.
 /// Delegates to the global `fs` object's host functions.
 pub(crate) struct FsModule;
 
@@ -12,6 +13,8 @@ impl ModuleDef for FsModule {
     fn declare<'js>(decl: &Declarations<'js>) -> rquickjs::Result<()> {
         decl.declare("readFile")?;
         decl.declare("writeFile")?;
+        decl.declare("readFileSync")?;
+        decl.declare("writeFileSync")?;
         decl.declare("existsSync")?;
         decl.declare("mkdirSync")?;
         decl.declare("readdirSync")?;
@@ -29,9 +32,11 @@ impl ModuleDef for FsModule {
 
         let read_fn: Function<'js> = fs_global.get("readFileSync")?;
         exports.export("readFile", read_fn.clone())?;
+        exports.export("readFileSync", read_fn.clone())?;
 
         let write_fn: Function<'js> = fs_global.get("writeFileSync")?;
         exports.export("writeFile", write_fn.clone())?;
+        exports.export("writeFileSync", write_fn.clone())?;
 
         let exists_fn: Function<'js> = fs_global.get("existsSync")?;
         exports.export("existsSync", exists_fn.clone())?;
@@ -55,8 +60,10 @@ impl ModuleDef for FsModule {
         exports.export("appendFileSync", append_fn.clone())?;
 
         let default_obj = Object::new(ctx.clone())?;
-        default_obj.set("readFile", read_fn)?;
-        default_obj.set("writeFile", write_fn)?;
+        default_obj.set("readFile", read_fn.clone())?;
+        default_obj.set("readFileSync", read_fn)?;
+        default_obj.set("writeFile", write_fn.clone())?;
+        default_obj.set("writeFileSync", write_fn)?;
         default_obj.set("existsSync", exists_fn)?;
         default_obj.set("mkdirSync", mkdir_fn)?;
         default_obj.set("readdirSync", readdir_fn)?;

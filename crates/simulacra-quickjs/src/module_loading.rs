@@ -18,7 +18,8 @@ pub(crate) struct PrefetchedRemoteModules {
     pub(crate) sources: HashMap<String, String>,
 }
 
-/// Resolves `simulacra:*` specifiers; rejects bare specifiers.
+/// Resolves `simulacra:*` specifiers and Node-like aliases for built-in modules;
+/// rejects other bare specifiers.
 pub(crate) struct SimulacraResolver;
 
 impl rquickjs::loader::Resolver for SimulacraResolver {
@@ -39,6 +40,12 @@ impl rquickjs::loader::Resolver for SimulacraResolver {
                 name,
                 format!("Unknown simulacra module: '{mod_name}'. Available: {available}."),
             ));
+        }
+
+        // Keep this branch here as well as in resolve_module_specifier() because
+        // the static-import prefetch path calls the helper directly.
+        if SIMULACRA_MODULES.contains(&name) {
+            return Ok(format!("simulacra:{name}"));
         }
 
         resolve_module_specifier(base, name).map_err(|message| {
@@ -70,6 +77,10 @@ fn extract_url_origin(url: &str) -> Option<String> {
 }
 
 pub(crate) fn resolve_module_specifier(base: &str, name: &str) -> Result<String, String> {
+    if SIMULACRA_MODULES.contains(&name) {
+        return Ok(format!("simulacra:{name}"));
+    }
+
     if is_remote_module_url(name) {
         return Ok(name.to_string());
     }
@@ -92,8 +103,10 @@ pub(crate) fn resolve_module_specifier(base: &str, name: &str) -> Result<String,
         return Ok(resolve_relative(base_dir, name));
     }
 
+    let builtins = SIMULACRA_MODULES.join(", ");
     Err(format!(
         "Bare specifier '{name}' is not allowed. \
+         Built-in module aliases are available for: {builtins}. \
          Use 'simulacra:' for built-in modules or 'http(s)://' for remote modules."
     ))
 }
