@@ -93,6 +93,7 @@ fn agent_task_factory_performs_three_way_capability_intersection_parent_config_a
         script_executor: None,
         child_cell_configurator: None,
         child_tool_registrar: None,
+        child_provider_factory: None,
     };
 
     // Override grants: shell=true, javascript=false

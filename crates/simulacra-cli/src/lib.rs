@@ -52,9 +52,9 @@ pub type CliError = anyhow::Error;
 // Re-export ProviderKind publicly (it was pub in simulacra-cli before the move).
 pub use simulacra_runtime::ProviderKind;
 use simulacra_runtime::{
-    AgentTaskFactory, CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool,
-    DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, SpawnAgentTool, SteerChildAgentTool,
-    WaitChildAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, ChildProviderFactory, ChildStatusTool,
+    CloseChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, SpawnAgentTool,
+    SteerChildAgentTool, WaitChildAgentTool,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -294,6 +294,7 @@ struct SupervisorActorParts {
     pipeline: Arc<HookPipeline>,
     integration_registry_for_refresh: Option<Arc<simulacra_integration::IntegrationRegistry>>,
     entry_agent: String,
+    child_provider_factory: Option<ChildProviderFactory>,
 }
 
 impl CliBootstrap {
@@ -1475,7 +1476,7 @@ pub fn run(args: CliArgs) -> Result<CliOutput, CliError> {
         }
     };
 
-    run_booted(args, boot, provider, early_guard)
+    run_booted(args, boot, provider, early_guard, None)
 }
 
 pub fn run_with_provider(
@@ -1495,7 +1496,33 @@ pub fn run_with_provider(
         Ok(b) => b,
     };
 
-    run_booted(args, boot, provider, None)
+    run_booted(args, boot, provider, None, None)
+}
+
+/// Run with injected providers for both the root agent and spawned children.
+///
+/// Use this for headless/offline harnesses that need to drive child-agent
+/// orchestration without constructing production provider adapters from
+/// environment variables.
+pub fn run_with_provider_and_child_provider_factory(
+    args: CliArgs,
+    provider: Box<dyn Provider>,
+    child_provider_factory: ChildProviderFactory,
+) -> Result<CliOutput, CliError> {
+    let boot = match bootstrap(&args) {
+        Err(e) => {
+            return Ok(CliOutput {
+                stdout_content: String::new(),
+                stderr_content: e.to_string(),
+                exit_code: 1,
+                telemetry_flushed: false,
+                streamed_to_stdout: false,
+            });
+        }
+        Ok(b) => b,
+    };
+
+    run_booted(args, boot, provider, None, Some(child_provider_factory))
 }
 
 fn run_booted(
@@ -1503,6 +1530,7 @@ fn run_booted(
     mut boot: CliBootstrap,
     provider: Box<dyn Provider>,
     early_guard: Option<OtelGuard>,
+    child_provider_factory: Option<ChildProviderFactory>,
 ) -> Result<CliOutput, CliError> {
     let has_otlp = args.otlp_endpoint.is_some();
     let verbose = args.verbose;
@@ -1594,6 +1622,7 @@ fn run_booted(
         pipeline: Arc::clone(&boot.pipeline),
         integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
         entry_agent: boot.entry_agent.clone(),
+        child_provider_factory,
     });
 
     let activity_sink = boot.activity_sink.take();
@@ -2042,6 +2071,7 @@ fn start_supervisor_actor(
         script_executor: Some(simulacra_sandbox::ScriptExecutor::new(4)),
         child_cell_configurator,
         child_tool_registrar,
+        child_provider_factory: parts.child_provider_factory,
     });
     let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory(
         parts.parent_capability,

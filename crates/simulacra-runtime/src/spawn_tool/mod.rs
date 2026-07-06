@@ -25,7 +25,10 @@ pub use child_control_tools::{
 pub use factory::AgentTaskFactory;
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
 pub use tool::SpawnAgentTool;
-pub use types::{ChildCellConfigurator, ChildToolRegistrar, NoopContextStrategy, ProviderKind};
+pub use types::{
+    ChildCellConfigurator, ChildProviderFactory, ChildToolRegistrar, NoopContextStrategy,
+    ProviderKind,
+};
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};

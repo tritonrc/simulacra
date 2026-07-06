@@ -31,6 +31,10 @@ pub struct AgentTaskFactory {
     /// Optional caller-provided hook for registering extra mediated tools that
     /// are feature- or crate-local to the embedding binary, such as `py_exec`.
     pub child_tool_registrar: Option<ChildToolRegistrar>,
+    /// Optional provider factory for child agents. Production callers leave
+    /// this unset so children use the normal provider adapter; tests and
+    /// headless harnesses can inject scripted child providers.
+    pub child_provider_factory: Option<ChildProviderFactory>,
 }
 
 impl crate::TaskFactory for AgentTaskFactory {
@@ -68,6 +72,7 @@ impl crate::TaskFactory for AgentTaskFactory {
         let script_executor = self.script_executor.clone();
         let child_cell_configurator = self.child_cell_configurator.clone();
         let child_tool_registrar = self.child_tool_registrar.clone();
+        let child_provider_factory = self.child_provider_factory.clone();
 
         Box::pin(async move {
             let mut input_queue = Some(input_queue);
@@ -110,7 +115,11 @@ impl crate::TaskFactory for AgentTaskFactory {
                     capability: effective_capability,
                 };
 
-                let provider = build_provider(&provider_kind, &child_config.model)?;
+                let provider = build_child_provider(
+                    child_provider_factory.as_ref(),
+                    &provider_kind,
+                    &child_config.model,
+                )?;
                 let child_env = build_child_environment(ChildEnvironmentSpec {
                     inherited_vfs: Arc::clone(&vfs),
                     inherited_journal: Arc::clone(&journal),
@@ -205,7 +214,11 @@ impl crate::TaskFactory for AgentTaskFactory {
                 .agent_type
                 .clone()
                 .unwrap_or_else(|| "generic".to_string());
-            let provider = build_provider(&provider_kind, &child_config.model)?;
+            let provider = build_child_provider(
+                child_provider_factory.as_ref(),
+                &provider_kind,
+                &child_config.model,
+            )?;
             let spawn_tool = if child_can_spawn {
                 supervisor_sender.clone().map(|sender| ChildSpawnToolSpec {
                     sender,
@@ -258,5 +271,16 @@ impl crate::TaskFactory for AgentTaskFactory {
 
             result
         })
+    }
+}
+
+fn build_child_provider(
+    child_provider_factory: Option<&ChildProviderFactory>,
+    provider_kind: &ProviderKind,
+    model: &str,
+) -> Result<Box<dyn Provider>, RuntimeError> {
+    match child_provider_factory {
+        Some(factory) => factory(provider_kind, model),
+        None => build_provider(provider_kind, model),
     }
 }

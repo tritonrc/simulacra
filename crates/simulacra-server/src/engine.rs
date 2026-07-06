@@ -1785,6 +1785,22 @@ impl SimulacraEngine {
                             None
                         }
                     };
+                    let child_provider_factory =
+                        provider_factory_for_worker.as_ref().map(|factory| {
+                            let factory = Arc::clone(factory);
+                            Arc::new(
+                                move |provider_kind: &simulacra_runtime::ProviderKind,
+                                      model: &str| {
+                                    let provider_kind = engine_provider_kind(provider_kind);
+                                    factory(provider_kind, model).map_err(|error| {
+                                        simulacra_runtime::RuntimeError::Session(format!(
+                                            "provider factory failed: {error}"
+                                        ))
+                                    })
+                                },
+                            )
+                                as simulacra_runtime::ChildProviderFactory
+                        });
                     let task_factory = Arc::new(AgentTaskFactory {
                         config: config_for_worker.clone(),
                         provider_kind: runtime_provider_kind,
@@ -1798,6 +1814,7 @@ impl SimulacraEngine {
                         script_executor: Some(ScriptExecutor::new(4)),
                         child_cell_configurator,
                         child_tool_registrar,
+                        child_provider_factory,
                     });
                     let mut supervisor = AgentSupervisor::with_task_factory(
                         capability_token.clone(),
@@ -2014,6 +2031,14 @@ fn runtime_provider_kind(kind: ProviderKind) -> simulacra_runtime::ProviderKind 
         ProviderKind::Anthropic => simulacra_runtime::ProviderKind::Anthropic,
         ProviderKind::OpenAI => simulacra_runtime::ProviderKind::OpenAI,
         ProviderKind::Ollama => simulacra_runtime::ProviderKind::Ollama,
+    }
+}
+
+fn engine_provider_kind(kind: &simulacra_runtime::ProviderKind) -> ProviderKind {
+    match kind {
+        simulacra_runtime::ProviderKind::Anthropic => ProviderKind::Anthropic,
+        simulacra_runtime::ProviderKind::OpenAI => ProviderKind::OpenAI,
+        simulacra_runtime::ProviderKind::Ollama => ProviderKind::Ollama,
     }
 }
 
