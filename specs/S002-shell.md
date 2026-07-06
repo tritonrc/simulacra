@@ -7,23 +7,25 @@
 
 1. Commands execute against a `&dyn VirtualFs`, never the real filesystem.
 2. Pipes (`|`) connect stdout of left to stdin of right. Exit code is from the rightmost command.
-3. Redirects: `>` truncates and writes, `>>` appends. Target file is created if it doesn't exist.
-4. `&&` executes right only if left exits 0. `||` executes right only if left exits non-zero.
-5. `$VAR` and `${VAR}` expand environment variables. Undefined vars expand to empty string.
-6. `$(cmd)` captures stdout of cmd as a string value (command substitution).
-7. Unknown commands return exit code 127 and stderr "command not found: <name>".
-8. All builtins write to virtual stdout/stderr, never to real file descriptors.
+3. Redirects: `>` and `1>` truncate and write stdout, `>>` appends stdout, and `2>` redirects stderr. Target file is created if it doesn't exist. Compatibility redirects `2>&1`, `1>&2`, `&>`, and `&>>` are supported for common agent shell fragments.
+4. Heredocs (`<<EOF` and `<<'EOF'`) provide stdin to the command that declares them, including when that command is part of a pipeline.
+5. `&&` executes right only if left exits 0. `||` executes right only if left exits non-zero. `;` and newlines separate commands and always continue to the next command.
+6. `$VAR` and `${VAR}` expand environment variables. Undefined vars expand to empty string.
+7. `$(cmd)` captures stdout of cmd as a string value (command substitution).
+8. Unknown commands return exit code 127 and stderr "command not found: <name>".
+9. All builtins write to virtual stdout/stderr, never to real file descriptors.
+10. `/dev/null` is a shell device path: reads return EOF, writes are discarded, and redirects to it do not require a VFS file to exist.
 
 ## Phase 1 Builtins
 
-`echo`, `cat`, `ls`, `mkdir`, `cp`, `mv`, `rm`, `head`, `tail`, `grep`, `sed`, `wc`, `find`, `sort`, `uniq`, `cut`, `tr`, `tee`
+`echo`, `cat`, `ls`, `mkdir`, `cp`, `mv`, `rm`, `head`, `tail`, `grep`, `rg`, `sed`, `wc`, `find`, `sort`, `uniq`, `cut`, `tr`, `tee`
 
 ## Fidelity Builtins
 
 These are small compatibility commands that prevent agents from wasting turns
 on common shell probes and script fragments:
 
-`touch`, `test`, `[`, `printf`, `basename`, `dirname`
+`touch`, `test`, `[`, `printf`, `basename`, `dirname`, `awk`, `sleep`
 
 ## Network Builtins (S022)
 
@@ -43,11 +45,18 @@ on common shell probes and script fragments:
 - [x] `false || echo fallback` → stdout "fallback\n".
 - [x] `$VAR` expansion replaces with env value; undefined expands to empty string. **Tested in `dollar_var_expansion_replaces_with_env_value` and `undefined_variable_expands_to_empty_string`.**
 - [x] `$(echo inner)` command substitution captures stdout. **Tested in `command_substitution_captures_stdout`.**
-- [x] Each Phase 1 builtin (`cat`, `mkdir`, `cp`, `mv`, `rm`, `head`, `tail`, `sed`, `wc`, `find`, `sort`, `uniq`, `cut`, `tr`, `tee`) has at least one test. **All builtins covered with dedicated tests.**
+- [x] Each Phase 1 builtin (`cat`, `mkdir`, `cp`, `mv`, `rm`, `head`, `tail`, `grep`, `rg`, `sed`, `wc`, `find`, `sort`, `uniq`, `cut`, `tr`, `tee`) has at least one test. **All builtins covered with dedicated tests.**
 - [x] Shell commands against VFS never touch real filesystem. **Tested in `shell_commands_never_touch_real_filesystem`.**
 - [x] Pipe exit code comes from rightmost command. **Tested in `pipe_exit_code_comes_from_rightmost_command`.**
 - [x] Path-bearing builtins and redirects resolve relative paths against the current shell `cwd`. **Tested in `cat_after_cd_resolves_relative_path_against_cwd`, `redirects_after_cd_write_relative_targets_under_cwd`, and existing `ls_after_cd_lists_relative_to_cwd`.**
 - [x] `touch`, `test`, `[`, `printf`, `basename`, and `dirname` cover common agent script fragments. **Tested in `touch_and_test_bracket_work_with_relative_paths`, `printf_supports_common_string_newline_format`, and `basename_and_dirname_cover_common_path_splitting`.**
+- [x] `/dev/null`, `2>/dev/null`, `2>&1`, `1>&2`, `&>`, and `&>>` cover common agent shell probes and source-search recovery commands. **Tested in `agent_shell_fidelity.rs`.**
+- [x] `awk '{print $N}'` covers common field-extraction snippets over piped input. **Tested in `agent_shell_fidelity.rs`.**
+- [x] `sleep 0` and `sleep 1` cover common telemetry-wait snippets without leaving the shell emulator. **Tested in `builtin_commands.rs`.**
+- [x] `grep -rn`, `find -type f (...) -name`, `sed -n 's///p'`, and `grep -oP '(?<=\\s)\\S+'` cover common source-search and shell-recovery snippets. **Tested in `agent_shell_fidelity.rs`.**
+- [x] `rg`, `rg --files`, `rg -l`, and `rg -g '*.rs'` cover Codex-style source search snippets without leaving the VFS. **Tested in `agent_shell_fidelity.rs`.**
+- [x] Multiline shell fragments split on newlines like `;`, while backslash-newline continues a command. **Tested in `parser_newline_splits_into_separate_items`, `newline_runs_rhs_after_lhs_like_semicolon`, and existing continuation tests.**
+- [x] Heredocs feed command stdin for file-writing and pipeline fragments. **Tested in `heredoc_writes_file_through_redirect`, `heredoc_feeds_pipeline_stdin`, and `headless_tool_fidelity.rs`.**
 
 ## Observability (see S010 for conventions)
 

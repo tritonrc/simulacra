@@ -9,7 +9,7 @@ use crate::CommandResult;
 use crate::ShellExternalCommand;
 use crate::builtins;
 use crate::http_proxy::ShellHttpProxy;
-use crate::parser::{self, Connector, RedirectKind, ShellLine};
+use crate::parser::{self, Connector, ShellLine};
 
 /// Executes shell commands against a virtual filesystem.
 pub struct ShellExecutor<'a> {
@@ -106,17 +106,10 @@ impl<'a> ShellExecutor<'a> {
             return CommandResult::success("");
         }
 
-        // Accumulate stdout / stderr across pipelines so that
-        // `echo a && echo b && echo c` returns "a\nb\nc\n" (not just "c\n").
-        // The exit code tracks the most recently executed pipeline.
         let mut accumulated_stdout = String::new();
         let mut accumulated_stderr = String::new();
         let mut last_exit_code = 0;
 
-        // Precedence: `;` is lower than `&&` / `||`. So
-        // `false && skipped ; ran` is `(false && skipped) ; (ran)` —
-        // the `&&` short-circuit only swallows items until the next `;`.
-        // We model this with a `skipping` flag that resets at every `;`.
         let mut skipping = false;
 
         for item in &line.items {
@@ -137,12 +130,9 @@ impl<'a> ShellExecutor<'a> {
                             skipping = true;
                         }
                     }
-                    Some(Connector::Semicolon) | None => {
-                        // Never short-circuit across `;` or at end of line.
-                    }
+                    Some(Connector::Semicolon) | None => {}
                 }
             } else {
-                // Currently in a short-circuit window; only `;` reopens execution.
                 if matches!(item.connector, Some(Connector::Semicolon) | None) {
                     skipping = false;
                 }
@@ -186,67 +176,30 @@ impl<'a> ShellExecutor<'a> {
             );
             let _cmd_guard = cmd_span.enter();
 
-            let result = self.execute_command(cmd, &stdin);
+            let command_stdin = cmd.heredoc.as_deref().unwrap_or(&stdin);
+            let mut result = self.execute_command(cmd, command_stdin);
+
+            let cwd = self.cwd.clone();
+            let vfs = self.vfs;
+            if let Err(message) = crate::redirects::apply_redirects(
+                &mut result,
+                &cmd.redirects,
+                vfs,
+                &cwd,
+                |target| self.expand_vars(target),
+            ) {
+                result.exit_code = 1;
+                result.stderr.push_str(&message);
+            }
             cmd_span.record("simulacra.shell.exit_code", result.exit_code as i64);
 
             if i < last_idx {
-                // Pipe stdout to next command's stdin
                 stdin = result.stdout.clone();
             }
 
-            // Accumulate stderr from all stages
             accumulated_stderr.push_str(&result.stderr);
 
             last_result = result;
-
-            // Apply redirects
-            for redirect in &cmd.redirects {
-                let target = self.expand_vars(&redirect.target);
-                let target = resolve_against_cwd(&target, &self.cwd);
-                match redirect.kind {
-                    RedirectKind::Truncate => {
-                        match self.vfs.write(&target, last_result.stdout.as_bytes()) {
-                            Ok(_) => {
-                                last_result.stdout = String::new();
-                            }
-                            Err(e) => {
-                                last_result.exit_code = 1;
-                                let msg = format!("redirect: {target}: {e}\n");
-                                accumulated_stderr.push_str(&msg);
-                            }
-                        }
-                    }
-                    RedirectKind::Append => {
-                        let existing = match self.vfs.read(&target) {
-                            Ok(d) => String::from_utf8_lossy(&d).to_string(),
-                            Err(simulacra_types::VfsError::NotFound(_)) => String::new(),
-                            Err(e) => {
-                                last_result.exit_code = 1;
-                                let msg = format!("redirect: {target}: {e}\n");
-                                accumulated_stderr.push_str(&msg);
-                                continue;
-                            }
-                        };
-                        let combined = format!("{}{}", existing, last_result.stdout);
-                        match self.vfs.write(&target, combined.as_bytes()) {
-                            Ok(_) => {
-                                last_result.stdout = String::new();
-                            }
-                            Err(e) => {
-                                last_result.exit_code = 1;
-                                let msg = format!("redirect: {target}: {e}\n");
-                                accumulated_stderr.push_str(&msg);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // For pipe: pass stdout forward
-            if i < last_idx {
-                stdin = last_result.stdout.clone();
-                // Reset for intermediate pipe stages
-            }
         }
 
         last_result.stderr = accumulated_stderr;
@@ -504,6 +457,7 @@ fn is_known_command(name: &str) -> bool {
             | "ls"
             | "mkdir"
             | "grep"
+            | "rg"
             | "true"
             | "false"
             | "cp"
@@ -519,6 +473,7 @@ fn is_known_command(name: &str) -> bool {
             | "cut"
             | "tr"
             | "tee"
+            | "awk"
             | "curl"
             | "wget"
             | "touch"

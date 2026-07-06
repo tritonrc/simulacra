@@ -3,14 +3,25 @@
 //! A virtual shell that executes parsed command lines against a [`simulacra_types::VirtualFs`].
 //! All I/O goes through the VFS — no real file descriptors are touched.
 
+mod awk;
 mod builtins;
 mod executor;
+mod heredoc;
 mod http_proxy;
 mod parser;
+mod redirects;
+mod ripgrep;
+mod search;
+mod sleep;
+mod text;
+
+pub(crate) const DEV_NULL: &str = "/dev/null";
 
 pub use executor::ShellExecutor;
 pub use http_proxy::{ShellHttpError, ShellHttpProxy, ShellHttpResponse};
-pub use parser::{Command, Pipeline, Redirect, RedirectKind, ShellLine, parse};
+pub use parser::{
+    Command, Pipeline, Redirect, RedirectKind, RedirectStream, RedirectTarget, ShellLine, parse,
+};
 
 /// Optional hook for commands that are not native shell builtins but should
 /// still run inside the mediated sandbox instead of returning "not found".

@@ -1,9 +1,10 @@
 //! Shell command parser.
 //!
-//! Supports simple commands, pipes, redirects, `&&`/`||`, env-var expansion,
-//! and `$(cmd)` command substitution (parsed but resolved at execution time).
+//! Supports simple commands, pipes, redirects, heredocs, `&&`/`||`,
+//! `;`/newline command separators, env-var expansion, and `$(cmd)` command
+//! substitution (parsed but resolved at execution time).
 
-/// A complete shell line: one or more pipelines joined by `&&` or `||`.
+/// A complete shell line: one or more pipelines joined by connectors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLine {
     pub items: Vec<ShellItem>,
@@ -36,6 +37,7 @@ pub struct Command {
     pub program: String,
     pub args: Vec<String>,
     pub redirects: Vec<Redirect>,
+    pub heredoc: Option<String>,
     /// Tracks whether the program was single-quoted (literal, no expansion).
     pub program_literal: bool,
     /// Parallel to `args` — `true` means the arg was single-quoted and must
@@ -45,8 +47,23 @@ pub struct Command {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redirect {
+    pub stream: RedirectStream,
     pub kind: RedirectKind,
-    pub target: String,
+    pub target: RedirectTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectStream {
+    Stdout,
+    Stderr,
+    StdoutAndStderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedirectTarget {
+    File(String),
+    Stdout,
+    Stderr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +96,18 @@ enum Token {
     And,
     Or,
     Semicolon,
-    RedirectTruncate,
-    RedirectAppend,
+    RedirectTruncate(RedirectStream),
+    RedirectAppend(RedirectStream),
+    RedirectToStream {
+        stream: RedirectStream,
+        target: RedirectTarget,
+    },
+    HereDoc(String),
+}
+
+struct HereDocSpec {
+    delimiter: String,
+    token_index: usize,
 }
 
 fn tokenize(input: &str) -> Vec<Token> {
@@ -88,6 +115,7 @@ fn tokenize(input: &str) -> Vec<Token> {
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
+    let mut pending_heredocs: Vec<HereDocSpec> = Vec::new();
 
     while i < len {
         // Backslash-newline: line continuation (POSIX shell behavior).
@@ -97,9 +125,103 @@ fn tokenize(input: &str) -> Vec<Token> {
             continue;
         }
 
-        // Skip whitespace
+        // Newlines separate commands in multiline shell snippets. The
+        // backslash-newline branch above preserves POSIX line continuation.
+        if chars[i] == '\n' {
+            if !pending_heredocs.is_empty() {
+                i += 1;
+                for spec in pending_heredocs.drain(..) {
+                    let (content, next_i) =
+                        crate::heredoc::consume_body(&chars, i, &spec.delimiter);
+                    tokens[spec.token_index] = Token::HereDoc(content);
+                    i = next_i;
+                }
+                tokens.push(Token::Semicolon);
+                continue;
+            }
+            tokens.push(Token::Semicolon);
+            i += 1;
+            continue;
+        }
+
+        // Skip non-newline whitespace.
         if chars[i].is_ascii_whitespace() {
             i += 1;
+            continue;
+        }
+
+        // Common file-descriptor redirects used by agents: 2>/dev/null, 2>&1, 1>&2.
+        if i + 1 < len && matches!(chars[i], '1' | '2') && chars[i + 1] == '>' {
+            let stream = match chars[i] {
+                '1' => RedirectStream::Stdout,
+                '2' => RedirectStream::Stderr,
+                _ => RedirectStream::Stdout,
+            };
+            if i + 3 < len && chars[i + 2] == '&' && matches!(chars[i + 3], '1' | '2') {
+                let target = match chars[i + 3] {
+                    '1' => RedirectTarget::Stdout,
+                    '2' => RedirectTarget::Stderr,
+                    _ => unreachable!(),
+                };
+                tokens.push(Token::RedirectToStream { stream, target });
+                i += 4;
+                continue;
+            }
+            if i + 2 < len && chars[i + 2] == '>' {
+                tokens.push(Token::RedirectAppend(stream));
+                i += 3;
+                continue;
+            }
+            tokens.push(Token::RedirectTruncate(stream));
+            i += 2;
+            continue;
+        }
+
+        // Other numeric fd redirects are outside the supported shell subset.
+        // Keep them as one word so they do not accidentally become stdout
+        // redirects after the leading digit.
+        if i + 1 < len && chars[i].is_ascii_digit() && chars[i + 1] == '>' {
+            let mut word = String::new();
+            while i < len && !chars[i].is_ascii_whitespace() && !matches!(chars[i], '|' | '&' | ';')
+            {
+                word.push(chars[i]);
+                i += 1;
+            }
+            tokens.push(Token::Word(word));
+            continue;
+        }
+
+        // Here-documents used by coding agents: `cat <<'EOF' > file` and
+        // `python - <<'PY'`. The body becomes virtual stdin for this command.
+        if i + 1 < len && chars[i] == '<' && chars[i + 1] == '<' {
+            i += 2;
+            if i < len && chars[i] == '-' {
+                i += 1;
+            }
+            while i < len && matches!(chars[i], ' ' | '\t') {
+                i += 1;
+            }
+            let (delimiter, next_i) = crate::heredoc::read_delimiter(&chars, i);
+            if !delimiter.is_empty() {
+                tokens.push(Token::HereDoc(String::new()));
+                pending_heredocs.push(HereDocSpec {
+                    delimiter,
+                    token_index: tokens.len() - 1,
+                });
+            }
+            i = next_i;
+            continue;
+        }
+
+        // Bash-style shorthand: &> file redirects both stdout and stderr.
+        if i + 2 < len && chars[i] == '&' && chars[i + 1] == '>' && chars[i + 2] == '>' {
+            tokens.push(Token::RedirectAppend(RedirectStream::StdoutAndStderr));
+            i += 3;
+            continue;
+        }
+        if i + 1 < len && chars[i] == '&' && chars[i + 1] == '>' {
+            tokens.push(Token::RedirectTruncate(RedirectStream::StdoutAndStderr));
+            i += 2;
             continue;
         }
 
@@ -118,7 +240,7 @@ fn tokenize(input: &str) -> Vec<Token> {
                     continue;
                 }
                 ">>" => {
-                    tokens.push(Token::RedirectAppend);
+                    tokens.push(Token::RedirectAppend(RedirectStream::Stdout));
                     i += 2;
                     continue;
                 }
@@ -134,7 +256,7 @@ fn tokenize(input: &str) -> Vec<Token> {
                 continue;
             }
             '>' => {
-                tokens.push(Token::RedirectTruncate);
+                tokens.push(Token::RedirectTruncate(RedirectStream::Stdout));
                 i += 1;
                 continue;
             }
@@ -189,7 +311,7 @@ fn tokenize(input: &str) -> Vec<Token> {
         let mut word = String::new();
         while i < len
             && !chars[i].is_ascii_whitespace()
-            && !matches!(chars[i], '|' | '>' | '&' | ';')
+            && !matches!(chars[i], '|' | '>' | '<' | '&' | ';')
         {
             // Backslash-newline inside a word: line continuation.
             // Skip both chars and break out — the outer loop will handle
@@ -296,22 +418,31 @@ fn parse_command(tokens: &[&Token]) -> Command {
     let mut args = Vec::new();
     let mut literal_args = Vec::new();
     let mut redirects = Vec::new();
-    let mut expect_redirect: Option<RedirectKind> = None;
+    let mut heredoc = None;
+    let mut expect_redirect: Option<(RedirectStream, RedirectKind)> = None;
 
     for token in tokens {
         match token {
-            Token::RedirectTruncate => {
-                expect_redirect = Some(RedirectKind::Truncate);
+            Token::RedirectTruncate(stream) => {
+                expect_redirect = Some((*stream, RedirectKind::Truncate));
             }
-            Token::RedirectAppend => {
-                expect_redirect = Some(RedirectKind::Append);
+            Token::RedirectAppend(stream) => {
+                expect_redirect = Some((*stream, RedirectKind::Append));
+            }
+            Token::RedirectToStream { stream, target } => {
+                redirects.push(Redirect {
+                    stream: *stream,
+                    kind: RedirectKind::Truncate,
+                    target: target.clone(),
+                });
             }
             Token::Word(w) | Token::SingleQuoted(w) => {
                 let is_literal = matches!(token, Token::SingleQuoted(_));
-                if let Some(kind) = expect_redirect.take() {
+                if let Some((stream, kind)) = expect_redirect.take() {
                     redirects.push(Redirect {
+                        stream,
                         kind,
-                        target: w.clone(),
+                        target: RedirectTarget::File(w.clone()),
                     });
                 } else if program.is_empty() {
                     program = w.clone();
@@ -321,6 +452,9 @@ fn parse_command(tokens: &[&Token]) -> Command {
                     literal_args.push(is_literal);
                 }
             }
+            Token::HereDoc(content) => {
+                heredoc = Some(content.clone());
+            }
             _ => {} // Pipe/And/Or shouldn't appear here
         }
     }
@@ -329,6 +463,7 @@ fn parse_command(tokens: &[&Token]) -> Command {
         program,
         args,
         redirects,
+        heredoc,
         program_literal,
         literal_args,
     }
