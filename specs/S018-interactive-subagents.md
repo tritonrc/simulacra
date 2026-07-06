@@ -205,6 +205,7 @@ InteractiveSession (S015)
     - the configured capability set for the requested `agent_type`,
     - intersected with the parent's capability token,
     - further intersected with the optional `capabilities` override when the tool call provides one.
+22a. When parsing a tool-call `capabilities` override, `paths_read` and `paths_write` entries that look like directory scopes are normalized before attenuation. Absolute subtree globs are normalized for `.`, `..`, and duplicate separators while retaining their `/**` shape. Non-glob absolute paths are normalized for `.`, `..`, and duplicate separators; `/` becomes `/**`; paths with a trailing slash and common workspace directory names such as `/workspace/specs` or `/workspace/crates` become subtree globs; exact file paths, including extensionless names such as `/workspace/Makefile`, remain exact. This makes common LLM delegation of directory scopes work while keeping exact file grants exact.
 23. The resulting child token MUST satisfy `CapabilityToken::is_subset_of(parent)` before the supervisor accepts the spawn, per S009 and ARCHITECTURE.md.
 24. `agent_type` authorization MUST be enforced through configuration and capabilities together: the requested child type must be allowed by the parent's `can_spawn` configuration and must appear in the parent's effective `CapabilityToken.spawn_types`.
 25. A child MUST NOT gain capabilities that the parent lacks, even if the child type's static config would otherwise allow them.
@@ -299,6 +300,7 @@ Generic sub-agent spawning is specified in S023. The `spawn_agent` tool accepts 
 - [x] `can_spawn` is reflected into the effective `CapabilityToken.spawn_types` used at spawn-time checks. *(build_capability_token sets spawn_types from agent_type.can_spawn in simulacra-config)*
 - [x] A child spawn request that would widen capabilities beyond the parent is rejected before the child task starts. *(AgentSupervisor::spawn_agent calls config.capability.is_subset_of(&self.parent_capability) and returns CapabilityViolation on failure)*
 - [x] The optional `capabilities` JSON argument from the `spawn_agent` tool call is parsed into a `CapabilityToken` and passed through `SpawnConfig.capability`.
+- [x] Directory-like path entries in tool-call capability overrides are normalized to subtree globs before `SpawnConfig.capability` is sent to the supervisor. **Tested in `spawn_agent_tool_normalizes_directory_scope_capability_overrides_before_spawn_config`.**
 - [x] Effective child capability = intersection of (child type config capability ∩ parent capability ∩ optional tool-call override).
 
 ### Budget enforcement

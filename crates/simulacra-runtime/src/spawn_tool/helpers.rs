@@ -46,7 +46,7 @@ pub(super) fn parse_capability_override(value: &serde_json::Value) -> Capability
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| PathPattern(s.to_string())))
+                .filter_map(|v| v.as_str().map(normalize_spawn_path_scope))
                 .collect()
         })
         .unwrap_or_default();
@@ -55,7 +55,7 @@ pub(super) fn parse_capability_override(value: &serde_json::Value) -> Capability
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(|s| PathPattern(s.to_string())))
+                .filter_map(|v| v.as_str().map(normalize_spawn_path_scope))
                 .collect()
         })
         .unwrap_or_default();
@@ -85,6 +85,86 @@ pub(super) fn parse_capability_override(value: &serde_json::Value) -> Capability
         // unmentioned memory grant inherits rather than being stripped.
         memory: simulacra_types::MemoryCapability::default(),
     }
+}
+
+fn normalize_spawn_path_scope(path: &str) -> PathPattern {
+    let had_trailing_slash = path != "/" && path.ends_with('/');
+    let trimmed = if path == "/" {
+        path
+    } else {
+        path.trim_end_matches('/')
+    };
+    if trimmed.is_empty() || !trimmed.starts_with('/') {
+        return PathPattern(path.to_string());
+    }
+
+    if let Some(prefix) = trimmed.strip_suffix("/**") {
+        let normalized = normalize_absolute_spawn_path(prefix);
+        return if normalized == "/" {
+            PathPattern("/**".to_string())
+        } else {
+            PathPattern(format!("{normalized}/**"))
+        };
+    }
+
+    if path.contains('*') {
+        return PathPattern(path.to_string());
+    }
+
+    let normalized = normalize_absolute_spawn_path(trimmed);
+    if normalized == "/" {
+        return PathPattern("/**".to_string());
+    }
+
+    let leaf = normalized.rsplit('/').next().unwrap_or(&normalized);
+    if had_trailing_slash || is_common_workspace_directory(leaf) {
+        PathPattern(format!("{normalized}/**"))
+    } else {
+        PathPattern(normalized)
+    }
+}
+
+fn normalize_absolute_spawn_path(path: &str) -> String {
+    let mut components = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            segment => components.push(segment),
+        }
+    }
+    format!("/{}", components.join("/"))
+}
+
+fn is_common_workspace_directory(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        ".github"
+            | "bench"
+            | "benches"
+            | "crate"
+            | "crates"
+            | "demo"
+            | "demos"
+            | "doc"
+            | "docs"
+            | "example"
+            | "examples"
+            | "fixture"
+            | "fixtures"
+            | "rule"
+            | "rules"
+            | "script"
+            | "scripts"
+            | "spec"
+            | "specs"
+            | "src"
+            | "test"
+            | "tests"
+            | "workspace"
+    )
 }
 
 /// W1 fix: an override parsed from spawn_agent JSON has no way to specify
