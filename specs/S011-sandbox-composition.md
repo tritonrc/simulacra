@@ -70,8 +70,8 @@ This spec defines the **proxy layer** that wraps raw subsystem access so that no
 
 ### File Operations (VFS proxy)
 
-8. `read_file(path)` checks `paths_read` capability, checks budget, emits a span, delegates to `VFS::read()`, then writes a `JournalEntryKind::ToolResult` (recording the read and bytes returned).
-9. `write_file(path, data)` checks `paths_write` capability, checks budget (VFS bytes), writes a `JournalEntryKind::FileWrite` (before execution, recording intent), emits a span, then delegates to `VFS::write()`.
+8. `read_file(path)` checks `paths_read` capability, emits a span, delegates to `VFS::read()`, then writes a `JournalEntryKind::ToolResult` (recording the read and bytes returned). It does not consume or gate on `tokens`/`turns`; those budgets are enforced at the LLM turn and active tool operation boundaries.
+9. `write_file(path, data)` checks `paths_write` capability, checks and reserves VFS byte budget only, writes a `JournalEntryKind::FileWrite` (before execution, recording intent), emits a span, then delegates to `VFS::write()`. It does not gate on exhausted LLM token budget.
 10. `list_dir(path)` checks `paths_read` capability, emits a span, then delegates to `VFS::list_dir()`. No journal entry (read-only, non-mutating metadata query). `list_dir` does NOT consume a `turns` budget unit -- it is a metadata query, not a tool invocation.
 11. Path capability checking uses glob matching: a token with `paths_read: ["/**"]` grants read to all paths; `paths_write: ["/workspace/**", "/output/**"]` restricts writes to those subtrees.
 
@@ -128,6 +128,7 @@ This spec defines the **proxy layer** that wraps raw subsystem access so that no
 - [x] `execute_shell` with `shell: false` returns `CapabilityDenied` and does NOT execute the command.
 - [x] `execute_js` with `javascript: false` returns `CapabilityDenied` and does NOT execute JS.
 - [x] `write_file` when `vfs_bytes` budget is exhausted returns `BudgetExhausted` and does NOT write.
+- [x] `read_file` and `write_file` are not rejected merely because the LLM token budget is exhausted; `write_file` still enforces `vfs_bytes`. **Tested in `sandbox_budget_scopes.rs`.**
 - [x] `execute_shell` when `turns` budget is exhausted returns `BudgetExhausted` and does NOT execute.
 - [x] `execute_js` when `turns` budget is exhausted returns `BudgetExhausted` and does NOT execute.
 - [x] `fetch_http` with denied `network` capability returns `CapabilityDenied` and does NOT make an HTTP request. **Tested in `fetch_http_with_denied_network_capability_returns_capability_denied_and_does_not_make_a_request`.**

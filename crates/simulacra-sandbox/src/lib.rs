@@ -214,18 +214,23 @@ impl AgentCell {
             .budget
             .lock()
             .map_err(|e| SandboxError::Internal(format!("budget mutex poisoned: {e}")))?;
-        if let Err(exhausted) = b.check_budget() {
+        let projected = b.used_vfs_bytes.saturating_add(bytes);
+        if b.max_vfs_bytes > 0 && b.used_vfs_bytes >= b.max_vfs_bytes {
+            let exhausted = BudgetExhausted {
+                resource: "vfs_bytes".into(),
+                used: b.used_vfs_bytes.to_string(),
+                limit: b.max_vfs_bytes.to_string(),
+            };
             journal_budget_exhaustion(&self.journal, &self.agent_id, &exhausted);
             tracing::warn!(
-                simulacra.budget.resource = %exhausted.resource,
-                simulacra.budget.used = %exhausted.used,
-                simulacra.budget.limit = %exhausted.limit,
+                simulacra.budget.resource = "vfs_bytes",
+                simulacra.budget.used = %b.used_vfs_bytes,
+                simulacra.budget.limit = %b.max_vfs_bytes,
                 "budget exhausted"
             );
             return Err(SandboxError::BudgetExhausted(exhausted));
         }
 
-        let projected = b.used_vfs_bytes.saturating_add(bytes);
         if b.max_vfs_bytes > 0 && projected > b.max_vfs_bytes {
             let exhausted = BudgetExhausted {
                 resource: "vfs_bytes".into(),

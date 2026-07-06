@@ -1,5 +1,5 @@
 //! Core `read_file`/`write_file` logic following the Golden Rule:
-//! span → capability → budget → journal → execute → return.
+//! span → capability → applicable budget → journal → execute → return.
 //!
 //! Shared by the `AgentCell` methods and the `AgentCellFsProxy` so that JS host
 //! functions (`fs.readFileSync`, `fs.writeFileSync`, `simulacra:fs`) go through
@@ -13,15 +13,15 @@ use simulacra_types::{
 };
 
 use crate::SandboxError;
-use crate::guards::{journal_budget_exhaustion, release_vfs_bytes, reserve_vfs_bytes};
+use crate::guards::{release_vfs_bytes, reserve_vfs_bytes};
 use crate::{cap_name_for_read, cap_name_for_write, check_and_journal_capability};
 
-/// Core read_file logic: span → capability → budget → execute → journal → return.
+/// Core read_file logic: span → capability → execute → journal → return.
 pub(crate) fn read_file_inner(
     path: &str,
     vfs: &Arc<dyn VirtualFs>,
     capability: &CapabilityToken,
-    budget: &Arc<Mutex<ResourceBudget>>,
+    _budget: &Arc<Mutex<ResourceBudget>>,
     journal: &Arc<dyn JournalStorage>,
     agent_id: &AgentId,
 ) -> Result<Vec<u8>, SandboxError> {
@@ -42,23 +42,6 @@ pub(crate) fn read_file_inner(
         journal,
         agent_id,
     )?;
-
-    // Check global budget.
-    {
-        let b = budget
-            .lock()
-            .map_err(|e| SandboxError::Internal(format!("budget mutex poisoned: {e}")))?;
-        if let Err(exhausted) = b.check_budget() {
-            journal_budget_exhaustion(journal, agent_id, &exhausted);
-            tracing::warn!(
-                simulacra.budget.resource = %exhausted.resource,
-                simulacra.budget.used = %exhausted.used,
-                simulacra.budget.limit = %exhausted.limit,
-                "budget exhausted"
-            );
-            return Err(SandboxError::BudgetExhausted(exhausted));
-        }
-    }
 
     // Execute.
     let data = match vfs.read(path) {

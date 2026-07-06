@@ -5,8 +5,8 @@
 //! [`AgentCell::read_file`](super::AgentCell::read_file) and
 //! [`AgentCell::write_file`](super::AgentCell::write_file), ensuring that
 //! JS host functions (`fs.readFileSync`, `fs.writeFileSync`, `simulacra:fs`) get
-//! capability checks, budget checks, journal entries, OTel spans, and budget
-//! counter increments.
+//! capability checks, applicable budget checks, journal entries, OTel spans, and
+//! budget counter increments.
 
 use simulacra_quickjs::FsProxy;
 use simulacra_types::{

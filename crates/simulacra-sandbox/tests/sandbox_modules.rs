@@ -272,41 +272,45 @@ fn read_file_journal_entry_kind_is_tool_result_not_file_write_or_code_execution(
 }
 
 // ---------------------------------------------------------------------------
-// SB2/GSB2: read_file budget enforcement
+// SB2/GSB2: read_file budget scope
 // ---------------------------------------------------------------------------
 
 #[test]
-fn read_file_with_budget_exhausted_returns_budget_exhausted_error() {
+fn read_file_with_turn_budget_exhausted_still_reads_when_path_capability_allows() {
     let journal = Arc::new(FakeJournalStorage::default());
-    // Exhaust the turns budget so check_budget() fails
     let harness = Harness::new(
         capability(&["/workspace/**"], &[], false, false),
         budget_with_overrides(1, 1, 0, 0),
         Arc::clone(&journal),
     );
     harness.vfs.seed_file("/workspace/hello.txt", b"hello");
-
-    let error = harness.read_file("/workspace/hello.txt").unwrap_err();
-
-    assert_budget_exhausted(error, &["turns"], "1", "1");
-    // VFS should not have been touched
     harness.vfs.clear_observations();
+
+    let data = harness
+        .read_file("/workspace/hello.txt")
+        .expect("read_file should not consume or gate on turns budget");
+
+    assert_eq!(data, b"hello");
+    assert_eq!(harness.vfs.read_count(), 1);
 }
 
 #[test]
-fn read_file_with_vfs_bytes_budget_exhausted_returns_budget_exhausted_error() {
+fn read_file_with_vfs_bytes_budget_exhausted_still_reads_when_path_capability_allows() {
     let journal = Arc::new(FakeJournalStorage::default());
-    // Exhaust the vfs_bytes budget
     let harness = Harness::new(
         capability(&["/workspace/**"], &[], false, false),
         budget_with_overrides(0, 0, 100, 100),
         Arc::clone(&journal),
     );
     harness.vfs.seed_file("/workspace/hello.txt", b"hello");
+    harness.vfs.clear_observations();
 
-    let error = harness.read_file("/workspace/hello.txt").unwrap_err();
+    let data = harness
+        .read_file("/workspace/hello.txt")
+        .expect("read_file should not consume or gate on VFS write byte budget");
 
-    assert_budget_exhausted(error, &["vfs_bytes"], "100", "100");
+    assert_eq!(data, b"hello");
+    assert_eq!(harness.vfs.read_count(), 1);
 }
 
 // ---------------------------------------------------------------------------
