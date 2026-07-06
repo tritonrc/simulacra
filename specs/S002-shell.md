@@ -25,12 +25,17 @@
 These are small compatibility commands that prevent agents from wasting turns
 on common shell probes and script fragments:
 
-`touch`, `test`, `[`, `printf`, `basename`, `dirname`, `awk`, `sleep`
+`touch`, `test`, `[`, `printf`, `basename`, `dirname`, `awk`, `jq`, `sleep`
 
 The `awk` fidelity subset supports `print` expressions made from `NR`, `$0`,
 `$N`, `$NF`, double-quoted string literals adjacent to those atoms, and
 comma-separated print groups. AWK input may come from stdin or VFS file operands
 resolved against the current shell `cwd`.
+
+The `jq` fidelity subset supports common coding-agent JSON inspection snippets:
+`-r`/`--raw-output`, identity `.`, dotted field paths, and `keys[]` over objects
+or arrays. JSON input may come from stdin or VFS file operands resolved against
+the current shell `cwd`.
 
 ## Network Builtins (S022)
 
@@ -59,6 +64,7 @@ resolved against the current shell `cwd`.
 - [x] `touch`, `test`, `[`, `printf`, `basename`, and `dirname` cover common agent script fragments. **Tested in `touch_and_test_bracket_work_with_relative_paths`, `printf_supports_common_string_newline_format`, and `basename_and_dirname_cover_common_path_splitting`.**
 - [x] `/dev/null`, `2>/dev/null`, `2>&1`, `1>&2`, `&>`, and `&>>` cover common agent shell probes and source-search recovery commands. **Tested in `agent_shell_fidelity.rs`.**
 - [x] `awk '{print $N}'`, `awk '{print NR": "$0}'`, `awk '{print NR, $0}'`, and AWK file operands cover common field-extraction and line-inspection snippets. **Tested in `agent_shell_fidelity.rs`.**
+- [x] `jq -r '.name' package.json`, `jq -r '.scripts | keys[]' package.json`, `jq -r 'keys[]' items.json` from a non-root cwd, and `printf ... | jq '.'` cover common JSON/package inspection snippets. **Tested in `json_fidelity.rs` and `headless_tool_fidelity.rs`.**
 - [x] `sleep 0` and `sleep 1` cover common telemetry-wait snippets without leaving the shell emulator. **Tested in `builtin_commands.rs`.**
 - [x] `grep -rn`, `find -type f (...) -name`, `sed -n 's///p'`, and `grep -oP '(?<=\\s)\\S+'` cover common source-search and shell-recovery snippets. **Tested in `agent_shell_fidelity.rs`.**
 - [x] `rg`, `rg --files`, `rg -l`, and `rg -g '*.rs'` cover Codex-style source search snippets without leaving the VFS. **Tested in `agent_shell_fidelity.rs`.**

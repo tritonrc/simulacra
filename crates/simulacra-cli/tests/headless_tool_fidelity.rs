@@ -161,6 +161,21 @@ fn tool_output_lines(lines: &[Value]) -> Vec<String> {
         .collect()
 }
 
+fn shell_stdout(lines: &[Value], tool_call_id: &str) -> String {
+    let line = lines
+        .iter()
+        .filter(|line| line["event"]["type"] == "ToolOutput")
+        .find(|line| line["event"]["tool_call_id"] == tool_call_id)
+        .and_then(|line| line["event"]["line"].as_str())
+        .expect("shell tool output should be present");
+    serde_json::from_str::<Value>(line)
+        .expect("shell tool output should be JSON")
+        .get("stdout")
+        .and_then(Value::as_str)
+        .expect("shell tool output should include stdout")
+        .to_string()
+}
+
 #[test]
 fn headless_mode_executes_common_agent_tool_fragments_without_recovery_failures() {
     let config = TempConfig::write(config_toml());
@@ -172,10 +187,13 @@ printf 'left right third\n' | grep -oP '(?<=\s)\S+'
 mkdir -p /workspace/src /workspace/docs
 printf 'alpha\nneedle here\n' > /workspace/src/lib.rs
 printf 'doc needle\n' > /workspace/docs/readme.md
+printf '{"name":"demo","scripts":{"test":"cargo test","build":"cargo build"}}' > /workspace/package.json
 grep -rn 'needle' /workspace
 rg needle /workspace
 rg --files -g '*.rs' /workspace
 rg -l needle /workspace
+jq -r '.scripts | keys[]' /workspace/package.json
+printf '{"name":"demo"}' | jq '.'
 cat <<'EOF' > /workspace/heredoc.txt
 heredoc alpha
 heredoc beta
@@ -207,6 +225,7 @@ console.log(readFileSync('/workspace/js.txt'));"#;
     assert_eq!(output.exit_code, 0, "stderr={:?}", output.stderr_content);
     let lines = parse_jsonl(&output.stdout_content);
     let tool_output = tool_output_lines(&lines).join("\n");
+    let shell_stdout = shell_stdout(&lines, "shell-probe");
 
     assert!(
         tool_output.contains("dev-null-ok"),
@@ -242,6 +261,14 @@ console.log(readFileSync('/workspace/js.txt'));"#;
     assert!(
         tool_output.contains("/workspace/src/lib.rs"),
         "rg --files and rg -l should support Codex-style file targeting: {tool_output}"
+    );
+    assert!(
+        shell_stdout.contains("\nbuild\ntest\n") && !shell_stdout.contains("cargo build"),
+        "jq should raw-print package.json script keys, not values: {shell_stdout}"
+    );
+    assert!(
+        shell_stdout.contains("{\n  \"name\": \"demo\"\n}\n"),
+        "jq should pretty-print JSON from piped stdin in headless mode: {shell_stdout}"
     );
     assert!(
         tool_output.contains("/workspace/docs/readme.md")

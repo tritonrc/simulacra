@@ -5,6 +5,7 @@ use simulacra_types::{FsMetadata, VfsError, VirtualFs};
 use crate::CommandResult;
 use crate::awk::builtin_awk;
 use crate::http_proxy::ShellHttpProxy;
+use crate::jq::builtin_jq;
 use crate::ripgrep::builtin_rg;
 use crate::search::{builtin_find, builtin_grep, builtin_sed};
 use crate::sleep::builtin_sleep;
@@ -55,6 +56,7 @@ pub(crate) fn try_builtin(
         "tr" => Some(builtin_tr(args, stdin)),
         "tee" => Some(builtin_tee(args, stdin, vfs, cwd)),
         "awk" => Some(builtin_awk(args, stdin, vfs, cwd)),
+        "jq" => Some(builtin_jq(args, stdin, vfs, cwd)),
         "sleep" => Some(builtin_sleep(args)),
         "curl" => Some(builtin_curl(args, vfs, http_proxy, cwd)),
         "wget" => Some(builtin_wget(args, vfs, http_proxy, cwd)),

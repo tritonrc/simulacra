@@ -405,6 +405,7 @@ fn is_known_command(name: &str) -> bool {
             | "tr"
             | "tee"
             | "awk"
+            | "jq"
             | "curl"
             | "wget"
             | "touch"

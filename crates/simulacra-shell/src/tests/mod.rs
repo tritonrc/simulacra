@@ -293,6 +293,7 @@ mod core;
 mod curl_basic;
 mod curl_errors;
 mod http_isolation;
+mod json_fidelity;
 mod parser;
 mod shell_state;
 mod wget;

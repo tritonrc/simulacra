@@ -4577,6 +4577,7 @@ dependencies = [
 name = "simulacra-shell"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "simulacra-types",
  "simulacra-vfs",
  "thiserror 2.0.18",

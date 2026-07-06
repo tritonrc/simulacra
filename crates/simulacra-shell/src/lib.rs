@@ -9,6 +9,7 @@ mod executor;
 mod expansion;
 mod heredoc;
 mod http_proxy;
+mod jq;
 mod parser;
 mod redirects;
 mod ripgrep;
