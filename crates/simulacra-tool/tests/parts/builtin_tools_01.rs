@@ -24,11 +24,11 @@ fn tool_registry_definitions_after_register_builtins_have_correct_names_and_desc
         ),
         (
             "shell_exec",
-            "Execute a shell command in the sandbox shell and return structured output.",
+            "Execute a shell command in the sandbox shell and return structured output. Supports common builtins, pipes, redirects, heredocs, and persistent cwd/env.",
         ),
         (
             "js_exec",
-            "Execute JavaScript code in QuickJS and return the string result or stdout. Each call gets a fresh JS global/context: variables, prototypes, and module singletons do not persist between calls. Use ESM `import`, not `require`. Available modules include simulacra:fs/fs, simulacra:console, simulacra:process, simulacra:path, and simulacra:crypto. File, fetch, and module-load host operations are mediated by the sandbox.",
+            "Execute JavaScript code in QuickJS and return the string result or stdout. Each call gets a fresh JS global/context: variables, prototypes, and module singletons do not persist between calls. Use ESM `import`, not `require`. Built-in modules can be imported with either `simulacra:*` names or Node-like aliases (`fs`, `console`, `process`, `path`, `crypto`). `simulacra:fs`/`fs` exports readFileSync, writeFileSync, readFile, writeFile, existsSync, appendFileSync, readdirSync, statSync, renameSync, unlinkSync, and mkdirSync. File, fetch, and module-load host operations are mediated by the sandbox.",
         ),
         ("list_dir", "List the contents of a directory."),
     ];

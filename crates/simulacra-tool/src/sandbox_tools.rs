@@ -200,7 +200,7 @@ impl Tool for ShellExecTool {
         ToolDefinition {
             name: "shell_exec".into(),
             description:
-                "Execute a shell command in the sandbox shell and return structured output.".into(),
+                "Execute a shell command in the sandbox shell and return structured output. Supports common builtins, pipes, redirects, heredocs, and persistent cwd/env.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -304,8 +304,11 @@ impl Tool for JsExecTool {
             description: "Execute JavaScript code in QuickJS and return the string result or \
                 stdout. Each call gets a fresh JS global/context: variables, prototypes, and \
                 module singletons do not persist between calls. Use ESM `import`, not \
-                `require`. Available modules include simulacra:fs/fs, simulacra:console, \
-                simulacra:process, simulacra:path, and simulacra:crypto. File, fetch, and module-load \
+                `require`. Built-in modules can be imported with either `simulacra:*` names \
+                or Node-like aliases (`fs`, `console`, `process`, `path`, `crypto`). \
+                `simulacra:fs`/`fs` exports readFileSync, writeFileSync, readFile, \
+                writeFile, existsSync, appendFileSync, readdirSync, statSync, renameSync, \
+                unlinkSync, and mkdirSync. File, fetch, and module-load \
                 host operations are mediated by the sandbox."
                 .into(),
             input_schema: json!({

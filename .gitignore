@@ -4,6 +4,7 @@
 *.swo
 *~
 .DS_Store
+.aniani/
 simulacra.toml
 !demos/**/simulacra.toml
 # SQLite ephemeral files — demos regenerate these at runtime
