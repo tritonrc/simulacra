@@ -54,7 +54,7 @@ pub(crate) fn try_builtin(
         "cut" => Some(builtin_cut(args, stdin)),
         "tr" => Some(builtin_tr(args, stdin)),
         "tee" => Some(builtin_tee(args, stdin, vfs, cwd)),
-        "awk" => Some(builtin_awk(args, stdin)),
+        "awk" => Some(builtin_awk(args, stdin, vfs, cwd)),
         "sleep" => Some(builtin_sleep(args)),
         "curl" => Some(builtin_curl(args, vfs, http_proxy, cwd)),
         "wget" => Some(builtin_wget(args, vfs, http_proxy, cwd)),

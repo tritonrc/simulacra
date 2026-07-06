@@ -200,6 +200,91 @@ fn awk_supports_field_separator_and_last_field() {
 }
 
 #[test]
+fn awk_prints_record_number_string_literals_and_whole_line() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, "printf 'alpha\\nbeta\\n' | awk '{print NR\": \"$0}'");
+
+    assert_eq!(result.stdout, "1: alpha\n2: beta\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn awk_prints_comma_separated_record_number_and_whole_line() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, "printf 'alpha\\nbeta\\n' | awk '{print NR, $0}'");
+
+    assert_eq!(result.stdout, "1 alpha\n2 beta\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn awk_reads_file_operands_for_agent_inspection_snippets() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+    run_shell(vfs, "mkdir -p /workspace/tmp");
+    run_shell(vfs, "printf 'alpha\\nbeta\\n' > /workspace/tmp/probe.txt");
+
+    let result = run_shell(vfs, "awk '{print NR\": \"$0}' /workspace/tmp/probe.txt");
+
+    assert_eq!(result.stdout, "1: alpha\n2: beta\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn awk_file_operands_keep_record_boundaries_without_trailing_newlines() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+    run_shell(vfs, "mkdir -p /workspace/tmp");
+    vfs.write("/workspace/tmp/a.txt", b"alpha").unwrap();
+    vfs.write("/workspace/tmp/b.txt", b"beta").unwrap();
+
+    let result = run_shell(
+        vfs,
+        "awk '{print NR\": \"$0}' /workspace/tmp/a.txt /workspace/tmp/b.txt",
+    );
+
+    assert_eq!(result.stdout, "1: alpha\n2: beta\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn awk_file_operands_resolve_relative_paths_and_dev_null_inside_vfs() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+    run_shell(vfs, "mkdir -p /workspace/tmp");
+    vfs.write("/workspace/tmp/probe.txt", b"alpha\n").unwrap();
+
+    let result = run_shell(
+        vfs,
+        "cd /workspace/tmp && awk '{print NR\": \"$0}' probe.txt /dev/null",
+    );
+
+    assert_eq!(result.stdout, "1: alpha\n");
+    assert_eq!(result.stderr, "");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn awk_missing_file_operand_does_not_read_host_filesystem() {
+    let fs = MemoryFs::new();
+    let vfs: &dyn VirtualFs = &fs;
+
+    let result = run_shell(vfs, "awk '{print $0}' /etc/passwd");
+
+    assert_eq!(result.stdout, "");
+    assert!(result.stderr.contains("awk: /etc/passwd: not found"));
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
 fn heredoc_writes_file_through_redirect() {
     let fs = MemoryFs::new();
     let vfs: &dyn VirtualFs = &fs;

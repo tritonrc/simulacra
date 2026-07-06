@@ -27,6 +27,11 @@ on common shell probes and script fragments:
 
 `touch`, `test`, `[`, `printf`, `basename`, `dirname`, `awk`, `sleep`
 
+The `awk` fidelity subset supports `print` expressions made from `NR`, `$0`,
+`$N`, `$NF`, double-quoted string literals adjacent to those atoms, and
+comma-separated print groups. AWK input may come from stdin or VFS file operands
+resolved against the current shell `cwd`.
+
 ## Network Builtins (S022)
 
 `curl`, `wget` — routed through `ShellHttpProxy` for Golden Rule enforcement (capability, budget, journal). When executed inside `AgentCell`, the proxy is `AgentCellShellHttpProxy` which delegates to `fetch_http_inner`. See [S022](S022-shell-http.md) for full design.
@@ -51,7 +56,7 @@ on common shell probes and script fragments:
 - [x] Path-bearing builtins and redirects resolve relative paths against the current shell `cwd`. **Tested in `cat_after_cd_resolves_relative_path_against_cwd`, `redirects_after_cd_write_relative_targets_under_cwd`, and existing `ls_after_cd_lists_relative_to_cwd`.**
 - [x] `touch`, `test`, `[`, `printf`, `basename`, and `dirname` cover common agent script fragments. **Tested in `touch_and_test_bracket_work_with_relative_paths`, `printf_supports_common_string_newline_format`, and `basename_and_dirname_cover_common_path_splitting`.**
 - [x] `/dev/null`, `2>/dev/null`, `2>&1`, `1>&2`, `&>`, and `&>>` cover common agent shell probes and source-search recovery commands. **Tested in `agent_shell_fidelity.rs`.**
-- [x] `awk '{print $N}'` covers common field-extraction snippets over piped input. **Tested in `agent_shell_fidelity.rs`.**
+- [x] `awk '{print $N}'`, `awk '{print NR": "$0}'`, `awk '{print NR, $0}'`, and AWK file operands cover common field-extraction and line-inspection snippets. **Tested in `agent_shell_fidelity.rs`.**
 - [x] `sleep 0` and `sleep 1` cover common telemetry-wait snippets without leaving the shell emulator. **Tested in `builtin_commands.rs`.**
 - [x] `grep -rn`, `find -type f (...) -name`, `sed -n 's///p'`, and `grep -oP '(?<=\\s)\\S+'` cover common source-search and shell-recovery snippets. **Tested in `agent_shell_fidelity.rs`.**
 - [x] `rg`, `rg --files`, `rg -l`, and `rg -g '*.rs'` cover Codex-style source search snippets without leaving the VFS. **Tested in `agent_shell_fidelity.rs`.**
