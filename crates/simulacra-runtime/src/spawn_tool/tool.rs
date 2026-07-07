@@ -43,16 +43,34 @@ pub struct SpawnAgentTool {
 
 impl simulacra_types::Tool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
+        // Surface the configured child agent types as an `enum` so the model can
+        // discover the valid `agent_type` values instead of falling back to a
+        // generic `system_prompt` child. Without this the property is an opaque
+        // string and the model cannot know, e.g., that "tdd-coder" is spawnable.
+        let agent_type_schema = if self.can_spawn.is_empty() {
+            serde_json::json!({
+                "type": "string",
+                "description": "Name of a configured child agent type to use for the child agent"
+            })
+        } else {
+            serde_json::json!({
+                "type": "string",
+                "enum": self.can_spawn,
+                "description": format!(
+                    "Name of a configured child agent type to use for the child agent. \
+                     Prefer a configured agent_type over a raw system_prompt whenever one \
+                     fits the subtask. Configured types: {}.",
+                    self.can_spawn.join(", ")
+                )
+            })
+        };
         ToolDefinition {
             name: "spawn_agent".to_string(),
             description: SPAWN_AGENT_DESCRIPTION.to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "agent_type": {
-                        "type": "string",
-                        "description": "Name of a configured child agent type to use for the child agent"
-                    },
+                    "agent_type": agent_type_schema,
                     "task": {
                         "type": "string",
                         "description": "The task or instruction delegated to the child agent"
