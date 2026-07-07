@@ -503,6 +503,20 @@ fn real_spawn_agent_tool_definition_exposes_agent_type_task_budget_and_capabilit
             "real spawn_agent schema should expose {field}"
         );
     }
+
+    let agent_type_description = properties
+        .get("agent_type")
+        .and_then(|schema| schema.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .expect("agent_type schema should include a model-visible description");
+    assert!(
+        agent_type_description.contains("configured child agent type"),
+        "agent_type description should describe configured child agent types; got {agent_type_description:?}"
+    );
+    assert!(
+        !agent_type_description.contains("simulacra.toml"),
+        "agent_type description should not assume a TOML-backed embedding; got {agent_type_description:?}"
+    );
 }
 
 #[test]

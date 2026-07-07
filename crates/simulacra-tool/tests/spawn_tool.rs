@@ -17,7 +17,7 @@ impl Tool for PendingSpawnAgentTool {
                 "properties": {
                     "agent_type": {
                         "type": "string",
-                        "description": "Configured agent type name from simulacra.toml to use for the child agent"
+                        "description": "Name of a configured child agent type to use for the child agent"
                     },
                     "task": {
                         "type": "string",

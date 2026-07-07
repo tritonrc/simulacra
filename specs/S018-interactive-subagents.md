@@ -80,7 +80,7 @@ InteractiveSession (S015)
   "properties": {
     "agent_type": {
       "type": "string",
-      "description": "Configured agent type name from simulacra.toml to use for the child agent"
+      "description": "Name of a configured child agent type to use for the child agent"
     },
     "system_prompt": {
       "type": "string",
@@ -171,7 +171,7 @@ InteractiveSession (S015)
 7. The interactive host MUST keep the supervisor actor loop alive across multiple parent turns in the same REPL session. It MUST NOT create a new supervisor per tool call.
 8. The parent `spawn_agent` tool implementation MUST communicate with the supervisor through its actor message channel using `SupervisorMessage { agent_id: parent_agent_id, priority: MessagePriority::Command, payload: SupervisorPayload::Spawn(...) }` per S009. `steer_child_agent` MUST use `MessagePriority::Command`; `cancel_child_agent` remains `MessagePriority::Signal`.
 9. `SpawnConfig` is extended for interactive sub-agent delegation. In addition to the S009 fields (`agent_id`, `parent_id`, `capability`, `budget`, `restart_strategy`), the spawned work item MUST carry:
-   - `agent_type: String` — the configured child type name selected from `simulacra.toml`;
+   - `agent_type: String` — the configured child type name selected from the active agent configuration;
    - `task: String` — the delegated task text passed to `AgentLoop::run(task)`.
 10. The supervisor actor loop remains a host-side concern. The LLM does not send supervisor messages directly and does not observe raw actor protocol messages.
 11. Ctrl-C behavior from S015 extends to child execution: if the user interrupts while `join_child_agent` is waiting on a child, the interactive host MUST signal cancellation through the supervisor and the terminal child summary MUST report `status: "cancelled"` when cancellation is observed.
@@ -194,8 +194,8 @@ InteractiveSession (S015)
     - a context strategy instance for the child;
     - a journal storage handle scoped to the child `agent_id`;
     - the child `ResourceBudget` from the validated spawn request.
-19. The provider for the child MUST be selected from the requested `agent_type` configuration in `simulacra.toml`. A child agent type may use a different model/provider configuration than the parent.
-19a. The child's `system_prompt` is taken from the `agent_type` configuration in `simulacra.toml`. If the agent type has no `system_prompt`, the child uses the default system prompt (same as S013/S015).
+19. The provider for the child MUST be selected from the requested `agent_type` configuration. A child agent type may use a different model/provider configuration than the parent.
+19a. The child's `system_prompt` is taken from the requested `agent_type` configuration. If the agent type has no `system_prompt`, the child uses the default system prompt (same as S013/S015).
 20. `TaskFactory` MUST execute the child by calling `AgentLoop::run(task)` with the delegated `task` string from `SpawnConfig`. The child is a full agent loop, not a one-off provider call.
 21. The child `AgentLoop` MUST be isolated from the parent's conversation state except for the delegated task text and inherited/attenuated execution context. Parent conversation messages are not implicitly copied into the child unless a future spec adds explicit context handoff.
 
