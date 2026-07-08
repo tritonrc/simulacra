@@ -116,6 +116,9 @@ fn build_child_registry(
         registry.register(Box::new(ChildStatusTool {
             sender: sender.clone(),
         }))?;
+        registry.register(Box::new(ListChildAgentTool {
+            sender: sender.clone(),
+        }))?;
         registry.register(Box::new(WaitChildAgentTool {
             sender: sender.clone(),
         }))?;

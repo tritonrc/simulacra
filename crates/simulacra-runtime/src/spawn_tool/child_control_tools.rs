@@ -1,5 +1,5 @@
 use super::json_output::{
-    child_status_json, child_terminal_json, wait_child_json, wait_children_json,
+    child_status_json, child_terminal_json, list_children_json, wait_child_json, wait_children_json,
 };
 use super::*;
 
@@ -21,6 +21,10 @@ const CHILD_STATUS_DESCRIPTION: &str = "\
 Cheap nonblocking probe for a child handle. Use child_status to inspect \
 whether a live or completed child is running, ready, completed, failed, or \
 cancelled without waiting for or consuming the terminal result.";
+
+const LIST_CHILD_AGENTS_DESCRIPTION: &str = "\
+List all child handles currently tracked by this supervisor, including live \
+children and terminal children that have not been closed.";
 
 const WAIT_CHILD_AGENT_DESCRIPTION: &str = "\
 Bounded, non-consuming wait for one child or for any child in child_ids to \
@@ -156,6 +160,63 @@ impl simulacra_types::Tool for ChildStatusTool {
             })?;
             let status = status.map_err(simulacra_types::ToolError::ExecutionFailed)?;
             Ok(child_status_json(status))
+        })
+    }
+}
+
+pub struct ListChildAgentTool {
+    pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+}
+
+impl simulacra_types::Tool for ListChildAgentTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_child_agents".to_string(),
+            description: LIST_CHILD_AGENTS_DESCRIPTION.to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            if !arguments.as_object().is_some_and(serde_json::Map::is_empty) {
+                return Err(simulacra_types::ToolError::InvalidArguments(
+                    "list_child_agents does not accept arguments".into(),
+                ));
+            }
+
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            self.sender
+                .send(SupervisorMessage {
+                    agent_id: AgentId("list_child_agents".into()),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::ListChildren(result_tx),
+                })
+                .await
+                .map_err(|_| {
+                    simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
+                })?;
+            let children = result_rx.await.map_err(|_| {
+                simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor dropped list_child_agents response channel".into(),
+                )
+            })?;
+            let children = children.map_err(simulacra_types::ToolError::ExecutionFailed)?;
+            Ok(list_children_json(children))
         })
     }
 }

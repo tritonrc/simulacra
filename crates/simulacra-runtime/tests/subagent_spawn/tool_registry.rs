@@ -199,6 +199,7 @@ fn configured_spawn_capable_child_registry_includes_all_child_control_tools() {
         "cancel_child_agent",
         "steer_child_agent",
         "child_status",
+        "list_child_agents",
         "wait_child_agent",
         "close_child_agent",
     ] {

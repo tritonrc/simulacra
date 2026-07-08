@@ -1,3 +1,20 @@
+async fn request_child_roster(
+    tx: &tokio::sync::mpsc::Sender<SupervisorMessage>,
+) -> Vec<simulacra_runtime::ChildRosterEntry> {
+    let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("parent-agent".into()),
+        payload: SupervisorPayload::ListChildren(list_tx),
+    })
+    .await
+    .expect("list children message should send");
+    list_rx
+        .await
+        .expect("list children response channel should stay open")
+        .expect("list children should succeed")
+}
+
 #[tokio::test]
 async fn actor_join_journals_completion_before_terminal_result_resolves() {
     let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
@@ -273,6 +290,15 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
     assert_eq!(status.status, "running");
     assert!(!status.ready);
 
+    let running_roster = request_child_roster(&tx).await;
+    assert_eq!(running_roster.len(), 1);
+    let running_child = &running_roster[0];
+    assert_eq!(running_child.child_id, "child-orchestrated");
+    assert_eq!(running_child.agent_type, "researcher");
+    assert_eq!(running_child.task, "inspect lifecycle");
+    assert_eq!(running_child.status, "running");
+    assert!(!running_child.ready);
+
     let (poll_tx, poll_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
@@ -396,6 +422,15 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
         .expect("join should still see non-consumed terminal result");
     assert_eq!(joined.result.unwrap().exit_reason, ExitReason::Complete);
 
+    let joined_roster = request_child_roster(&tx).await;
+    assert_eq!(joined_roster.len(), 1);
+    let joined_child = &joined_roster[0];
+    assert_eq!(joined_child.child_id, "child-orchestrated");
+    assert_eq!(joined_child.agent_type, "researcher");
+    assert_eq!(joined_child.task, "inspect lifecycle");
+    assert_eq!(joined_child.status, "completed");
+    assert!(joined_child.ready);
+
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
@@ -408,6 +443,11 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
         .await
         .expect("close response channel should stay open")
         .expect("close should release terminal child state");
+
+    assert!(
+        request_child_roster(&tx).await.is_empty(),
+        "closed children should be absent from the supervisor roster"
+    );
 
     let (unknown_close_tx, unknown_close_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {

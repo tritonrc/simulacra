@@ -32,6 +32,16 @@ impl AgentSupervisor {
         Ok(status_from_state(state))
     }
 
+    pub(super) fn list_children(&self) -> Vec<ChildRosterEntry> {
+        let results = lock_mutex(&self.child_results, "child_results");
+        let mut entries = results
+            .values()
+            .map(roster_entry_from_state)
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.child_id.cmp(&right.child_id));
+        entries
+    }
+
     pub(super) fn wait_child(
         &self,
         child_id: AgentId,
@@ -270,6 +280,18 @@ fn status_from_state(state: &ChildRunState) -> ChildStatus {
         status,
         ready,
         elapsed_ms: end_ms.saturating_sub(state.metadata.started_at_ms),
+    }
+}
+
+fn roster_entry_from_state(state: &ChildRunState) -> ChildRosterEntry {
+    let status = status_from_state(state);
+    ChildRosterEntry {
+        child_id: status.child_id.0,
+        agent_type: status.agent_type,
+        task: state.metadata.task.clone(),
+        status: status.status,
+        ready: status.ready,
+        elapsed_ms: status.elapsed_ms,
     }
 }
 

@@ -80,6 +80,24 @@ pub(super) fn child_status_json(status: ChildStatus) -> serde_json::Value {
     })
 }
 
+pub(super) fn list_children_json(children: Vec<ChildRosterEntry>) -> serde_json::Value {
+    serde_json::Value::Array(
+        children
+            .into_iter()
+            .map(|child| {
+                serde_json::json!({
+                    "child_id": child.child_id,
+                    "agent_type": child.agent_type,
+                    "task": child.task,
+                    "status": child.status,
+                    "ready": child.ready,
+                    "elapsed_ms": child.elapsed_ms
+                })
+            })
+            .collect(),
+    )
+}
+
 pub(super) fn wait_child_json(wait: WaitChildResult) -> serde_json::Value {
     if let Some(terminal) = wait.terminal {
         child_terminal_json(terminal, Some(wait.status))

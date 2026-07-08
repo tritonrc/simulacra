@@ -124,6 +124,17 @@ pub struct ChildStatus {
     pub elapsed_ms: u64,
 }
 
+/// Child roster entry returned by list_child_agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildRosterEntry {
+    pub child_id: String,
+    pub agent_type: String,
+    pub task: String,
+    pub status: String,
+    pub ready: bool,
+    pub elapsed_ms: u64,
+}
+
 /// Result returned by a bounded wait_child_agent request.
 #[derive(Debug, Clone)]
 pub struct WaitChildResult {
@@ -174,6 +185,8 @@ pub enum SupervisorPayload {
         AgentId,
         tokio::sync::oneshot::Sender<Result<ChildStatus, String>>,
     ),
+    /// List every live or terminal-unclosed child handle.
+    ListChildren(tokio::sync::oneshot::Sender<Result<Vec<ChildRosterEntry>, String>>),
     /// Wait for a child up to a bounded timeout without consuming the result.
     WaitChild(
         AgentId,

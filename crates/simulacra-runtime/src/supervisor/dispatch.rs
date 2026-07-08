@@ -46,6 +46,9 @@ impl AgentSupervisor {
                 let result = self.child_status(&child_id);
                 let _ = result_tx.send(result);
             }
+            SupervisorPayload::ListChildren(result_tx) => {
+                let _ = result_tx.send(Ok(self.list_children()));
+            }
             SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
                 self.wait_child(child_id, timeout, result_tx);
             }

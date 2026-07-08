@@ -20,7 +20,7 @@ mod tests;
 
 pub use child_control_tools::{
     CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool,
-    SteerChildAgentTool, WaitChildAgentTool,
+    ListChildAgentTool, SteerChildAgentTool, WaitChildAgentTool,
 };
 pub use factory::AgentTaskFactory;
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
@@ -43,7 +43,9 @@ use simulacra_types::{
 use simulacra_vfs::{HookLister, ProcFs, ProcState, ToolLister};
 
 use crate::exit_reason::exit_reason_to_snake_case;
-use crate::supervisor::{ChildStatus, ChildTerminalResult, WaitChildResult, WaitChildrenResult};
+use crate::supervisor::{
+    ChildRosterEntry, ChildStatus, ChildTerminalResult, WaitChildResult, WaitChildrenResult,
+};
 use crate::{
     AcpChildRequest, AcpChildRuntime, ActivitySink, AgentInputQueue, AgentLoop, AgentLoopConfig,
     AgentLoopOutput, BoxTaskFuture, CancellationToken, CountingJournalStorage,

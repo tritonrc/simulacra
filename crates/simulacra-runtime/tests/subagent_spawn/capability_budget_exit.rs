@@ -587,6 +587,11 @@ fn make_real_child_status_tool() -> ChildStatusTool {
     ChildStatusTool { sender }
 }
 
+fn make_real_list_child_agent_tool() -> ListChildAgentTool {
+    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+    ListChildAgentTool { sender }
+}
+
 fn make_real_wait_child_agent_tool() -> WaitChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
     WaitChildAgentTool { sender }
@@ -710,6 +715,21 @@ fn s054_child_orchestration_tool_descriptions_provide_model_visible_guidance() {
         );
     }
 
+    let list = make_real_list_child_agent_tool().definition();
+    assert_eq!(list.name, "list_child_agents");
+    for expected in [
+        "List all child handles",
+        "currently tracked by this supervisor",
+        "live children",
+        "terminal children that have not been closed",
+    ] {
+        assert!(
+            list.description.contains(expected),
+            "list_child_agents description should include {expected:?}; got {:?}",
+            list.description
+        );
+    }
+
     let wait = make_real_wait_child_agent_tool().definition();
     assert_eq!(wait.name, "wait_child_agent");
     for expected in [
@@ -754,6 +774,15 @@ fn s054_child_orchestration_tools_have_documented_schemas() {
         "string"
     );
 
+    let list = make_real_list_child_agent_tool().definition();
+    assert_eq!(list.name, "list_child_agents");
+    assert_eq!(list.input_schema["properties"], serde_json::json!({}));
+    assert_eq!(list.input_schema["additionalProperties"], false);
+    assert!(
+        list.input_schema.get("required").is_none(),
+        "list_child_agents should not require input fields"
+    );
+
     let wait = make_real_wait_child_agent_tool().definition();
     assert_eq!(wait.name, "wait_child_agent");
     assert_eq!(
@@ -794,6 +823,17 @@ async fn s054_child_orchestration_tools_reject_invalid_arguments() {
     assert!(matches!(
         status,
         Err(ToolError::InvalidArguments(message)) if message.contains("child_id")
+    ));
+
+    let list = make_real_list_child_agent_tool()
+        .call(
+            serde_json::json!({ "child_id": "child-1" }),
+            &CapabilityToken::default(),
+        )
+        .await;
+    assert!(matches!(
+        list,
+        Err(ToolError::InvalidArguments(message)) if message.contains("does not accept arguments")
     ));
 
     let missing_timeout = make_real_wait_child_agent_tool()
@@ -906,6 +946,50 @@ async fn child_status_tool_sends_command_and_returns_status_json() {
             "ready": false,
             "elapsed_ms": 12
         })
+    );
+}
+
+#[tokio::test]
+async fn list_child_agents_tool_sends_command_and_returns_roster_json() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    let tool = ListChildAgentTool { sender };
+    let call = tool.call(serde_json::json!({}), &CapabilityToken::default());
+    let receive = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("list_child_agents should send one supervisor message");
+        assert_eq!(message.priority, MessagePriority::Command);
+        match message.payload {
+            SupervisorPayload::ListChildren(result_tx) => {
+                result_tx
+                    .send(Ok(vec![simulacra_runtime::ChildRosterEntry {
+                        child_id: "child-1".into(),
+                        agent_type: "researcher".into(),
+                        task: "inspect lifecycle".into(),
+                        status: "running".into(),
+                        ready: false,
+                        elapsed_ms: 12,
+                    }]))
+                    .expect("list_child_agents tool should await roster response");
+            }
+            other => panic!("expected SupervisorPayload::ListChildren, got {other:?}"),
+        }
+    };
+
+    let (result, ()) = tokio::join!(call, receive);
+    assert_eq!(
+        result.expect("list_child_agents should return roster JSON"),
+        serde_json::json!([
+            {
+                "child_id": "child-1",
+                "agent_type": "researcher",
+                "task": "inspect lifecycle",
+                "status": "running",
+                "ready": false,
+                "elapsed_ms": 12
+            }
+        ])
     );
 }
 
@@ -1236,6 +1320,16 @@ async fn s054_child_orchestration_tools_report_closed_supervisor_channels() {
         serde_json::json!({ "child_id": "child-1" }),
         &CapabilityToken::default(),
     )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ToolError::ExecutionFailed(message)) if message.contains("supervisor channel closed")
+    ));
+
+    let result = ListChildAgentTool {
+        sender: sender.clone(),
+    }
+    .call(serde_json::json!({}), &CapabilityToken::default())
     .await;
     assert!(matches!(
         result,

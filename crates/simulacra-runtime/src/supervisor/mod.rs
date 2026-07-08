@@ -7,9 +7,9 @@ mod spawn;
 mod types;
 
 pub use types::{
-    BoxTaskFuture, CancellationToken, ChildMetadata, ChildStatus, ChildTerminalResult,
-    MessagePriority, RestartStrategy, SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage,
-    SupervisorPayload, TaskFactory, WaitChildResult, WaitChildrenResult,
+    BoxTaskFuture, CancellationToken, ChildMetadata, ChildRosterEntry, ChildStatus,
+    ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck, SpawnConfig, SpawnResult,
+    SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult, WaitChildrenResult,
 };
 
 use std::collections::HashMap;
