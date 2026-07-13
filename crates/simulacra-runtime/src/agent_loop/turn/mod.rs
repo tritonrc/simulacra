@@ -44,8 +44,13 @@ impl AgentLoop {
         }
         self.drain_input_queue(messages);
         let active_turn = self.active_turn();
+        self.refresh_budget_from_mirror();
 
-        if let Err(exhausted) = self.budget.check_budget() {
+        // The child-count limit governs delegation, not ordinary parent work.
+        // SpawnAgentTool and AgentSupervisor enforce it at the spawn boundary.
+        let mut operation_budget = self.budget.clone();
+        operation_budget.max_sub_agents = 0;
+        if let Err(exhausted) = operation_budget.check_budget() {
             RuntimeMeters::get().budget_exhaustions.add(
                 1,
                 &[
@@ -69,6 +74,7 @@ impl AgentLoop {
             compaction_token_limit(self.budget.max_tokens, self.budget.used_tokens);
         let compacted = self.context_strategy.compact(messages, remaining_tokens);
         let step = StepContext::new(compacted, tool_defs);
+        let budget_before_operation = self.budget.clone();
 
         let llm_request = JournalEntryKind::LlmRequest {
             model: self.config.model.clone(),
@@ -173,7 +179,7 @@ impl AgentLoop {
             .used_tokens
             .saturating_add(response.token_usage.total());
         self.budget.used_turns += 1;
-        self.sync_proc_state();
+        self.merge_budget_into_mirror(&budget_before_operation);
 
         let remaining_turns = self.budget.max_turns.saturating_sub(self.budget.used_turns);
         let remaining_tokens = self

@@ -6,25 +6,38 @@ impl AgentLoop {
         step: &StepContext,
         active_turn: &ActiveTurn,
     ) -> Result<ProviderCallOutcome, RuntimeError> {
+        // `max_sub_agents` is a delegation-only limit. Providers still call
+        // `ResourceBudget::check_budget`, so give them a scoped working copy
+        // that retains all ordinary limits and usage but disables this one.
+        // Provider-authored usage (currently cost) is merged back below.
+        let provider_budget_before = self.budget.clone();
+        let mut provider_budget = self.budget.clone();
+        provider_budget.max_sub_agents = 0;
+
         if let Some(streaming_provider) = self.provider.as_streaming() {
             let stream_sink = ProviderActivityStreamSink::new(Arc::clone(&self.sink));
             let chat = streaming_provider.chat_stream(
                 step.messages(),
                 step.tool_definitions(),
-                &mut self.budget,
+                &mut provider_budget,
                 &stream_sink,
             );
-            let response = if let Some(cancellation) = self.cancellation.clone() {
+            let provider_result = if let Some(cancellation) = self.cancellation.clone() {
                 tokio::select! {
-                    result = chat => result.map_err(RuntimeError::from)?,
+                    result = chat => Some(result),
                     () = wait_for_cancellation(cancellation) => {
                         active_turn.mark_cancelled();
-                        return Ok(ProviderCallOutcome::Cancelled);
+                        None
                     }
                 }
             } else {
-                chat.await.map_err(RuntimeError::from)?
+                Some(chat.await)
             };
+            self.merge_provider_budget_delta(&provider_budget_before, &provider_budget);
+            let Some(provider_result) = provider_result else {
+                return Ok(ProviderCallOutcome::Cancelled);
+            };
+            let response = provider_result.map_err(RuntimeError::from)?;
             if self.is_cancelled() || active_turn.state().cancelled {
                 return Ok(ProviderCallOutcome::Cancelled);
             }
@@ -33,16 +46,49 @@ impl AgentLoop {
                 streamed: true,
             })
         } else {
-            let response = self
+            let provider_result = self
                 .provider
-                .chat(step.messages(), step.tool_definitions(), &mut self.budget)
-                .await
-                .map_err(RuntimeError::from)?;
+                .chat(
+                    step.messages(),
+                    step.tool_definitions(),
+                    &mut provider_budget,
+                )
+                .await;
+            self.merge_provider_budget_delta(&provider_budget_before, &provider_budget);
+            let response = provider_result.map_err(RuntimeError::from)?;
             Ok(ProviderCallOutcome::Response {
                 response,
                 streamed: false,
             })
         }
+    }
+
+    fn merge_provider_budget_delta(
+        &mut self,
+        before: &ResourceBudget,
+        provider_budget: &ResourceBudget,
+    ) {
+        self.budget.used_tokens = self.budget.used_tokens.saturating_add(
+            provider_budget
+                .used_tokens
+                .saturating_sub(before.used_tokens),
+        );
+        self.budget.used_turns = self
+            .budget
+            .used_turns
+            .saturating_add(provider_budget.used_turns.saturating_sub(before.used_turns));
+        if provider_budget.used_cost > before.used_cost {
+            self.budget.used_cost += provider_budget.used_cost - before.used_cost;
+        }
+        self.budget.used_vfs_bytes = self.budget.used_vfs_bytes.saturating_add(
+            provider_budget
+                .used_vfs_bytes
+                .saturating_sub(before.used_vfs_bytes),
+        );
+        self.budget.used_fuel = self
+            .budget
+            .used_fuel
+            .saturating_add(provider_budget.used_fuel.saturating_sub(before.used_fuel));
     }
 }
 

@@ -143,9 +143,22 @@ impl AgentSupervisor {
         parent_budget: ResourceBudget,
         task_factory: Arc<dyn TaskFactory>,
     ) -> Self {
+        Self::with_task_factory_and_shared_budget(
+            parent_capability,
+            Arc::new(Mutex::new(parent_budget)),
+            task_factory,
+        )
+    }
+
+    /// Create a new supervisor with a task factory and a shared parent budget.
+    pub fn with_task_factory_and_shared_budget(
+        parent_capability: CapabilityToken,
+        parent_budget: Arc<Mutex<ResourceBudget>>,
+        task_factory: Arc<dyn TaskFactory>,
+    ) -> Self {
         Self {
             parent_capability,
-            parent_budget: Arc::new(Mutex::new(parent_budget)),
+            parent_budget,
             retry_counts: Mutex::new(HashMap::new()),
             retry_counts_shared: Arc::new(Mutex::new(HashMap::new())),
             children: Mutex::new(HashMap::new()),

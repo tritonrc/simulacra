@@ -287,7 +287,7 @@ struct SupervisorActorParts {
     provider_kind: ProviderKind,
     vfs: Arc<dyn VirtualFs>,
     journal: Arc<dyn JournalStorage>,
-    budget: ResourceBudget,
+    budget: Arc<Mutex<ResourceBudget>>,
     parent_capability: CapabilityToken,
     supervisor_sender: Option<tokio::sync::mpsc::Sender<simulacra_runtime::SupervisorMessage>>,
     parent_model: String,
@@ -1615,7 +1615,7 @@ fn run_booted(
         provider_kind: boot.provider_kind.clone(),
         vfs: Arc::clone(&boot.vfs),
         journal: Arc::clone(&boot.journal),
-        budget: boot.resource_budget.clone(),
+        budget: Arc::clone(&boot.budget_arc),
         parent_capability: boot.capability_token.clone(),
         supervisor_sender: boot.spawn_tx.clone(),
         parent_model: boot.model.clone(),
@@ -2074,7 +2074,7 @@ fn start_supervisor_actor(
         child_provider_factory: parts.child_provider_factory,
         acp_child_runtime: None,
     });
-    let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory(
+    let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory_and_shared_budget(
         parts.parent_capability,
         parts.budget,
         task_factory,
@@ -2108,6 +2108,638 @@ fn build_provider(boot: &CliBootstrap) -> Result<Box<dyn Provider>> {
             // Ollama uses OpenAI-compatible API with no auth
             Ok(Box::new(OpenAiProvider::new("ollama", &boot.model)))
         }
+    }
+}
+
+#[cfg(test)]
+mod budget_regression_tests {
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use simulacra_runtime::{NoopContextStrategy, TurnResult};
+    use simulacra_types::{
+        FinishReason, ProviderError, ProviderResponse, Role, TokenUsage, ToolCallMessage,
+    };
+
+    use super::*;
+
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedProvider {
+        responses: Mutex<VecDeque<ProviderResponse>>,
+        cost_deltas: Mutex<VecDeque<Decimal>>,
+    }
+
+    impl Provider for ScriptedProvider {
+        fn chat<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [ToolDefinition],
+            budget: &'a mut ResourceBudget,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                budget
+                    .check_budget()
+                    .map_err(ProviderError::BudgetExhausted)?;
+                if let Some(cost) = self
+                    .cost_deltas
+                    .lock()
+                    .expect("scripted provider cost lock should not be poisoned")
+                    .pop_front()
+                {
+                    budget.used_cost += cost;
+                }
+                self.responses
+                    .lock()
+                    .expect("scripted provider lock should not be poisoned")
+                    .pop_front()
+                    .ok_or_else(|| ProviderError::Other("provider script exhausted".into()))
+            })
+        }
+    }
+
+    fn response(message: Message, finish_reason: FinishReason) -> ProviderResponse {
+        response_with_usage(message, finish_reason, 0, 0)
+    }
+
+    fn response_with_usage(
+        message: Message,
+        finish_reason: FinishReason,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> ProviderResponse {
+        ProviderResponse {
+            message,
+            token_usage: TokenUsage {
+                input_tokens,
+                output_tokens,
+            },
+            finish_reason,
+            provider_response_id: None,
+            model: "claude-sonnet-4-20250514".into(),
+        }
+    }
+
+    fn scripted_provider(
+        responses: impl IntoIterator<Item = ProviderResponse>,
+    ) -> ScriptedProvider {
+        ScriptedProvider {
+            responses: Mutex::new(responses.into_iter().collect()),
+            cost_deltas: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn scripted_provider_with_costs(
+        responses: impl IntoIterator<Item = ProviderResponse>,
+        cost_deltas: impl IntoIterator<Item = Decimal>,
+    ) -> ScriptedProvider {
+        ScriptedProvider {
+            responses: Mutex::new(responses.into_iter().collect()),
+            cost_deltas: Mutex::new(cost_deltas.into_iter().collect()),
+        }
+    }
+
+    fn assistant(content: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }
+    }
+
+    #[test]
+    fn interactive_supervisor_actor_spawn_uses_current_shared_parent_turn_budget() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should be created");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("temporary config directory should be created");
+            let config_path = dir.path().join("simulacra.toml");
+            std::fs::write(
+                &config_path,
+                r#"[project]
+name = "s006-stale-supervisor-budget"
+
+[agent_types.default]
+model = "claude-sonnet-4-20250514"
+max_turns = 3
+max_tokens = 1000
+can_spawn = ["researcher"]
+
+[agent_types.default.capabilities]
+paths_read = ["/workspace/**"]
+
+[agent_types.researcher]
+model = "claude-sonnet-4-20250514"
+max_turns = 2
+max_tokens = 100
+
+[agent_types.researcher.capabilities]
+paths_read = ["/workspace/**"]
+
+[task]
+entry_agent = "default"
+task = "bootstrap"
+"#,
+            )
+            .expect("temporary config should be written");
+
+            let mut boot = bootstrap(&CliArgs {
+                config_path: config_path.to_string_lossy().into_owned(),
+                task: Some("bootstrap".into()),
+                mode: Some(CliMode::Interactive),
+                verbose: false,
+                otlp_endpoint: None,
+                session: None,
+                model: None,
+                max_turns: None,
+                max_tokens: None,
+                max_cost: None,
+                no_catalog: true,
+                output_format: OutputFormat::Text,
+            })
+            .expect("spawn-capable CLI bootstrap should succeed offline");
+
+            let spawn_rx = boot
+                .spawn_rx
+                .take()
+                .expect("can_spawn should create the supervisor channel");
+            let supervisor_sender = boot
+                .spawn_tx
+                .clone()
+                .expect("can_spawn should create the supervisor sender");
+            let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
+            let supervisor_parts = SupervisorActorParts {
+                spawn_rx,
+                config: boot.config.clone(),
+                provider_kind: boot.provider_kind.clone(),
+                vfs: Arc::clone(&boot.vfs),
+                journal: Arc::clone(&journal),
+                budget: Arc::clone(&boot.budget_arc),
+                parent_capability: boot.capability_token.clone(),
+                supervisor_sender: boot.spawn_tx.clone(),
+                parent_model: boot.model.clone(),
+                pipeline: Arc::clone(&boot.pipeline),
+                integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
+                entry_agent: boot.entry_agent.clone(),
+                child_provider_factory: None,
+            };
+            let _supervisor_task = AbortOnDrop(
+                start_supervisor_actor(&runtime, Some(supervisor_parts), None)
+                    .expect("supervisor actor should start"),
+            );
+
+            {
+                let mirrored = boot
+                    .budget_arc
+                    .lock()
+                    .expect("budget mirror lock should not be poisoned");
+                assert_eq!(mirrored.used_turns, 0);
+            }
+
+            let spawn_turn_budget = Arc::clone(&boot.budget_arc);
+            let spawn_call = Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCallMessage {
+                    id: "spawn-after-parent-turns".into(),
+                    name: "spawn_agent".into(),
+                    arguments: serde_json::json!({
+                        "agent_type": "researcher",
+                        "task": "inspect the budget",
+                        "budget": {
+                            "max_tokens": 100,
+                            "max_turns": 2,
+                            "max_cost": "0",
+                            "max_sub_agents": 0
+                        }
+                    }),
+                }],
+                tool_call_id: None,
+                provider_content: vec![],
+            };
+            let provider = scripted_provider([
+                response(assistant("parent turn one"), FinishReason::EndTurn),
+                response(assistant("parent turn two"), FinishReason::EndTurn),
+                response(spawn_call, FinishReason::ToolUse),
+            ]);
+            let mut agent_loop = AgentLoop::new(
+                AgentLoopConfig {
+                    agent_id: AgentId(boot.entry_agent.clone()),
+                    system_prompt: "budget regression".into(),
+                    model: boot.model.clone(),
+                    max_turns: boot.resource_budget.max_turns,
+                    capability: boot.capability_token.clone(),
+                },
+                Box::new(provider),
+                boot.tool_registry,
+                Box::new(NoopContextStrategy),
+                Arc::clone(&journal),
+                boot.resource_budget,
+                None,
+                None,
+            );
+            agent_loop.set_proc_budget_mirror(Arc::clone(&boot.budget_arc), boot.proc_turn);
+
+            let mut messages = vec![Message {
+                role: Role::System,
+                content: "budget regression".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            }];
+            for turn in 1..=2 {
+                messages.push(Message {
+                    role: Role::User,
+                    content: format!("parent turn {turn}"),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    provider_content: vec![],
+                });
+                assert!(matches!(
+                    agent_loop.run_single_turn(&mut messages).await,
+                    Ok(TurnResult::Complete(_))
+                ));
+            }
+
+            {
+                let mirrored = spawn_turn_budget
+                    .lock()
+                    .expect("budget mirror lock should not be poisoned");
+                assert_eq!(
+                    mirrored.used_turns, 2,
+                    "two completed parent turns should update the shared budget mirror"
+                );
+            }
+
+            messages.push(Message {
+                role: Role::User,
+                content: "spawn after several parent turns".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            });
+            assert!(matches!(
+                agent_loop.run_single_turn(&mut messages).await,
+                Ok(TurnResult::ToolCallsProcessed { .. })
+            ));
+
+            let spawn_result = messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::Tool)
+                .expect("spawn_agent should append a tool result");
+            assert!(
+                spawn_result
+                    .content
+                    .contains("budget exhausted: turns — used 3, limit 3"),
+                "spawn should be rejected from the current shared parent budget; got: {}",
+                spawn_result.content
+            );
+
+            let (roster_tx, roster_rx) = tokio::sync::oneshot::channel();
+            supervisor_sender
+                .send(simulacra_runtime::SupervisorMessage {
+                    priority: simulacra_runtime::MessagePriority::Command,
+                    agent_id: AgentId("budget-regression-roster".into()),
+                    payload: simulacra_runtime::SupervisorPayload::ListChildren(roster_tx),
+                })
+                .await
+                .expect("supervisor should accept a roster query");
+            let roster = roster_rx
+                .await
+                .expect("supervisor should answer the roster query")
+                .expect("roster query should succeed");
+            assert!(
+                roster.is_empty(),
+                "a budget-rejected spawn must not create a child; got {roster:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn interactive_supervisor_actor_spawn_preserves_completed_child_rollup_after_parent_turn_sync()
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should be created");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("temporary config directory should be created");
+            let config_path = dir.path().join("simulacra.toml");
+            std::fs::write(
+                &config_path,
+                r#"[project]
+name = "s006-child-rollup-budget-sync"
+
+[agent_types.default]
+model = "claude-sonnet-4-20250514"
+max_turns = 4
+max_tokens = 100
+max_cost = "0.02"
+max_sub_agents = 1
+can_spawn = ["researcher"]
+
+[agent_types.default.capabilities]
+paths_read = ["/workspace/**"]
+
+[agent_types.researcher]
+model = "claude-sonnet-4-20250514"
+max_turns = 1
+max_tokens = 20
+max_cost = "0.01"
+
+[agent_types.researcher.capabilities]
+paths_read = ["/workspace/**"]
+
+[task]
+entry_agent = "default"
+task = "bootstrap"
+"#,
+            )
+            .expect("temporary config should be written");
+
+            let mut boot = bootstrap(&CliArgs {
+                config_path: config_path.to_string_lossy().into_owned(),
+                task: Some("bootstrap".into()),
+                mode: Some(CliMode::Interactive),
+                verbose: false,
+                otlp_endpoint: None,
+                session: None,
+                model: None,
+                max_turns: None,
+                max_tokens: None,
+                max_cost: None,
+                no_catalog: true,
+                output_format: OutputFormat::Text,
+            })
+            .expect("spawn-capable CLI bootstrap should succeed offline");
+
+            let spawn_rx = boot
+                .spawn_rx
+                .take()
+                .expect("can_spawn should create the supervisor channel");
+            let supervisor_sender = boot
+                .spawn_tx
+                .clone()
+                .expect("can_spawn should create the supervisor sender");
+            let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
+            let child_provider_factory: simulacra_runtime::ChildProviderFactory =
+                Arc::new(|_, _| {
+                    Ok(Box::new(scripted_provider_with_costs(
+                        [response_with_usage(
+                            assistant("child complete"),
+                            FinishReason::EndTurn,
+                            7,
+                            5,
+                        )],
+                        [Decimal::new(5, 3)],
+                    )) as Box<dyn Provider>)
+                });
+            let supervisor_parts = SupervisorActorParts {
+                spawn_rx,
+                config: boot.config.clone(),
+                provider_kind: boot.provider_kind.clone(),
+                vfs: Arc::clone(&boot.vfs),
+                journal: Arc::clone(&journal),
+                budget: Arc::clone(&boot.budget_arc),
+                parent_capability: boot.capability_token.clone(),
+                supervisor_sender: boot.spawn_tx.clone(),
+                parent_model: boot.model.clone(),
+                pipeline: Arc::clone(&boot.pipeline),
+                integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
+                entry_agent: boot.entry_agent.clone(),
+                child_provider_factory: Some(child_provider_factory),
+            };
+            let _supervisor_task = AbortOnDrop(
+                start_supervisor_actor(&runtime, Some(supervisor_parts), None)
+                    .expect("supervisor actor should start"),
+            );
+
+            let first_spawn_call = Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCallMessage {
+                    id: "spawn-child-with-usage".into(),
+                    name: "spawn_agent".into(),
+                    arguments: serde_json::json!({
+                        "agent_type": "researcher",
+                        "task": "complete with usage",
+                        "budget": {
+                            "max_tokens": 20,
+                            "max_turns": 1,
+                            "max_cost": "0.01",
+                            "max_sub_agents": 0
+                        }
+                    }),
+                }],
+                tool_call_id: None,
+                provider_content: vec![],
+            };
+            let second_spawn_call = Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCallMessage {
+                    id: "spawn-after-child-rollup-and-parent-turn".into(),
+                    name: "spawn_agent".into(),
+                    arguments: serde_json::json!({
+                        "agent_type": "researcher",
+                        "task": "must be rejected by combined usage",
+                        "budget": {
+                            "max_tokens": 1,
+                            "max_turns": 1,
+                            "max_cost": "0.001",
+                            "max_sub_agents": 0
+                        }
+                    }),
+                }],
+                tool_call_id: None,
+                provider_content: vec![],
+            };
+            let provider = scripted_provider([
+                response(first_spawn_call, FinishReason::ToolUse),
+                response(assistant("parent follow-up turn"), FinishReason::EndTurn),
+                response(second_spawn_call, FinishReason::ToolUse),
+            ]);
+            let mut agent_loop = AgentLoop::new(
+                AgentLoopConfig {
+                    agent_id: AgentId(boot.entry_agent.clone()),
+                    system_prompt: "budget regression".into(),
+                    model: boot.model.clone(),
+                    max_turns: boot.resource_budget.max_turns,
+                    capability: boot.capability_token.clone(),
+                },
+                Box::new(provider),
+                boot.tool_registry,
+                Box::new(NoopContextStrategy),
+                Arc::clone(&journal),
+                boot.resource_budget,
+                None,
+                None,
+            );
+            agent_loop.set_proc_budget_mirror(Arc::clone(&boot.budget_arc), boot.proc_turn);
+
+            let mut messages = vec![Message {
+                role: Role::System,
+                content: "budget regression".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            }];
+
+            messages.push(Message {
+                role: Role::User,
+                content: "spawn first child".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            });
+            assert!(matches!(
+                agent_loop.run_single_turn(&mut messages).await,
+                Ok(TurnResult::ToolCallsProcessed { .. })
+            ));
+
+            let first_spawn_result = messages
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.role == Role::Tool
+                        && message.tool_call_id.as_deref() == Some("spawn-child-with-usage")
+                })
+                .expect("spawn_agent should append the first tool result");
+            let child_id = serde_json::from_str::<serde_json::Value>(&first_spawn_result.content)
+                .expect("spawn response should be valid JSON")
+                .get("child_id")
+                .and_then(|value| value.as_str())
+                .expect("spawn response should include child_id")
+                .to_owned();
+            let (join_tx, join_rx) = tokio::sync::oneshot::channel();
+            supervisor_sender
+                .send(simulacra_runtime::SupervisorMessage {
+                    priority: simulacra_runtime::MessagePriority::Command,
+                    agent_id: AgentId(child_id.clone()),
+                    payload: simulacra_runtime::SupervisorPayload::JoinChild(
+                        AgentId(child_id),
+                        join_tx,
+                    ),
+                })
+                .await
+                .expect("supervisor should accept the join query");
+            join_rx
+                .await
+                .expect("supervisor should answer the join query")
+                .expect("scripted child should complete successfully");
+
+            {
+                let mirrored = boot
+                    .budget_arc
+                    .lock()
+                    .expect("budget mirror lock should not be poisoned");
+                assert_eq!(mirrored.used_sub_agents, 1);
+                assert_eq!(mirrored.used_turns, 2);
+                assert_eq!(mirrored.used_tokens, 12);
+                assert_eq!(mirrored.used_cost, Decimal::new(5, 3));
+            }
+
+            messages.push(Message {
+                role: Role::User,
+                content: "parent performs another model turn".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            });
+            let parent_follow_up = agent_loop.run_single_turn(&mut messages).await;
+            assert!(
+                matches!(parent_follow_up, Ok(TurnResult::Complete(_))),
+                "parent model turn should remain available after the child slot is consumed; got: {parent_follow_up:?}"
+            );
+
+            {
+                let mirrored = boot
+                    .budget_arc
+                    .lock()
+                    .expect("budget mirror lock should not be poisoned");
+                assert_eq!(
+                    mirrored.used_sub_agents, 1,
+                    "parent budget mirror sync must preserve completed child spawn count"
+                );
+                assert_eq!(
+                    mirrored.used_turns, 3,
+                    "parent budget mirror sync must keep parent turns plus completed child turns"
+                );
+                assert_eq!(
+                    mirrored.used_tokens, 12,
+                    "parent budget mirror sync must preserve completed child token rollup"
+                );
+                assert_eq!(
+                    mirrored.used_cost,
+                    Decimal::new(5, 3),
+                    "parent budget mirror sync must preserve completed child cost rollup"
+                );
+            }
+
+            messages.push(Message {
+                role: Role::User,
+                content: "spawn after child rollup and parent turn".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            });
+            assert!(matches!(
+                agent_loop.run_single_turn(&mut messages).await,
+                Ok(TurnResult::ToolCallsProcessed { .. })
+            ));
+
+            let spawn_result = messages
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.role == Role::Tool
+                        && message.tool_call_id.as_deref()
+                            == Some("spawn-after-child-rollup-and-parent-turn")
+                })
+                .expect("second spawn_agent should append a tool result");
+            assert!(
+                spawn_result
+                    .content
+                    .contains("budget exhausted: sub_agents — used 1, limit 1"),
+                "second spawn should see combined parent plus completed-child usage; got: {}",
+                spawn_result.content
+            );
+
+            let (roster_tx, roster_rx) = tokio::sync::oneshot::channel();
+            supervisor_sender
+                .send(simulacra_runtime::SupervisorMessage {
+                    priority: simulacra_runtime::MessagePriority::Command,
+                    agent_id: AgentId("budget-regression-roster".into()),
+                    payload: simulacra_runtime::SupervisorPayload::ListChildren(roster_tx),
+                })
+                .await
+                .expect("supervisor should accept a roster query");
+            let roster = roster_rx
+                .await
+                .expect("supervisor should answer the roster query")
+                .expect("roster query should succeed");
+            assert_eq!(
+                roster.len(),
+                1,
+                "budget-rejected second spawn must not create another child; got {roster:?}"
+            );
+        });
     }
 }
 

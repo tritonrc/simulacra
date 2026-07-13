@@ -58,7 +58,7 @@ impl AgentLoop {
             }
             if let Some(checkpoint) = latest_checkpoint {
                 self.budget = checkpoint.budget_snapshot;
-                self.sync_proc_state();
+                self.replace_budget_mirror();
                 if !checkpoint.messages.is_empty() {
                     messages = checkpoint.messages;
                 }

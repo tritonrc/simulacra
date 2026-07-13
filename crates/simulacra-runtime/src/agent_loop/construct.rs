@@ -78,20 +78,85 @@ impl AgentLoop {
     ) {
         self.budget_mirror = Some(budget);
         self.turn_mirror = Some(turn);
-        self.sync_proc_state();
+        self.refresh_budget_from_mirror();
     }
 
-    pub(super) fn sync_proc_state(&self) {
+    /// Refresh the loop-owned working copy from the shared authoritative budget.
+    ///
+    /// The supervisor may roll child usage into the shared budget between parent
+    /// turns. Refreshing before a new operation ensures those deductions constrain
+    /// the parent's next budget check.
+    pub(super) fn refresh_budget_from_mirror(&mut self) {
         if let Some(ref mirror) = self.budget_mirror {
             match mirror.lock() {
-                Ok(mut budget) => {
-                    *budget = self.budget.clone();
+                Ok(budget) => {
+                    self.budget = budget.clone();
                 }
                 Err(err) => {
-                    tracing::warn!(error = %err, "failed to sync /proc budget mirror");
+                    tracing::warn!(error = %err, "failed to refresh shared budget mirror");
                 }
             }
         }
+        self.sync_turn_mirror();
+    }
+
+    /// Merge usage consumed by one parent operation into shared state.
+    ///
+    /// Only the delta since `before` is added while holding the mutex. This
+    /// preserves child usage recorded concurrently by the supervisor instead
+    /// of replacing it with the loop's older snapshot.
+    pub(super) fn merge_budget_into_mirror(&mut self, before: &ResourceBudget) {
+        if let Some(ref mirror) = self.budget_mirror {
+            match mirror.lock() {
+                Ok(mut shared) => {
+                    shared.used_tokens = shared
+                        .used_tokens
+                        .saturating_add(self.budget.used_tokens.saturating_sub(before.used_tokens));
+                    shared.used_turns = shared
+                        .used_turns
+                        .saturating_add(self.budget.used_turns.saturating_sub(before.used_turns));
+                    if self.budget.used_cost > before.used_cost {
+                        shared.used_cost += self.budget.used_cost - before.used_cost;
+                    }
+                    shared.used_sub_agents = shared.used_sub_agents.saturating_add(
+                        self.budget
+                            .used_sub_agents
+                            .saturating_sub(before.used_sub_agents),
+                    );
+                    shared.used_vfs_bytes = shared.used_vfs_bytes.saturating_add(
+                        self.budget
+                            .used_vfs_bytes
+                            .saturating_sub(before.used_vfs_bytes),
+                    );
+                    shared.used_fuel = shared
+                        .used_fuel
+                        .saturating_add(self.budget.used_fuel.saturating_sub(before.used_fuel));
+                    self.budget = shared.clone();
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to merge shared budget mirror");
+                }
+            }
+        }
+        self.sync_turn_mirror();
+    }
+
+    /// Replace shared state during explicit checkpoint restoration.
+    pub(super) fn replace_budget_mirror(&self) {
+        if let Some(ref mirror) = self.budget_mirror {
+            match mirror.lock() {
+                Ok(mut shared) => {
+                    *shared = self.budget.clone();
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to restore shared budget mirror");
+                }
+            }
+        }
+        self.sync_turn_mirror();
+    }
+
+    fn sync_turn_mirror(&self) {
         if let Some(ref turn) = self.turn_mirror {
             turn.store(self.budget.used_turns as u64, Ordering::Relaxed);
         }
