@@ -13,3 +13,4 @@ demos/**/*.db-shm
 demos/**/*.db-wal
 .claude/worktrees/
 .superpowers/
+.worktrees/
