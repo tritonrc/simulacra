@@ -70,6 +70,29 @@ implementation selected by `acp_profile`.
 - [ ] ACP result tool counts are derived from the returned terminal output or
   activity-derived counts, not from prose parsing.
 
+### Steer Delivery
+
+- [ ] `AcpChildRuntime::start_child` receives the child's `AgentInputQueue` so
+  parent steer messages (`steer_child_agent` → `SupervisorPayload::SteerChild`)
+  can reach the ACP session; the port has no default that silently drops the
+  queue.
+- [ ] `AgentInputQueue` exposes a public async `recv()` returning
+  `Option<String>`: queued messages in enqueue order, `None` once every
+  `ChildInputHandle` has dropped.
+- [ ] The ACP factory branch passes the supervisor-registered input queue —
+  the same queue whose `ChildInputHandle` the supervisor holds in
+  `child_inputs` — to the injected ACP runtime, so a steer against a live ACP
+  child feeds the runtime rather than an undrained queue.
+- [ ] Native child steering is unchanged: `AgentLoop` still drains the queue
+  between model turns.
+- [ ] Delivery timing, retry, and readiness policy are the embedding's
+  responsibility; Simulacra guarantees only that the queue handed to the port
+  is the live steer source for that child.
+- [ ] Cancel wins: the supervisor may still accept steers for a child whose
+  cancellation has begun (the input sender lives until the child task ends);
+  ACP runtime implementations must stop consuming the queue once they observe
+  cancellation or produce a terminal result, discarding undelivered messages.
+
 ### VFS Independence
 
 - [ ] ACP child execution does not require `VirtualFs`.
@@ -78,6 +101,17 @@ implementation selected by `acp_profile`.
 - [ ] ACP child execution does not register native Simulacra tools for the child.
 - [ ] ACP child execution does not require local sandbox inspection APIs.
 - [ ] Simulacra must not require local filesystem mediation for ACP children.
+
+### Known limitation (pre-existing, out of scope here)
+
+- The supervisor retry path (`run_task_with_retries`, strategies `RetryOnce` /
+  `RetryTwiceThenFail`) rebuilds the child via `TaskFactory::create_task`,
+  which mints a fresh input queue (handle dropped) and a fresh cancellation
+  token that is never registered — a retried child (native or ACP) is
+  therefore neither steerable nor cancellable through the supervisor's
+  retained handles. Unreachable from the `spawn_agent` tool path, which
+  hard-codes `RestartStrategy::LetCrash`. Fixing retry re-wiring (queue +
+  token swap per attempt) is its own follow-up task.
 
 ## Non-Goals
 

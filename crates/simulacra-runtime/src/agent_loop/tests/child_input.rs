@@ -84,3 +84,21 @@ async fn queued_child_input_is_appended_before_next_provider_call_in_fifo_order(
         vec!["original task", "first steer", "second steer"]
     );
 }
+
+#[tokio::test]
+async fn input_queue_receives_buffered_messages_in_order_after_all_input_handles_drop() {
+    let (mut input_queue, handle) = AgentInputQueue::new();
+    let retained_handle = handle.clone();
+    handle
+        .enqueue("first steer".into())
+        .expect("first message should enqueue");
+    drop(handle);
+    retained_handle
+        .enqueue("second steer".into())
+        .expect("second message should enqueue");
+    drop(retained_handle);
+
+    assert_eq!(input_queue.recv().await.as_deref(), Some("first steer"));
+    assert_eq!(input_queue.recv().await.as_deref(), Some("second steer"));
+    assert_eq!(input_queue.recv().await, None);
+}

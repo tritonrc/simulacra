@@ -155,7 +155,12 @@ fn child_proc_runtime_overlays_child_proc_state_and_delegates_mailbox() {
     );
 }
 
-type ScriptedAcpHandler = dyn Fn(AcpChildRequest, CancellationToken, Arc<dyn ActivitySink>) -> crate::AcpChildFuture
+type ScriptedAcpHandler = dyn Fn(
+        AcpChildRequest,
+        CancellationToken,
+        Arc<dyn ActivitySink>,
+        AgentInputQueue,
+    ) -> crate::AcpChildFuture
     + Send
     + Sync;
 
@@ -166,7 +171,12 @@ struct ScriptedAcpRuntime {
 impl ScriptedAcpRuntime {
     fn new<F>(handler: F) -> Arc<Self>
     where
-        F: Fn(AcpChildRequest, CancellationToken, Arc<dyn ActivitySink>) -> crate::AcpChildFuture
+        F: Fn(
+                AcpChildRequest,
+                CancellationToken,
+                Arc<dyn ActivitySink>,
+                AgentInputQueue,
+            ) -> crate::AcpChildFuture
             + Send
             + Sync
             + 'static,
@@ -183,8 +193,9 @@ impl AcpChildRuntime for ScriptedAcpRuntime {
         request: AcpChildRequest,
         cancellation: CancellationToken,
         activity_sink: Arc<dyn ActivitySink>,
+        input_queue: AgentInputQueue,
     ) -> crate::AcpChildFuture {
-        (self.handler)(request, cancellation, activity_sink)
+        (self.handler)(request, cancellation, activity_sink, input_queue)
     }
 }
 
@@ -374,28 +385,366 @@ fn s056_factory_with_pipeline(
 }
 
 #[tokio::test]
+async fn live_acp_child_receives_supervisor_steer_message_through_runtime_queue() {
+    let (runtime_started_tx, runtime_started_rx) = tokio::sync::oneshot::channel();
+    let runtime_started_tx = Arc::new(Mutex::new(Some(runtime_started_tx)));
+    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+    let delivered_tx = Arc::new(Mutex::new(Some(delivered_tx)));
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, _cancellation, _activity_sink, mut input_queue| {
+            let runtime_started_tx = Arc::clone(&runtime_started_tx);
+            let delivered_tx = Arc::clone(&delivered_tx);
+            Box::pin(async move {
+                runtime_started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("runtime should report that it is waiting for steer input")
+                    .send(())
+                    .expect("test should still wait for the runtime to start");
+                let message = input_queue
+                    .recv()
+                    .await
+                    .expect("live supervisor input handle should keep the queue open");
+                delivered_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("runtime should deliver one steer message")
+                    .send(message)
+                    .expect("test should still wait for the delivered steer");
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "steer received",
+                    TokenUsage::default(),
+                    1,
+                ))
+            })
+        },
+    );
+    let factory = Arc::new(s056_factory(
+        Some(runtime),
+        Arc::new(NoopActivitySink),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let supervisor = AgentSupervisor::with_task_factory(
+        s056_parent_capability(),
+        ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
+        factory,
+    );
+    let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
+    let supervisor_task = tokio::spawn(async move {
+        supervisor.run_actor_loop(supervisor_rx).await;
+    });
+
+    let (spawn_result_tx, spawn_result_rx) = tokio::sync::oneshot::channel();
+    supervisor_tx
+        .send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("child-acp-1".into()),
+            payload: SupervisorPayload::Spawn(Box::new(s056_spawn_config()), spawn_result_tx),
+        })
+        .await
+        .expect("supervisor should accept ACP spawn request");
+    let child_id = spawn_result_rx
+        .await
+        .expect("supervisor should reply to ACP spawn request")
+        .expect("ACP spawn should be accepted")
+        .child_id;
+    tokio::time::timeout(Duration::from_secs(1), runtime_started_rx)
+        .await
+        .expect("scripted ACP runtime should start")
+        .expect("runtime start signal should arrive");
+
+    let (steer_result_tx, steer_result_rx) = tokio::sync::oneshot::channel();
+    supervisor_tx
+        .send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: child_id.clone(),
+            payload: SupervisorPayload::SteerChild(
+                child_id,
+                "inspect the changed files".into(),
+                steer_result_tx,
+            ),
+        })
+        .await
+        .expect("supervisor should accept steer request");
+    steer_result_rx
+        .await
+        .expect("supervisor should reply to steer request")
+        .expect("live ACP child should accept steering");
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), delivered_rx)
+            .await
+            .expect("runtime should receive a queued steer")
+            .expect("runtime should send received steer to test"),
+        "inspect the changed files"
+    );
+
+    drop(supervisor_tx);
+    supervisor_task
+        .await
+        .expect("supervisor should exit after ACP child completes");
+}
+
+#[tokio::test]
+async fn live_acp_child_receives_supervisor_steers_in_enqueue_order() {
+    let (runtime_started_tx, runtime_started_rx) = tokio::sync::oneshot::channel();
+    let runtime_started_tx = Arc::new(Mutex::new(Some(runtime_started_tx)));
+    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+    let delivered_tx = Arc::new(Mutex::new(Some(delivered_tx)));
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, _cancellation, _activity_sink, mut input_queue| {
+            let runtime_started_tx = Arc::clone(&runtime_started_tx);
+            let delivered_tx = Arc::clone(&delivered_tx);
+            Box::pin(async move {
+                runtime_started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("runtime should report that it is waiting for steer input")
+                    .send(())
+                    .expect("test should still wait for the runtime to start");
+                let first = input_queue
+                    .recv()
+                    .await
+                    .expect("first steer should be delivered while child is live");
+                let second = input_queue
+                    .recv()
+                    .await
+                    .expect("second steer should be delivered while child is live");
+                delivered_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("runtime should deliver received steers")
+                    .send(vec![first, second])
+                    .expect("test should still wait for delivered steers");
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "steers received",
+                    TokenUsage::default(),
+                    1,
+                ))
+            })
+        },
+    );
+    let factory = Arc::new(s056_factory(
+        Some(runtime),
+        Arc::new(NoopActivitySink),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let supervisor = AgentSupervisor::with_task_factory(
+        s056_parent_capability(),
+        ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
+        factory,
+    );
+    let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
+    let supervisor_task = tokio::spawn(async move {
+        supervisor.run_actor_loop(supervisor_rx).await;
+    });
+
+    let (spawn_result_tx, spawn_result_rx) = tokio::sync::oneshot::channel();
+    supervisor_tx
+        .send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("child-acp-1".into()),
+            payload: SupervisorPayload::Spawn(Box::new(s056_spawn_config()), spawn_result_tx),
+        })
+        .await
+        .expect("supervisor should accept ACP spawn request");
+    let child_id = spawn_result_rx
+        .await
+        .expect("supervisor should reply to ACP spawn request")
+        .expect("ACP spawn should be accepted")
+        .child_id;
+    tokio::time::timeout(Duration::from_secs(1), runtime_started_rx)
+        .await
+        .expect("scripted ACP runtime should start")
+        .expect("runtime start signal should arrive");
+
+    for message in ["first steer", "second steer"] {
+        let (steer_result_tx, steer_result_rx) = tokio::sync::oneshot::channel();
+        supervisor_tx
+            .send(SupervisorMessage {
+                priority: MessagePriority::Command,
+                agent_id: child_id.clone(),
+                payload: SupervisorPayload::SteerChild(
+                    child_id.clone(),
+                    message.into(),
+                    steer_result_tx,
+                ),
+            })
+            .await
+            .expect("supervisor should accept steer request");
+        steer_result_rx
+            .await
+            .expect("supervisor should reply to steer request")
+            .expect("live ACP child should accept steering");
+    }
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), delivered_rx)
+            .await
+            .expect("runtime should receive queued steers")
+            .expect("runtime should send received steers to test"),
+        vec!["first steer", "second steer"]
+    );
+
+    drop(supervisor_tx);
+    supervisor_task
+        .await
+        .expect("supervisor should exit after ACP child completes");
+}
+
+#[tokio::test]
+async fn steer_is_still_accepted_after_cancellation_has_begun_while_child_lives() {
+    let (runtime_started_tx, runtime_started_rx) = tokio::sync::oneshot::channel();
+    let runtime_started_tx = Arc::new(Mutex::new(Some(runtime_started_tx)));
+    let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
+    let delivered_tx = Arc::new(Mutex::new(Some(delivered_tx)));
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, _cancellation, _activity_sink, mut input_queue| {
+            let runtime_started_tx = Arc::clone(&runtime_started_tx);
+            let delivered_tx = Arc::clone(&delivered_tx);
+            Box::pin(async move {
+                runtime_started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("runtime should report that it is waiting for steer input")
+                    .send(())
+                    .expect("test should still wait for the runtime to start");
+                let message = input_queue.recv().await.expect(
+                    "live supervisor input handle should keep the queue open \
+                     even after cancellation has begun, while the child task is still live",
+                );
+                delivered_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("runtime should deliver the steer received after cancellation began")
+                    .send(message)
+                    .expect("test should still wait for the delivered steer");
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "steer received after cancellation began",
+                    TokenUsage::default(),
+                    1,
+                ))
+            })
+        },
+    );
+    let factory = Arc::new(s056_factory(
+        Some(runtime),
+        Arc::new(NoopActivitySink),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let supervisor = AgentSupervisor::with_task_factory(
+        s056_parent_capability(),
+        ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
+        factory,
+    );
+    let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
+    let supervisor_task = tokio::spawn(async move {
+        supervisor.run_actor_loop(supervisor_rx).await;
+    });
+
+    let (spawn_result_tx, spawn_result_rx) = tokio::sync::oneshot::channel();
+    supervisor_tx
+        .send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("child-acp-1".into()),
+            payload: SupervisorPayload::Spawn(Box::new(s056_spawn_config()), spawn_result_tx),
+        })
+        .await
+        .expect("supervisor should accept ACP spawn request");
+    let child_id = spawn_result_rx
+        .await
+        .expect("supervisor should reply to ACP spawn request")
+        .expect("ACP spawn should be accepted")
+        .child_id;
+    tokio::time::timeout(Duration::from_secs(1), runtime_started_rx)
+        .await
+        .expect("scripted ACP runtime should start")
+        .expect("runtime start signal should arrive");
+
+    // Cancellation begins, but the scripted runtime keeps running (it has not
+    // observed the cancellation token yet) — the child task is still live.
+    let (cancel_result_tx, cancel_result_rx) = tokio::sync::oneshot::channel();
+    supervisor_tx
+        .send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: child_id.clone(),
+            payload: SupervisorPayload::CancelChild(child_id.clone(), cancel_result_tx),
+        })
+        .await
+        .expect("supervisor should accept cancel request");
+    cancel_result_rx
+        .await
+        .expect("supervisor should reply to cancel request")
+        .expect("live ACP child should accept cancellation");
+
+    let (steer_result_tx, steer_result_rx) = tokio::sync::oneshot::channel();
+    supervisor_tx
+        .send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: child_id.clone(),
+            payload: SupervisorPayload::SteerChild(
+                child_id.clone(),
+                "inspect the changed files despite cancellation".into(),
+                steer_result_tx,
+            ),
+        })
+        .await
+        .expect("supervisor should accept steer request");
+    steer_result_rx
+        .await
+        .expect("supervisor should reply to steer request")
+        .expect("steer must still be accepted for a child whose cancellation has begun while it is still live");
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), delivered_rx)
+            .await
+            .expect("scripted runtime should actually receive the post-cancellation steer")
+            .expect("runtime should send the received steer to test"),
+        "inspect the changed files despite cancellation"
+    );
+
+    drop(supervisor_tx);
+    supervisor_task
+        .await
+        .expect("supervisor should exit after ACP child completes");
+}
+
+#[tokio::test]
 async fn s056_acp_factory_delegates_request_without_native_environment() {
     let requests = Arc::new(Mutex::new(Vec::<AcpChildRequest>::new()));
     let requests_for_runtime = Arc::clone(&requests);
-    let runtime = ScriptedAcpRuntime::new(move |request, cancellation, activity_sink| {
-        let requests = Arc::clone(&requests_for_runtime);
-        Box::pin(async move {
-            assert!(!cancellation.is_cancelled());
-            activity_sink.emit(ActivityEvent::Token {
-                text: "delegated".into(),
-            });
-            requests.lock().unwrap().push(request);
-            Ok(s056_acp_output(
-                ExitReason::Complete,
-                "ACP terminal summary",
-                TokenUsage {
-                    input_tokens: 13,
-                    output_tokens: 21,
-                },
-                3,
-            ))
-        })
-    });
+    let runtime =
+        ScriptedAcpRuntime::new(move |request, cancellation, activity_sink, _input_queue| {
+            let requests = Arc::clone(&requests_for_runtime);
+            Box::pin(async move {
+                assert!(!cancellation.is_cancelled());
+                activity_sink.emit(ActivityEvent::Token {
+                    text: "delegated".into(),
+                });
+                requests.lock().unwrap().push(request);
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "ACP terminal summary",
+                    TokenUsage {
+                        input_tokens: 13,
+                        output_tokens: 21,
+                    },
+                    3,
+                ))
+            })
+        });
 
     let native_cell_built = Arc::new(AtomicBool::new(false));
     let native_tools_registered = Arc::new(AtomicBool::new(false));
@@ -490,18 +839,20 @@ async fn s056_acp_spawn_runs_simulacra_spawn_hooks_without_native_environment() 
     );
     let runtime_started = Arc::new(AtomicBool::new(false));
     let runtime_started_for_runtime = Arc::clone(&runtime_started);
-    let runtime = ScriptedAcpRuntime::new(move |_request, _cancellation, _activity_sink| {
-        let runtime_started = Arc::clone(&runtime_started_for_runtime);
-        Box::pin(async move {
-            runtime_started.store(true, Ordering::SeqCst);
-            Ok(s056_acp_output(
-                ExitReason::Complete,
-                "hooked ACP summary",
-                TokenUsage::default(),
-                1,
-            ))
-        })
-    });
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, _cancellation, _activity_sink, _input_queue| {
+            let runtime_started = Arc::clone(&runtime_started_for_runtime);
+            Box::pin(async move {
+                runtime_started.store(true, Ordering::SeqCst);
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "hooked ACP summary",
+                    TokenUsage::default(),
+                    1,
+                ))
+            })
+        },
+    );
 
     let factory = s056_factory_with_pipeline(Some(runtime), Arc::new(pipeline));
 
@@ -537,18 +888,20 @@ async fn s056_acp_spawn_before_hook_denial_prevents_runtime_start() {
     );
     let runtime_started = Arc::new(AtomicBool::new(false));
     let runtime_started_for_runtime = Arc::clone(&runtime_started);
-    let runtime = ScriptedAcpRuntime::new(move |_request, _cancellation, _activity_sink| {
-        let runtime_started = Arc::clone(&runtime_started_for_runtime);
-        Box::pin(async move {
-            runtime_started.store(true, Ordering::SeqCst);
-            Ok(s056_acp_output(
-                ExitReason::Complete,
-                "should not run",
-                TokenUsage::default(),
-                1,
-            ))
-        })
-    });
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, _cancellation, _activity_sink, _input_queue| {
+            let runtime_started = Arc::clone(&runtime_started_for_runtime);
+            Box::pin(async move {
+                runtime_started.store(true, Ordering::SeqCst);
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "should not run",
+                    TokenUsage::default(),
+                    1,
+                ))
+            })
+        },
+    );
 
     let factory = s056_factory_with_pipeline(Some(runtime), Arc::new(pipeline));
 
@@ -573,21 +926,23 @@ async fn s056_acp_spawn_before_hook_denial_prevents_runtime_start() {
 async fn s056_acp_runtime_receives_cancellation_token() {
     let observed_cancellation = Arc::new(AtomicBool::new(false));
     let observed_for_runtime = Arc::clone(&observed_cancellation);
-    let runtime = ScriptedAcpRuntime::new(move |_request, cancellation, _activity_sink| {
-        let observed = Arc::clone(&observed_for_runtime);
-        Box::pin(async move {
-            while !cancellation.is_cancelled() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            observed.store(true, Ordering::SeqCst);
-            Ok(s056_acp_output(
-                ExitReason::Cancelled,
-                "cancelled by parent",
-                TokenUsage::default(),
-                0,
-            ))
-        })
-    });
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, cancellation, _activity_sink, _input_queue| {
+            let observed = Arc::clone(&observed_for_runtime);
+            Box::pin(async move {
+                while !cancellation.is_cancelled() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                observed.store(true, Ordering::SeqCst);
+                Ok(s056_acp_output(
+                    ExitReason::Cancelled,
+                    "cancelled by parent",
+                    TokenUsage::default(),
+                    0,
+                ))
+            })
+        },
+    );
 
     let factory = s056_factory(
         Some(runtime),
@@ -613,31 +968,33 @@ async fn s056_acp_runtime_receives_cancellation_token() {
 
 #[tokio::test]
 async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_prose_parsing() {
-    let runtime = ScriptedAcpRuntime::new(move |_request, _cancellation, activity_sink| {
-        Box::pin(async move {
-            activity_sink.emit(ActivityEvent::ToolStart {
-                tool_call_id: "acp-tool-1".into(),
-                name: "remote_search".into(),
-                arguments: serde_json::json!({"query": "S056"}),
-            });
-            activity_sink.emit(ActivityEvent::ToolFinish {
-                tool_call_id: "acp-tool-1".into(),
-                name: "remote_search".into(),
-                is_error: false,
-                duration_ms: 3,
-                exit_code: None,
-            });
-            Ok(s056_acp_output(
-                ExitReason::Complete,
-                "I used remote_search once, but this prose must not be parsed for counts.",
-                TokenUsage {
-                    input_tokens: 5,
-                    output_tokens: 8,
-                },
-                1,
-            ))
-        })
-    });
+    let runtime = ScriptedAcpRuntime::new(
+        move |_request, _cancellation, activity_sink, _input_queue| {
+            Box::pin(async move {
+                activity_sink.emit(ActivityEvent::ToolStart {
+                    tool_call_id: "acp-tool-1".into(),
+                    name: "remote_search".into(),
+                    arguments: serde_json::json!({"query": "S056"}),
+                });
+                activity_sink.emit(ActivityEvent::ToolFinish {
+                    tool_call_id: "acp-tool-1".into(),
+                    name: "remote_search".into(),
+                    is_error: false,
+                    duration_ms: 3,
+                    exit_code: None,
+                });
+                Ok(s056_acp_output(
+                    ExitReason::Complete,
+                    "I used remote_search once, but this prose must not be parsed for counts.",
+                    TokenUsage {
+                        input_tokens: 5,
+                        output_tokens: 8,
+                    },
+                    1,
+                ))
+            })
+        },
+    );
 
     let (activity_tx, mut activity_rx) = tokio::sync::mpsc::unbounded_channel();
     let activity_sink: Arc<dyn ActivitySink> = Arc::new(ChannelActivitySink::new(activity_tx));

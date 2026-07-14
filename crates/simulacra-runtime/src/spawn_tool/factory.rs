@@ -273,7 +273,14 @@ impl crate::TaskFactory for AgentTaskFactory {
                     budget: spawn_config.budget.clone(),
                     capability: effective_capability,
                 };
-                let result = runtime.start_child(request, cancellation, sink).await;
+                let Some(acp_input_queue) = input_queue.take() else {
+                    return Err(RuntimeError::Session(
+                        "ACP child input queue already consumed".into(),
+                    ));
+                };
+                let result = runtime
+                    .start_child(request, cancellation, sink, acp_input_queue)
+                    .await;
                 run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);
                 let mut output = result?;
                 let activity_tool_uses = tool_finishes.load(std::sync::atomic::Ordering::Relaxed);

@@ -25,6 +25,14 @@ impl AgentInputQueue {
         }
         messages
     }
+
+    /// Await the next queued steering message.
+    ///
+    /// Returns `None` once every [`ChildInputHandle`] for this queue has
+    /// dropped, without waiting for a message that will never arrive.
+    pub async fn recv(&mut self) -> Option<String> {
+        self.receiver.recv().await
+    }
 }
 
 impl ChildInputHandle {
