@@ -1408,9 +1408,9 @@ mod tests {
             entries.iter().any(|entry| matches!(
                 &entry.entry,
                 JournalEntryKind::ToolCall { tool_name, arguments, .. }
-                    if tool_name == "mcp_search" && arguments == &json!({"query":"echo"})
+                    if tool_name == "mcp_search" && arguments == &json!({"query_length":4})
             )),
-            "search publication must be journaled before returning searchable tools; entries: {entries:?}"
+            "search publication must journal safe query metadata before returning searchable tools; entries: {entries:?}"
         );
         assert!(
             entries
@@ -1487,5 +1487,104 @@ mod tests {
         }
         assert!(search_message.to_ascii_lowercase().contains("search"));
         assert!(call_message.contains("github") && call_message.contains("secret_error_tool"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_search_and_call_redact_secret_inputs_from_journal_and_tracing() {
+        let _guard = catalog_test_guard().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let journal = Arc::new(RecordingJournal::default());
+        let agent_id = AgentId("secret-input-agent".into());
+        let remote = JsonRpcServer::new("issues").await;
+        let catalog = McpCatalog::with_journal(
+            vec![McpServerDescriptor::network(
+                "github".into(),
+                remote.url.clone(),
+                Some("http".into()),
+            )],
+            journal.clone(),
+            agent_id.clone(),
+        )
+        .expect("catalog should construct");
+        catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect("activation should succeed");
+
+        let secret_query = "issues https://QUERYUSER:QUERYPASS@example.invalid/mcp?token=QUERYTOKEN Authorization: Bearer QUERYAUTH";
+        let results = McpSearchTool::new(Arc::clone(&catalog))
+            .call(json!({"query":secret_query}), &mcp_capability())
+            .await
+            .expect("search should succeed");
+        assert_eq!(results.as_array().expect("search result array").len(), 0);
+        McpSearchTool::new(Arc::clone(&catalog))
+            .call(json!({"query":"issues"}), &mcp_capability())
+            .await
+            .expect("safe search should publish the remote tool");
+        let secret_arguments = json!({
+            "endpoint":"https://CALLUSER:CALLPASS@example.invalid/mcp?token=CALLTOKEN",
+            "authorization":"Bearer CALLAUTH",
+            "module_path":"/private/CALLMODULE.wasm"
+        });
+        McpCallTool::new(catalog)
+            .call(
+                json!({"server":"github","tool":"issues","arguments":secret_arguments}),
+                &mcp_capability(),
+            )
+            .await
+            .expect("remote call should succeed");
+
+        let entries = journal.read_all(&agent_id).expect("journal should read");
+        let observable = format!(
+            "{:?}\n{:?}",
+            entries,
+            events.lock().expect("event capture mutex")
+        );
+        for secret in [
+            "QUERYUSER",
+            "QUERYPASS",
+            "QUERYTOKEN",
+            "QUERYAUTH",
+            "CALLUSER",
+            "CALLPASS",
+            "CALLTOKEN",
+            "CALLAUTH",
+            "CALLMODULE",
+        ] {
+            assert!(
+                !observable.contains(secret),
+                "journals and tracing must omit raw search/call inputs containing {secret}; got: {observable}"
+            );
+        }
+        let captured = events.lock().expect("event capture mutex");
+        let search_event = captured
+            .iter()
+            .find(|event| {
+                event.fields.get("simulacra.mcp.search.query_length")
+                    == Some(&secret_query.len().to_string())
+            })
+            .expect("safe search telemetry");
+        assert_eq!(
+            search_event.fields.get("simulacra.mcp.search.query_length"),
+            Some(&secret_query.len().to_string())
+        );
+        assert_eq!(
+            search_event.fields.get("simulacra.mcp.search.result_count"),
+            Some(&"0".into())
+        );
+        assert!(captured.iter().any(|event| {
+            event
+                .fields
+                .get("server")
+                .is_some_and(|value| value == "github")
+                && event
+                    .fields
+                    .get("tool")
+                    .is_some_and(|value| value == "issues")
+        }));
     }
 }
