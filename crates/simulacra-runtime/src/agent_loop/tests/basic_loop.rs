@@ -168,6 +168,7 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
     let provider = FakeProvider::new(vec![
         tool_call_response("mcp_search", search_arguments.clone()),
         tool_call_response("mcp_call", call_arguments.clone()),
+        tool_call_response("echo", serde_json::json!({"ordinary":"kept"})),
         text_response("Done"),
     ]);
     let search_calls = Arc::new(Mutex::new(Vec::new()));
@@ -185,12 +186,19 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
             calls: Arc::clone(&call_calls),
         }))
         .unwrap();
-    let mut agent = build_loop(
-        provider,
+    tools.register(Box::new(EchoTool)).unwrap();
+    let (activity_tx, mut activity_rx) = tokio::sync::mpsc::unbounded_channel();
+    let activity_sink: Arc<dyn crate::ActivitySink> =
+        Arc::new(crate::ChannelActivitySink::new(activity_tx));
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(provider),
         tools,
         Box::new(PassthroughContext),
         journal.clone(),
         default_budget(),
+        Some(activity_sink),
+        None,
     );
 
     agent.run("exercise MCP meta tools").await.unwrap();
@@ -240,6 +248,48 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
         "CALLMODULE",
     ] {
         assert!(!rendered.contains(secret));
+    }
+
+    let activity_starts = std::iter::from_fn(|| activity_rx.try_recv().ok())
+        .filter_map(|event| match event {
+            simulacra_types::ActivityEvent::ToolStart {
+                name, arguments, ..
+            } => Some((name, arguments)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activity_starts,
+        vec![
+            (
+                "mcp_search".into(),
+                serde_json::json!({"query_length":query.len()})
+            ),
+            (
+                "mcp_call".into(),
+                serde_json::json!({
+                    "server":"github",
+                    "tool":"issues",
+                    "argument_length":remote_arguments.to_string().len()
+                })
+            ),
+            ("echo".into(), serde_json::json!({"ordinary":"kept"}))
+        ],
+        "MCP meta-tool activity must expose only safe metadata while unrelated tools remain unchanged"
+    );
+    let activity_rendered = format!("{activity_starts:?}");
+    for secret in [
+        "QUERYUSER",
+        "QUERYPASS",
+        "QUERYTOKEN",
+        "QUERYAUTH",
+        "CALLUSER",
+        "CALLPASS",
+        "CALLTOKEN",
+        "CALLAUTH",
+        "CALLMODULE",
+    ] {
+        assert!(!activity_rendered.contains(secret));
     }
 }
 
