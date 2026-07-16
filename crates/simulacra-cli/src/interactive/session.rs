@@ -13,6 +13,7 @@ use simulacra_types::{
 };
 #[cfg(any(test, feature = "test-support"))]
 use simulacra_types::{ProviderError, ProviderResponse};
+use tracing::Instrument;
 
 use crate::activity_blocks::ActivityBlockRenderer;
 
@@ -233,6 +234,20 @@ where
                         .iter()
                         .find(|s| s.name == skill_name && s.user_invocable)
                     {
+                        let correlation = format!("{}:{skill_name}", self.view.session_id);
+                        let trigger_span = tracing::info_span!(
+                            "user_skill_load",
+                            simulacra.skill.name = %skill_name,
+                            simulacra.skill.source = "user",
+                            simulacra.mcp.activation.correlation = %correlation,
+                        );
+                        {
+                            let _entered = trigger_span.enter();
+                            tracing::info!(
+                                linked = "interactive_session",
+                                "user-triggered skill load recorded before provider execution"
+                            );
+                        }
                         if let (Some(activator), Some(capability)) = (
                             self.skill_dependency_activator.clone(),
                             self.skill_capability.clone(),
@@ -240,12 +255,23 @@ where
                             let dependency_result = std::thread::spawn({
                                 let name = skill.name.clone();
                                 let servers = skill.mcp_servers.clone();
+                                let context = simulacra_types::SkillActivationContext::user(
+                                    correlation.clone(),
+                                );
+                                let activation_span = trigger_span.clone();
                                 move || {
                                     tokio::runtime::Builder::new_current_thread()
                                         .enable_all()
                                         .build()
                                         .map_err(|error| error.to_string())?
-                                        .block_on(activator.activate(name, servers, capability))
+                                        .block_on(
+                                            async move {
+                                                activator
+                                                    .activate(name, servers, capability, context)
+                                                    .await
+                                            }
+                                            .instrument(activation_span),
+                                        )
                                         .map_err(|error| error.to_string())
                                 }
                             })
@@ -260,15 +286,6 @@ where
                                 return self.view.clone();
                             }
                         }
-                        // User-triggered skill loads emit a tracing event
-                        // linked to the interactive_turn span before provider
-                        // execution with simulacra.skill.source = "user".
-                        tracing::info!(
-                            simulacra.skill.name = %skill_name,
-                            simulacra.skill.source = "user",
-                            linked = "interactive_turn",
-                            "user-triggered skill load recorded before provider execution"
-                        );
                         let line = format!("Loaded skill: {} — {}", skill.name, skill.description);
                         self.view.visible_output.push(line.clone());
                         self.io.write_line(&line);

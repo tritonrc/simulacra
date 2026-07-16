@@ -337,8 +337,17 @@ impl Tool for SkillTool {
 
         Box::pin(async move {
             if let Some(activator) = activator {
+                let mut activation_context = simulacra_types::SkillActivationContext::model();
+                if let Some(span_id) = tracing::Span::current().id() {
+                    activation_context.correlation = format!("{span_id:?}");
+                }
                 activator
-                    .activate(command.clone(), mcp_servers, activation_capability)
+                    .activate(
+                        command.clone(),
+                        mcp_servers,
+                        activation_capability,
+                        activation_context,
+                    )
                     .await?;
             }
             // Load the SKILL.md body via AgentCell::read_file (Golden Rule).

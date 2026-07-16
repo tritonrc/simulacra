@@ -175,7 +175,7 @@ impl McpManager {
             tracing::error!(
                 server = server,
                 tool = tool,
-                error = %msg,
+                error = "WASM tool failure (details redacted)",
                 "WASM trap during call_tool: tool not found"
             );
             return Err(McpError::ProtocolError(msg));
@@ -372,7 +372,7 @@ impl McpManager {
                 tracing::warn!(
                     server = server,
                     tool = tool,
-                    error = %msg,
+                    error = "WASM tool failure (details redacted)",
                     "WASM MCP tool reported execution failure"
                 );
                 Err(McpError::ProtocolError(format!("execution failed: {msg}")))
@@ -384,7 +384,7 @@ impl McpManager {
                 tracing::error!(
                     server = server,
                     tool = tool,
-                    error = %err,
+                    error = "WASM tool failure (details redacted)",
                     "WASM trap during call_tool"
                 );
                 Err(err)

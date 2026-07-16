@@ -287,12 +287,38 @@ pub trait Tool: Send + Sync + 'static {
 
 /// Host-side dependency activation invoked by the `Skill` tool before its body
 /// becomes visible. Implementations own any network-backed catalog state.
+#[derive(Debug, Clone)]
+pub struct SkillActivationContext {
+    pub source: String,
+    pub link: String,
+    pub correlation: String,
+}
+
+impl SkillActivationContext {
+    pub fn model() -> Self {
+        Self {
+            source: "model".into(),
+            link: "tool_invoke".into(),
+            correlation: "tool_invoke".into(),
+        }
+    }
+
+    pub fn user(correlation: impl Into<String>) -> Self {
+        Self {
+            source: "user".into(),
+            link: "user_skill_load".into(),
+            correlation: correlation.into(),
+        }
+    }
+}
+
 pub trait SkillDependencyActivator: Send + Sync + 'static {
     fn activate(
         &self,
         skill: String,
         mcp_servers: Vec<String>,
         capability: CapabilityToken,
+        context: SkillActivationContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ToolError>> + Send + '_>>;
 }
 

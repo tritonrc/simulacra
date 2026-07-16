@@ -30,13 +30,13 @@ impl McpManager {
                     arguments: arguments.clone(),
                 },
             };
-            journal.append(entry).map_err(|e| {
+            journal.append(entry).map_err(|_error| {
                 tracing::warn!(
-                    error = %e,
+                    error = "journal storage failure (details redacted)",
                     tool = tool_name,
                     "journal append failed — aborting MCP dispatch to preserve replay determinism"
                 );
-                McpError::ProtocolError(format!("journal append failed: {e}"))
+                McpError::ProtocolError("journal append failed (details redacted)".into())
             })?;
         }
         Ok(())

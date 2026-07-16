@@ -161,6 +161,22 @@ impl McpCatalog {
         servers: &[String],
         capability: &CapabilityToken,
     ) -> Result<usize, ToolError> {
+        self.activate_with_context(
+            skill,
+            servers,
+            capability,
+            &simulacra_types::SkillActivationContext::model(),
+        )
+        .await
+    }
+
+    pub async fn activate_with_context(
+        &self,
+        skill: &str,
+        servers: &[String],
+        capability: &CapabilityToken,
+        context: &simulacra_types::SkillActivationContext,
+    ) -> Result<usize, ToolError> {
         let _activation_guard = self.activation_lock.lock().await;
         let mut unique = Vec::new();
         for server in servers {
@@ -174,7 +190,7 @@ impl McpCatalog {
             "mcp_activation",
             &json!({"skill": skill, "servers": declared_servers}),
         ) {
-            emit_activation_telemetry(skill, &declared_servers, 0, "failure");
+            emit_activation_telemetry(skill, &declared_servers, 0, "failure", context);
             tracing::warn!(
                 simulacra.skill.name = %skill,
                 simulacra.mcp.activation.outcome = "failure",
@@ -187,7 +203,7 @@ impl McpCatalog {
             )));
         }
         if let Err(error) = self.validate_dependencies(skill, &unique, capability) {
-            emit_activation_telemetry(skill, &declared_servers, 0, "failure");
+            emit_activation_telemetry(skill, &declared_servers, 0, "failure", context);
             return Err(error);
         }
         let already: BTreeSet<String> = self.state.lock().await.activated.keys().cloned().collect();
@@ -196,7 +212,7 @@ impl McpCatalog {
             .filter(|server| !already.contains(server))
             .collect();
         if pending.is_empty() {
-            emit_activation_telemetry(skill, &declared_servers, 0, "success");
+            emit_activation_telemetry(skill, &declared_servers, 0, "success", context);
             return Ok(0);
         }
 
@@ -245,14 +261,14 @@ impl McpCatalog {
             for server in &pending {
                 manager.discard_server(server);
             }
-            emit_activation_telemetry(skill, &declared_servers, 0, "failure");
+            emit_activation_telemetry(skill, &declared_servers, 0, "failure", context);
             return Err(error);
         }
         drop(manager);
         let count = temporary.values().map(Vec::len).sum();
         let mut state = self.state.lock().await;
         state.activated.extend(temporary);
-        emit_activation_telemetry(skill, &declared_servers, count, "success");
+        emit_activation_telemetry(skill, &declared_servers, count, "success", context);
         Ok(count)
     }
 
@@ -275,7 +291,10 @@ impl McpCatalog {
             .lock()
             .await
             .append_journal_tool_call("mcp_search", &json!({"query": query}))
-            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+            .map_err(|_| {
+                tracing::warn!(stage = "audit", "MCP catalog search failed");
+                ToolError::ExecutionFailed("MCP catalog search could not be audited".into())
+            })?;
         let mut state = self.state.lock().await;
         for (server, tool) in &matches {
             state.published.insert((server.clone(), tool.name.clone()));
@@ -302,12 +321,24 @@ impl McpCatalog {
                 "MCP tool {server}:{tool} is not activated and search-published for this session"
             )));
         }
-        self.manager
+        let result = self
+            .manager
             .lock()
             .await
             .call_tool(&server, &tool, arguments, &capability)
-            .await
-            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))
+            .await;
+        match result {
+            Ok(value) => Ok(value),
+            Err(crate::McpError::CapabilityDenied(detail)) => Err(ToolError::ExecutionFailed(
+                format!("capability denied for MCP tool {server}:{tool}: {detail}"),
+            )),
+            Err(_) => {
+                tracing::warn!(server = %server, tool = %tool, stage = "dispatch", "MCP catalog call failed");
+                Err(ToolError::ExecutionFailed(format!(
+                    "MCP call to server {server:?} tool {tool:?} failed during dispatch"
+                )))
+            }
+        }
     }
 }
 
@@ -317,9 +348,10 @@ impl SkillDependencyActivator for McpCatalog {
         skill: String,
         mcp_servers: Vec<String>,
         capability: CapabilityToken,
+        context: simulacra_types::SkillActivationContext,
     ) -> Pin<Box<dyn Future<Output = Result<(), ToolError>> + Send + '_>> {
         Box::pin(async move {
-            self.activate(&skill, &mcp_servers, &capability)
+            self.activate_with_context(&skill, &mcp_servers, &capability, &context)
                 .await
                 .map(|_| ())
         })
@@ -333,13 +365,22 @@ fn capability_allows_server(capability: &CapabilityToken, server: &str) -> bool 
     })
 }
 
-fn emit_activation_telemetry(skill: &str, servers: &[String], tool_count: usize, outcome: &str) {
+fn emit_activation_telemetry(
+    skill: &str,
+    servers: &[String],
+    tool_count: usize,
+    outcome: &str,
+    context: &simulacra_types::SkillActivationContext,
+) {
     let server_set = serde_json::to_string(servers).unwrap_or_else(|_| "[]".to_string());
     tracing::info!(
         simulacra.skill.name = %skill,
         simulacra.mcp.servers = %server_set,
         simulacra.mcp.activated_tool_count = tool_count,
         simulacra.mcp.activation.outcome = %outcome,
+        simulacra.skill.source = %context.source,
+        simulacra.mcp.activation.link = %context.link,
+        simulacra.mcp.activation.correlation = %context.correlation,
         "MCP skill activation"
     );
 }
