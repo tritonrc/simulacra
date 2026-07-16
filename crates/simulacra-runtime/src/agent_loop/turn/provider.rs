@@ -101,6 +101,13 @@ pub(super) async fn wait_for_cancellation(cancellation: crate::CancellationToken
 struct ProviderActivityStreamSink {
     sink: Arc<dyn ActivitySink>,
     thinking: Mutex<Option<ThinkingState>>,
+    tool_calls: Mutex<ToolCallStreamState>,
+}
+
+#[derive(Default)]
+struct ToolCallStreamState {
+    names_by_index: std::collections::HashMap<u64, String>,
+    names_by_id: std::collections::HashMap<String, String>,
 }
 
 struct ThinkingState {
@@ -113,6 +120,7 @@ impl ProviderActivityStreamSink {
         Self {
             sink,
             thinking: Mutex::new(None),
+            tool_calls: Mutex::new(ToolCallStreamState::default()),
         }
     }
 }
@@ -127,8 +135,34 @@ impl simulacra_types::ProviderStreamSink for ProviderActivityStreamSink {
                 index,
                 tool_call_id,
                 name,
-                arguments_delta,
+                mut arguments_delta,
             } => {
+                let is_mcp_meta_tool = self
+                    .tool_calls
+                    .lock()
+                    .ok()
+                    .map(|mut tool_calls| {
+                        if let Some(name) = name.as_ref() {
+                            tool_calls.names_by_index.insert(index, name.clone());
+                            if let Some(tool_call_id) = tool_call_id.as_ref() {
+                                tool_calls
+                                    .names_by_id
+                                    .insert(tool_call_id.clone(), name.clone());
+                            }
+                        }
+                        name.as_deref()
+                            .or_else(|| {
+                                tool_call_id.as_ref().and_then(|tool_call_id| {
+                                    tool_calls.names_by_id.get(tool_call_id).map(String::as_str)
+                                })
+                            })
+                            .or_else(|| tool_calls.names_by_index.get(&index).map(String::as_str))
+                            .is_some_and(is_mcp_meta_tool)
+                    })
+                    .unwrap_or_else(|| name.as_deref().is_some_and(is_mcp_meta_tool));
+                if is_mcp_meta_tool {
+                    arguments_delta = "[REDACTED]".into();
+                }
                 self.sink.emit(ActivityEvent::ToolCallDelta {
                     index,
                     tool_call_id,
@@ -168,4 +202,8 @@ impl simulacra_types::ProviderStreamSink for ProviderActivityStreamSink {
             }
         }
     }
+}
+
+fn is_mcp_meta_tool(name: &str) -> bool {
+    matches!(name, "mcp_search" | "mcp_call")
 }

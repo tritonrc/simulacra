@@ -90,7 +90,7 @@ impl AgentLoop {
         self.sink.emit(ActivityEvent::ToolApprovalRequired {
             tool_call_id: tc.id.clone(),
             name: tc.name.clone(),
-            arguments: tc.arguments.clone(),
+            arguments: safe_outer_tool_arguments(&tc.name, &tc.arguments),
             reason: Some("tool execution requires approval".into()),
         });
 
@@ -205,7 +205,10 @@ impl AgentLoop {
     }
 }
 
-fn safe_outer_tool_arguments(tool_name: &str, arguments: &serde_json::Value) -> serde_json::Value {
+pub(super) fn safe_outer_tool_arguments(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> serde_json::Value {
     match tool_name {
         "mcp_search" => serde_json::json!({
             "query_length": arguments
