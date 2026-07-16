@@ -350,3 +350,318 @@ impl Tool for McpCallTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    use simulacra_types::{
+        AgentId, CheckpointData, JOURNAL_SCHEMA_VERSION, JournalEntry, JournalEntryKind,
+        JournalError, JournalStorage, TokenUsage,
+    };
+
+    #[derive(Default)]
+    struct RecordingJournal(Mutex<Vec<JournalEntry>>);
+
+    impl JournalStorage for RecordingJournal {
+        fn append(&self, entry: JournalEntry) -> Result<(), JournalError> {
+            self.0.lock().expect("journal mutex").push(entry);
+            Ok(())
+        }
+
+        fn read_all(&self, agent_id: &AgentId) -> Result<Vec<JournalEntry>, JournalError> {
+            Ok(self
+                .0
+                .lock()
+                .expect("journal mutex")
+                .iter()
+                .filter(|entry| entry.agent_id == *agent_id)
+                .cloned()
+                .collect())
+        }
+
+        fn query_token_usage(&self, _: &AgentId) -> Result<TokenUsage, JournalError> {
+            Ok(TokenUsage::default())
+        }
+
+        fn save_checkpoint(
+            &self,
+            _: &AgentId,
+            _: usize,
+            _: CheckpointData,
+        ) -> Result<(), JournalError> {
+            Ok(())
+        }
+
+        fn fork_from(
+            &self,
+            agent_id: &AgentId,
+            _: usize,
+        ) -> Result<Vec<JournalEntry>, JournalError> {
+            self.read_all(agent_id)
+        }
+
+        fn read_from(
+            &self,
+            agent_id: &AgentId,
+            _: usize,
+        ) -> Result<Vec<JournalEntry>, JournalError> {
+            self.read_all(agent_id)
+        }
+    }
+
+    struct JsonRpcServer {
+        url: String,
+        initialize_requests: Arc<AtomicUsize>,
+        tools_list_requests: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl JsonRpcServer {
+        fn new(tool_name: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("test MCP server should bind");
+            listener
+                .set_nonblocking(true)
+                .expect("test MCP listener should be nonblocking");
+            let url = format!(
+                "http://{}",
+                listener.local_addr().expect("test server address")
+            );
+            let initialize_requests = Arc::new(AtomicUsize::new(0));
+            let tools_list_requests = Arc::new(AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let initialize_for_thread = Arc::clone(&initialize_requests);
+            let list_for_thread = Arc::clone(&tools_list_requests);
+            let stop_for_thread = Arc::clone(&stop);
+            let thread = thread::spawn(move || {
+                while !stop_for_thread.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(Duration::from_millis(200)))
+                                .expect("request timeout");
+                            let Some(request) = read_json_rpc_request(&mut stream) else {
+                                continue;
+                            };
+                            let body = if request.contains("\\\"method\\\":\\\"initialize\\\"") {
+                                initialize_for_thread.fetch_add(1, Ordering::SeqCst);
+                                json!({"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"test","version":"1"},"capabilities":{}}}).to_string()
+                            } else if request.contains("\\\"method\\\":\\\"tools/list\\\"") {
+                                list_for_thread.fetch_add(1, Ordering::SeqCst);
+                                json!({"jsonrpc":"2.0","result":{"tools":[{"name":tool_name,"description":"A catalog test tool","inputSchema":{"type":"object"}}]}}).to_string()
+                            } else {
+                                json!({"jsonrpc":"2.0","result":{}}).to_string()
+                            };
+                            let response = format!(
+                                "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            let _ = stream.flush();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2))
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                url,
+                initialize_requests,
+                tools_list_requests,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for JsonRpcServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("test MCP server should stop");
+            }
+        }
+    }
+
+    fn mcp_capability() -> CapabilityToken {
+        CapabilityToken {
+            mcp_tools: vec!["mcp:*:*".into()],
+            ..Default::default()
+        }
+    }
+
+    fn read_json_rpc_request(stream: &mut std::net::TcpStream) -> Option<String> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut expected_len = None;
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    request.extend_from_slice(&buffer[..read]);
+                    if expected_len.is_none() {
+                        if let Some(end) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            let header_end = end + 4;
+                            let headers = String::from_utf8_lossy(&request[..header_end]);
+                            let body_len = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    name.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().ok())
+                                        .flatten()
+                                })
+                                .unwrap_or(0);
+                            expected_len = Some(header_end + body_len);
+                        }
+                    }
+                    if expected_len.is_some_and(|length| request.len() >= length) {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return (!request.is_empty())
+                        .then(|| String::from_utf8_lossy(&request).into_owned());
+                }
+                Err(_) => return None,
+            }
+        }
+        (!request.is_empty()).then(|| String::from_utf8_lossy(&request).into_owned())
+    }
+
+    #[tokio::test]
+    async fn failed_multi_server_activation_discards_manager_state_and_retry_restarts_cleanly() {
+        let healthy = JsonRpcServer::new("healthy_tool");
+        let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable port");
+        let unavailable_url = format!(
+            "http://{}",
+            unavailable.local_addr().expect("unavailable address")
+        );
+        drop(unavailable);
+
+        let catalog = McpCatalog::new(vec![
+            McpServerDescriptor::network(
+                "healthy".into(),
+                healthy.url.clone(),
+                Some("http".into()),
+            ),
+            McpServerDescriptor::network(
+                "unavailable".into(),
+                unavailable_url,
+                Some("http".into()),
+            ),
+        ])
+        .expect("catalog should construct");
+
+        catalog
+            .activate(
+                "repo-work",
+                &["healthy".into(), "unavailable".into()],
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("one unavailable dependency must fail the whole activation");
+
+        assert!(
+            catalog.state.lock().await.activated.is_empty(),
+            "failed activation must not publish inventory"
+        );
+        assert!(
+            catalog.manager.lock().await.connections.is_empty(),
+            "failed activation must discard provisional manager connections as well as catalog inventory"
+        );
+
+        catalog
+            .activate("repo-work", &["healthy".into()], &mcp_capability())
+            .await
+            .expect("retry after atomic rollback should start a fresh healthy handshake");
+        assert_eq!(
+            healthy.initialize_requests.load(Ordering::SeqCst),
+            2,
+            "the retry must re-initialize instead of reusing a connection retained from the failed transaction"
+        );
+        assert_eq!(
+            healthy.tools_list_requests.load(Ordering::SeqCst),
+            2,
+            "the retry must re-inventory instead of reusing provisional tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_and_search_are_journaled_with_agent_attribution_before_catalog_visibility()
+    {
+        let catalog = McpCatalog::new(vec![McpServerDescriptor::wasm(
+            "github".into(),
+            WasmMcpServerDescriptor {
+                module_path: std::path::PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/echo-mcp.wasm"
+                )),
+                network_allowlist: Vec::new(),
+                hooks: None,
+                journal: None,
+                agent_id: AgentId("catalog-agent".into()),
+            },
+        )])
+        .expect("catalog should construct");
+        let journal = Arc::new(RecordingJournal::default());
+        let agent_id = AgentId("catalog-agent".into());
+        {
+            let mut manager = catalog.manager.lock().await;
+            manager.journal = Some(journal.clone());
+            manager.agent_id = agent_id.clone();
+        }
+
+        catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect("activation should succeed");
+        let search = McpSearchTool::new(Arc::clone(&catalog));
+        let found = search
+            .call(json!({"query":"echo"}), &mcp_capability())
+            .await
+            .expect("search should return activated tool");
+        assert_eq!(found.as_array().expect("search array").len(), 1);
+
+        let entries = journal.read_all(&agent_id).expect("journal should read");
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::ToolCall { tool_name, arguments, .. }
+                    if tool_name == "mcp_activation"
+                        && arguments == &json!({"skill":"repo-work","servers":["github"]})
+            )),
+            "activation must be recorded with skill and dependency set before its inventory becomes visible; entries: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::ToolCall { tool_name, arguments, .. }
+                    if tool_name == "mcp_search" && arguments == &json!({"query":"echo"})
+            )),
+            "search publication must be journaled before returning searchable tools; entries: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.schema_version == JOURNAL_SCHEMA_VERSION)
+        );
+    }
+}
