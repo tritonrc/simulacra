@@ -175,7 +175,16 @@ impl McpCatalog {
             &json!({"skill": skill, "servers": declared_servers}),
         ) {
             emit_activation_telemetry(skill, &declared_servers, 0, "failure");
-            return Err(ToolError::ExecutionFailed(error.to_string()));
+            tracing::warn!(
+                simulacra.skill.name = %skill,
+                simulacra.mcp.activation.outcome = "failure",
+                stage = "audit",
+                "MCP skill activation failed"
+            );
+            let _ = error;
+            return Err(ToolError::ExecutionFailed(format!(
+                "skill {skill:?} MCP activation could not be audited"
+            )));
         }
         if let Err(error) = self.validate_dependencies(skill, &unique, capability) {
             emit_activation_telemetry(skill, &declared_servers, 0, "failure");
@@ -193,35 +202,45 @@ impl McpCatalog {
 
         let mut temporary = BTreeMap::new();
         let result: Result<(), ToolError> = async {
-        for server in &pending {
-            let descriptor = self.descriptors.get(server).ok_or_else(|| {
-                ToolError::ExecutionFailed(format!(
-                    "skill {skill:?} references unknown MCP server {server:?}"
-                ))
-            })?;
-            match &descriptor.kind {
-                McpServerKind::Network { url, transport } => manager.connect_named(&descriptor.name, url, transport.as_deref()).await,
-                McpServerKind::Wasm(descriptor) => {
-                    let mut module = crate::load_wasm_mcp_module(&descriptor.module_path).map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
-                    module = module.with_network_allowlist(descriptor.network_allowlist.clone()).with_agent_id(descriptor.agent_id.clone());
-                    if let Some(hooks) = &descriptor.hooks { module = module.with_hooks(Arc::clone(hooks)); }
-                    if let Some(journal) = &descriptor.journal { module = module.with_journal(Arc::clone(journal)); }
-                    manager.connect_wasm_module(server, module).await
+            for server in &pending {
+                let descriptor = self.descriptors.get(server).ok_or_else(|| {
+                    ToolError::ExecutionFailed(format!(
+                        "skill {skill:?} references unknown MCP server {server:?}"
+                    ))
+                })?;
+                match &descriptor.kind {
+                    McpServerKind::Network { url, transport } => {
+                        manager
+                            .connect_named(&descriptor.name, url, transport.as_deref())
+                            .await
+                    }
+                    McpServerKind::Wasm(descriptor) => {
+                        let mut module = crate::load_wasm_mcp_module(&descriptor.module_path)
+                            .map_err(|_| {
+                                sanitized_activation_error(skill, server, "module_load")
+                            })?;
+                        module = module
+                            .with_network_allowlist(descriptor.network_allowlist.clone())
+                            .with_agent_id(descriptor.agent_id.clone());
+                        if let Some(hooks) = &descriptor.hooks {
+                            module = module.with_hooks(Arc::clone(hooks));
+                        }
+                        if let Some(journal) = &descriptor.journal {
+                            module = module.with_journal(Arc::clone(journal));
+                        }
+                        manager.connect_wasm_module(server, module).await
+                    }
                 }
+                .map_err(|_| sanitized_activation_error(skill, server, "connect"))?;
+                let tools = manager
+                    .list_tools_for_server(server)
+                    .await
+                    .map_err(|_| sanitized_activation_error(skill, server, "inventory"))?;
+                temporary.insert(server.clone(), tools);
             }
-                .map_err(|error| {
-                    tracing::warn!(simulacra.skill.name = %skill, simulacra.mcp.activation.outcome = "failure", server = %server, error = %error, "MCP skill activation failed");
-                    ToolError::ExecutionFailed(format!("skill {skill:?} could not activate MCP server {server:?}: {error}"))
-                })?;
-            let tools = manager.list_tools_for_server(server).await
-                .map_err(|error| {
-                    tracing::warn!(simulacra.skill.name = %skill, simulacra.mcp.activation.outcome = "failure", server = %server, error = %error, "MCP skill activation failed");
-                    ToolError::ExecutionFailed(format!("skill {skill:?} could not activate MCP server {server:?}: {error}"))
-                })?;
-            temporary.insert(server.clone(), tools);
+            Ok(())
         }
-        Ok(())
-        }.await;
+        .await;
         if let Err(error) = result {
             for server in &pending {
                 manager.discard_server(server);
@@ -323,6 +342,19 @@ fn emit_activation_telemetry(skill: &str, servers: &[String], tool_count: usize,
         simulacra.mcp.activation.outcome = %outcome,
         "MCP skill activation"
     );
+}
+
+fn sanitized_activation_error(skill: &str, server: &str, stage: &str) -> ToolError {
+    tracing::warn!(
+        simulacra.skill.name = %skill,
+        simulacra.mcp.activation.outcome = "failure",
+        server = %server,
+        stage = %stage,
+        "MCP skill activation failed"
+    );
+    ToolError::ExecutionFailed(format!(
+        "skill {skill:?} could not activate MCP server {server:?} during {stage}"
+    ))
 }
 
 pub struct McpSearchTool {

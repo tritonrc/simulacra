@@ -1678,15 +1678,11 @@ impl SimulacraEngine {
                             server.url.as_ref().map(|url| simulacra_mcp::McpServerDescriptor::network(server.name.clone(), url.clone(), server.transport.clone()))
                         }
                     }).collect();
-                    if descriptors.is_empty() {
-                        None
-                    } else {
-                        Some(simulacra_mcp::McpCatalog::with_journal(
-                            descriptors,
-                            Arc::clone(&journal),
-                            AgentId(task_id.clone()),
-                        ).map_err(|error| format!("invalid MCP catalog: {error}"))?)
-                    }
+                    Some(simulacra_mcp::McpCatalog::with_journal(
+                        descriptors,
+                        Arc::clone(&journal),
+                        AgentId(task_id.clone()),
+                    ).map_err(|error| format!("invalid MCP catalog: {error}"))?)
                 } else { None };
                 if let Some(catalog) = &mcp_catalog {
                     for skill in &skill_catalog {

@@ -218,8 +218,11 @@ impl McpManager {
 
         // Validate the URL is parseable.
         let _parsed = url::Url::parse(url).map_err(|e| {
-            let error = e.to_string();
-            tracing::warn!(server = name, error = %error, "WARN: MCP connection failure");
+            tracing::warn!(
+                server = name,
+                error = "invalid URL (details redacted)",
+                "WARN: MCP connection failure"
+            );
             McpError::ConnectionFailed(format!("connection to {url} failed: {e}"))
         })?;
 

@@ -70,7 +70,7 @@ impl McpManager {
                     conn.transport_mode = Some(TransportMode::StreamableHttp { session_id });
                 }
             }
-            Err(e) => {
+            Err(_error) => {
                 let server_name = self
                     .connections
                     .get(key)
@@ -78,7 +78,7 @@ impl McpManager {
                     .unwrap_or_else(|| key.to_string());
                 tracing::warn!(
                     server = %server_name,
-                    error = %e,
+                    error = "transport failure (details redacted)",
                     "MCP streamable HTTP handshake failure"
                 );
                 // Forced "http" failure is final — do NOT set handshake_done
@@ -129,7 +129,7 @@ impl McpManager {
                     .unwrap_or_else(|| key.to_string());
                 tracing::info!(
                     server = %server_name,
-                    streamable_http_error = %msg,
+                    streamable_http_error = "404/405",
                     "Auto-detect: streamable HTTP returned 404/405, falling back to legacy SSE"
                 );
                 // Fall back to legacy SSE.
@@ -138,7 +138,7 @@ impl McpManager {
                 span.record("simulacra.mcp.transport_mode", "legacy_sse");
                 span.record("simulacra.mcp.protocol_version", "2024-11-05");
             }
-            Err(e) => {
+            Err(_error) => {
                 // Non-fallback error (auth, 5xx, network) — do not try SSE.
                 let server_name = self
                     .connections
@@ -147,7 +147,7 @@ impl McpManager {
                     .unwrap_or_else(|| key.to_string());
                 tracing::warn!(
                     server = %server_name,
-                    error = %e,
+                    error = "transport failure (details redacted)",
                     "MCP connection failure (not eligible for SSE fallback)"
                 );
                 // Do NOT set handshake_done — connection stays retryable.
@@ -176,10 +176,10 @@ impl McpManager {
         let sse_url = conn.url.clone();
         let parsed = match url::Url::parse(&sse_url) {
             Ok(p) => p,
-            Err(e) => {
+            Err(_error) => {
                 tracing::warn!(
                     server = %key,
-                    error = %e,
+                    error = "invalid URL (details redacted)",
                     "MCP SSE handshake failure: invalid URL"
                 );
                 return;
@@ -265,10 +265,10 @@ impl McpManager {
         // nothing worth keeping alive.
         let tools = match self.perform_http_handshake(&endpoint).await {
             Ok(t) => t,
-            Err(e) => {
+            Err(_error) => {
                 tracing::warn!(
                     server = %key,
-                    error = %e,
+                    error = "transport failure (details redacted)",
                     "MCP SSE handshake failure"
                 );
                 return;
@@ -294,10 +294,10 @@ impl McpManager {
                     }
                     s
                 }
-                Err(e) => {
+                Err(_error) => {
                     tracing::warn!(
                         server = %key,
-                        error = %e,
+                        error = "transport failure (details redacted)",
                         "MCP SSE handshake failure: could not open keepalive TCP stream"
                     );
                     return;
