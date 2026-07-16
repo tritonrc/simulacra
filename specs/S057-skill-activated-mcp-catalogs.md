@@ -153,8 +153,11 @@ pairs return an actionable error without a network tool call.
 Before dispatch, `mcp_call` enforces the existing
 `mcp:<server>:<tool>` capability check at the call site. It then preserves all
 existing S008 behavior for hooks, journaling before return, transport retry,
-MCP input/output events, spans, and errors. A searched tool that later becomes
-capability-denied must be denied at call time.
+spans, and errors. The raw arguments are forwarded unchanged to the MCP
+dispatcher, but observability and journal records contain only safe metadata:
+`server`, `tool`, and serialized argument length. `gen_ai.tool.message` input
+events likewise contain argument length rather than the raw argument value. A
+searched tool that later becomes capability-denied must be denied at call time.
 
 ## Behavior
 
@@ -233,7 +236,10 @@ preservation of earlier state, and body withholding on failure.
 **Evidence:** bounded-publication, dispatch-capability, rollback-preservation,
 catalog-isolation, and provider-injection tests exercise the real catalog and
 MCP dispatcher paths. Existing S008/S024/S041 tests continue to govern the
-manager path used by `mcp_call`.
+manager path used by `mcp_call`. `successful_search_and_call_redact_secret_inputs_from_journal_and_tracing`
+and the reconciled MCP protocol tests prove raw search queries and call
+arguments still reach their functional paths but are replaced in journals and
+telemetry by query/argument length plus non-secret server/tool metadata.
 
 - [x] `mcp_search` returns only tools from the calling agent's successfully
   activated server catalogs, returns at most five results, and includes each
@@ -289,7 +295,9 @@ server sets, caching, and secret redaction. The production OTLP harness from
 activation success/failure plus catalog-search evidence; the same test asserts
 activation/search journal attribution. Model and interactive tests additionally
 assert explicit source/link fields and span correlation across the user
-activation thread bridge.
+activation thread bridge. Search telemetry records `query_length`, result count,
+and returned server/tool identifiers; call telemetry records server/tool and
+`argument_length`. Neither path records the raw query or raw call arguments.
 
 - [x] Every activation attempt emits an activation trace/span or event linked to
   the triggering skill load and records `simulacra.skill.name`, the declared
@@ -300,17 +308,19 @@ activation thread bridge.
 - [x] Successful activation records the count of tools newly committed to that
   agent's catalog; a cached repeated activation records zero newly activated
   tools and does not produce a new handshake/inventory span.
-- [x] `mcp_search` emits trace/log evidence of query, result count, and only
-  non-secret server/tool identifiers; it must not emit arguments, credentials,
-  or inactive-server inventory.
+- [x] `mcp_search` emits trace/log evidence of query length, result count, and
+  only non-secret server/tool identifiers; it does not record the raw query,
+  arguments, credentials, or inactive-server inventory.
 - [x] Every dispatched `mcp_call` retains S008 observability: an
   `execute_tool` span, `simulacra.tool.name`, `simulacra.tool.source =
-  mcp:<server>`, MCP call metric labels, and `gen_ai.tool.message` input/output
-  events.
+  mcp:<server>`, MCP call metric labels, and `gen_ai.tool.message` input-metadata
+  and output events. Input telemetry contains server/tool and argument length,
+  never raw arguments; dispatch still receives the original arguments unchanged.
 - [x] Every successful remote MCP call retains the existing journal entry before
   its result reaches the agent; local activation/search bookkeeping is recorded
-  so the skill dependency and catalog publication remain attributable without
-  recording credentials.
+  so the skill dependency and catalog publication remain attributable. Search
+  journals store query length; call journals store server/tool and argument
+  length. Raw query text, raw arguments, and credentials are not recorded.
 - [x] Local Aniani validation demonstrates activation success and atomic
   failure traces, `mcp_search` evidence, MCP call spans/metrics/logs, and the
   corresponding journal entries using TraceQL, PromQL, and LogQL.
