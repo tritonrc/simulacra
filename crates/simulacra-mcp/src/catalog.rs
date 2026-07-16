@@ -702,6 +702,190 @@ mod tests {
         (!request.is_empty()).then(|| String::from_utf8_lossy(&request).into_owned())
     }
 
+    fn echo_descriptor(name: &str, agent: &str) -> McpServerDescriptor {
+        McpServerDescriptor::wasm(
+            name.into(),
+            WasmMcpServerDescriptor {
+                module_path: std::path::PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/echo-mcp.wasm"
+                )),
+                network_allowlist: Vec::new(),
+                hooks: None,
+                journal: None,
+                agent_id: AgentId(agent.into()),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn meta_tool_definitions_are_byte_stable_across_catalog_changes() {
+        let _guard = catalog_test_guard().await;
+        let catalog = McpCatalog::new(vec![echo_descriptor("github", "schema-agent")])
+            .expect("catalog should construct");
+        let search = McpSearchTool::new(Arc::clone(&catalog));
+        let call = McpCallTool::new(Arc::clone(&catalog));
+        let before = serde_json::to_vec(&(search.definition(), call.definition())).unwrap();
+        catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect("activation should succeed");
+        search
+            .call(json!({"query":"echo"}), &mcp_capability())
+            .await
+            .expect("search should succeed");
+        let after_success = serde_json::to_vec(&(search.definition(), call.definition())).unwrap();
+        catalog
+            .activate("broken", &["unknown".into()], &mcp_capability())
+            .await
+            .expect_err("unknown dependency should fail");
+        let after_failure = serde_json::to_vec(&(search.definition(), call.definition())).unwrap();
+        assert_eq!(before, after_success);
+        assert_eq!(before, after_failure);
+    }
+
+    #[tokio::test]
+    async fn search_publishes_only_the_bounded_five_returned_pairs() {
+        let catalog = McpCatalog::new(Vec::new()).expect("catalog should construct");
+        catalog.state.lock().await.activated.insert(
+            "github".into(),
+            (0..6)
+                .map(|index| ToolDefinition {
+                    name: format!("tool_{index}"),
+                    description: "bounded fixture".into(),
+                    input_schema: json!({"type":"object"}),
+                })
+                .collect(),
+        );
+        let search = McpSearchTool::new(Arc::clone(&catalog));
+        let call = McpCallTool::new(Arc::clone(&catalog));
+        let results = search
+            .call(json!({"query":""}), &mcp_capability())
+            .await
+            .expect("search should succeed");
+        assert_eq!(results.as_array().unwrap().len(), 5);
+        let returned_error = call
+            .call(
+                json!({"server":"github","tool":"tool_0","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("fixture has no dispatcher");
+        assert!(
+            !returned_error
+                .to_string()
+                .contains("not activated and search-published")
+        );
+        let omitted_error = call
+            .call(
+                json!({"server":"github","tool":"tool_5","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("omitted sixth tool must be rejected");
+        assert!(
+            omitted_error
+                .to_string()
+                .contains("not activated and search-published")
+        );
+        assert!(catalog.manager.lock().await.connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_later_activation_preserves_earlier_inventory_and_publication() {
+        let _guard = catalog_test_guard().await;
+        let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable port");
+        let unavailable_url = format!("http://{}", unavailable.local_addr().unwrap());
+        drop(unavailable);
+        let catalog = McpCatalog::new(vec![
+            echo_descriptor("github", "preserve-agent"),
+            echo_descriptor("linear", "preserve-agent"),
+            McpServerDescriptor::network(
+                "unavailable".into(),
+                unavailable_url,
+                Some("http".into()),
+            ),
+        ])
+        .expect("catalog should construct");
+        let search = McpSearchTool::new(Arc::clone(&catalog));
+        let call = McpCallTool::new(Arc::clone(&catalog));
+        catalog
+            .activate("first", &["github".into()], &mcp_capability())
+            .await
+            .unwrap();
+        search
+            .call(json!({"query":"echo"}), &mcp_capability())
+            .await
+            .unwrap();
+        catalog
+            .activate(
+                "later",
+                &["linear".into(), "unavailable".into()],
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("later activation should fail atomically");
+        assert_eq!(
+            search
+                .call(json!({"query":"echo"}), &mcp_capability())
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        call.call(
+            json!({"server":"github","tool":"echo","arguments":{"query":"still-live"}}),
+            &mcp_capability(),
+        )
+        .await
+        .expect("earlier publication should remain callable");
+    }
+
+    #[tokio::test]
+    async fn separate_catalogs_isolate_activation_and_publication() {
+        let _guard = catalog_test_guard().await;
+        let first = McpCatalog::new(vec![echo_descriptor("github", "first-agent")]).unwrap();
+        let second = McpCatalog::new(vec![echo_descriptor("github", "second-agent")]).unwrap();
+        let first_search = McpSearchTool::new(Arc::clone(&first));
+        let second_search = McpSearchTool::new(Arc::clone(&second));
+        let second_call = McpCallTool::new(Arc::clone(&second));
+        first
+            .activate("skill", &["github".into()], &mcp_capability())
+            .await
+            .unwrap();
+        first_search
+            .call(json!({"query":"echo"}), &mcp_capability())
+            .await
+            .unwrap();
+        assert!(
+            second_search
+                .call(json!({"query":"echo"}), &mcp_capability())
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        second
+            .activate("skill", &["github".into()], &mcp_capability())
+            .await
+            .unwrap();
+        let error = second_call
+            .call(
+                json!({"server":"github","tool":"echo","arguments":{"query":"isolated"}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("first publication must not authorize second catalog");
+        assert!(
+            error
+                .to_string()
+                .contains("not activated and search-published")
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn activation_telemetry_covers_prevalidation_and_connection_failures_without_secrets() {
         let _guard = catalog_test_guard().await;
