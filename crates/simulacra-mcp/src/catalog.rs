@@ -457,12 +457,16 @@ mod tests {
             let initialize_for_thread = Arc::clone(&initialize_requests);
             let list_for_thread = Arc::clone(&tools_list_requests);
             let stop_for_thread = Arc::clone(&stop);
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
             let thread = thread::spawn(move || {
+                ready_tx
+                    .send(())
+                    .expect("test MCP server readiness receiver should remain available");
                 while !stop_for_thread.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             stream
-                                .set_read_timeout(Some(Duration::from_millis(200)))
+                                .set_read_timeout(Some(Duration::from_secs(2)))
                                 .expect("request timeout");
                             let Some(request) = read_json_rpc_request(&mut stream) else {
                                 continue;
@@ -492,6 +496,9 @@ mod tests {
                     }
                 }
             });
+            ready_rx
+                .recv()
+                .expect("test MCP server should begin accepting before activation");
             Self {
                 url,
                 initialize_requests,
