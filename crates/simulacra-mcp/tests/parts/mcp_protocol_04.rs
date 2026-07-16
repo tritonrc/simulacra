@@ -219,7 +219,7 @@ async fn connect_sse_keeps_connection_alive() {
 
     let _ = manager.list_tools().await;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !server.persistent_event_sent() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -233,4 +233,3 @@ async fn connect_sse_keeps_connection_alive() {
         "SSE transport should keep the stream alive after the discovered-endpoint handshake so later server-pushed events can still arrive"
     );
 }
-

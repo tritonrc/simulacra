@@ -127,6 +127,9 @@ impl SseDiscoveryServer {
 impl Drop for SseDiscoveryServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // Wake the blocking accept so teardown is deterministic even when no
+        // further protocol request is expected.
+        let _ = std::net::TcpStream::connect(&self.addr);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -205,10 +208,6 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Option<String> {
 
 fn spawn_sse_discovery_server(tools_list_body: &str, tool_call_body: &str) -> SseDiscoveryServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("test SSE server should bind");
-    listener
-        .set_nonblocking(true)
-        .expect("test SSE server should become nonblocking");
-
     let addr = listener
         .local_addr()
         .expect("test SSE server should have a local address")
@@ -233,7 +232,9 @@ fn spawn_sse_discovery_server(tools_list_body: &str, tool_call_body: &str) -> Ss
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+                    // Workspace-wide linking can delay a later request chunk;
+                    // fixture timing is not part of the SSE behavior under test.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                     let request = match read_http_request(&mut stream) {
                         Some(request) => request,
                         None => continue,
@@ -318,9 +319,6 @@ fn spawn_sse_discovery_server(tools_list_body: &str, tool_call_body: &str) -> Ss
                         let _ = stream.flush();
                         let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
                 }
                 Err(_) => break,
             }
