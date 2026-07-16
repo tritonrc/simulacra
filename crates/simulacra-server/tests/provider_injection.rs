@@ -408,6 +408,13 @@ struct MinimalMcpServer {
     initialize_count: Arc<AtomicUsize>,
     list_count: Arc<AtomicUsize>,
     call_count: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MinimalMcpServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 async fn spawn_minimal_mcp_server() -> MinimalMcpServer {
@@ -422,83 +429,84 @@ async fn spawn_minimal_mcp_server() -> MinimalMcpServer {
     let list_count_for_task = Arc::clone(&list_count);
     let call_count_for_task = Arc::clone(&call_count);
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
                 break;
             };
-            let initialize_count = Arc::clone(&initialize_count_for_task);
-            let list_count = Arc::clone(&list_count_for_task);
-            let call_count = Arc::clone(&call_count_for_task);
-            tokio::spawn(async move {
-                let request = read_http_request(&mut socket).await;
-                let body = if request.contains("\"method\":\"initialize\"") {
-                    initialize_count.fetch_add(1, Ordering::SeqCst);
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "result": {
-                            "protocolVersion": "2025-03-26",
-                            "capabilities": {},
-                            "serverInfo": { "name": "fixture-mcp", "version": "1.0.0" }
-                        }
-                    })
-                } else if request.contains("\"method\":\"tools/list\"") {
-                    list_count.fetch_add(1, Ordering::SeqCst);
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "result": {
-                            "tools": [
-                                {
-                                    "name": "echo",
-                                    "description": "Echo a payload.",
-                                    "inputSchema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "text": { "type": "string" }
-                                        }
-                                    }
-                                },
-                                {
-                                    "name": "delete",
-                                    "description": "Delete a payload.",
-                                    "inputSchema": {
-                                        "type": "object",
-                                        "properties": {}
+            let request =
+                match tokio::time::timeout(Duration::from_secs(10), read_http_request(&mut socket))
+                    .await
+                {
+                    Ok(request) => request,
+                    Err(_) => continue,
+                };
+            let body = if request.contains("\"method\":\"initialize\"") {
+                initialize_count_for_task.fetch_add(1, Ordering::SeqCst);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "serverInfo": { "name": "fixture-mcp", "version": "1.0.0" }
+                    }
+                })
+            } else if request.contains("\"method\":\"tools/list\"") {
+                list_count_for_task.fetch_add(1, Ordering::SeqCst);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "echo",
+                                "description": "Echo a payload.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": { "type": "string" }
                                     }
                                 }
-                            ]
-                        }
-                    })
-                } else if request.contains("\"method\":\"tools/call\"") {
-                    call_count.fetch_add(1, Ordering::SeqCst);
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": 3,
-                        "result": {
-                            "content": [{
-                                "type": "text",
-                                "text": "echo: hello"
-                            }],
-                            "isError": false
-                        }
-                    })
-                } else {
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": null,
-                        "error": { "code": -32601, "message": "unexpected request" }
-                    })
-                };
-                let body = body.to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-            });
+                            },
+                            {
+                                "name": "delete",
+                                "description": "Delete a payload.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {}
+                                }
+                            }
+                        ]
+                    }
+                })
+            } else if request.contains("\"method\":\"tools/call\"") {
+                call_count_for_task.fetch_add(1, Ordering::SeqCst);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "echo: hello"
+                        }],
+                        "isError": false
+                    }
+                })
+            } else {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": null,
+                    "error": { "code": -32601, "message": "unexpected request" }
+                })
+            };
+            let body = body.to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
         }
     });
 
@@ -507,6 +515,7 @@ async fn spawn_minimal_mcp_server() -> MinimalMcpServer {
         initialize_count,
         list_count,
         call_count,
+        task,
     }
 }
 
