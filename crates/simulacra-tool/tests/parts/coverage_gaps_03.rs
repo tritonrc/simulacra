@@ -67,6 +67,7 @@ fn skill_tool_definition_includes_catalog_description_for_model_visible_skills()
         allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -94,6 +95,7 @@ fn skill_tool_definition_excludes_model_disabled_skills_from_catalog() {
         allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -116,6 +118,7 @@ fn skill_tool_definition_excludes_implicit_disabled_skills_from_catalog() {
         allow_implicit_invocation: false,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -165,6 +168,7 @@ fn skill_tool_call_with_model_disabled_skill_returns_error_result() {
         allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -189,6 +193,7 @@ fn skill_tool_call_with_implicit_disabled_skill_returns_error_result() {
         allow_implicit_invocation: false,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -213,6 +218,7 @@ fn skill_tool_call_with_capability_denied_skill_returns_error_result() {
         allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -242,6 +248,7 @@ fn skill_tool_call_with_valid_skill_returns_markdown_body() {
         allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let (tool, _, _) = make_skill_tool(&vfs, catalog);
@@ -276,6 +283,7 @@ fn skill_tool_catalog_truncation_indicates_partial_when_budget_exceeded() {
             allow_implicit_invocation: true,
             user_invocable: true,
             allowed_tools: vec![],
+            mcp_servers: vec![],
             body: Some("body".into()),
         });
     }
@@ -302,6 +310,7 @@ fn skill_tool_catalog_truncates_long_descriptions_before_omitting_the_skill() {
         allow_implicit_invocation: true,
         user_invocable: true,
         allowed_tools: vec![],
+        mcp_servers: vec![],
         body: Some("body".into()),
     }];
     let tool = SkillTool::new_with_metadata_budget(cell, catalog, 64);
