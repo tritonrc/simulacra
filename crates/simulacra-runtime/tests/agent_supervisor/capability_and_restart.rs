@@ -165,25 +165,32 @@ fn child_budget_does_not_exceed_parent_budget() {
 }
 
 // S009 O11y Assertion: Agent spawn produces a create_agent span with gen_ai.agent.name.
-#[tokio::test]
-async fn agent_spawn_produces_create_agent_span_with_agent_name() {
+#[test]
+fn agent_spawn_produces_create_agent_span_with_agent_name() {
     let (subscriber, captured_spans, _captured_events) = setup_capture();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime should build");
+    let _runtime_guard = runtime.enter();
     let mut supervisor = AgentSupervisor::with_task_factory(
         CapabilityToken::default(),
         default_budget(),
         Arc::new(NoopTaskFactory),
     );
 
-    let (_capture_guard, _guard) = install_capture(subscriber).await;
-    supervisor
-        .spawn_agent(spawn_config(
-            "child-agent",
-            "parent-agent",
-            CapabilityToken::default(),
-            default_budget(),
-            RestartStrategy::LetCrash,
-        ))
-        .expect("spawning a child with inherited capabilities should succeed");
+    tracing::dispatcher::with_default(&dispatch, || {
+        supervisor
+            .spawn_agent(spawn_config(
+                "child-agent",
+                "parent-agent",
+                CapabilityToken::default(),
+                default_budget(),
+                RestartStrategy::LetCrash,
+            ))
+            .expect("spawning a child with inherited capabilities should succeed");
+    });
 
     let spans = captured_spans.lock().unwrap();
     let create_agent_span = spans
