@@ -238,6 +238,7 @@ fn make_skill_meta(
             .iter()
             .map(|tool| (*tool).to_string())
             .collect(),
+        mcp_servers: vec![],
         body: None,
     }
 }
