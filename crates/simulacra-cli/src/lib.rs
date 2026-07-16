@@ -252,6 +252,7 @@ pub struct CliBootstrap {
     activity_rx: Option<tokio::sync::mpsc::UnboundedReceiver<simulacra_types::ActivityEvent>>,
     /// S017: Discovered and filtered skill catalog for the entry agent.
     pub skill_catalog: Vec<SkillMeta>,
+    mcp_catalog: Option<Arc<simulacra_mcp::McpCatalog>>,
     /// S020: Project root directory (parent of resolved config path).
     pub project_root: PathBuf,
     /// S026: Governance hook pipeline.
@@ -1010,14 +1011,28 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
                 .servers
                 .iter()
                 .filter_map(|server| {
-                    server
-                        .url
-                        .as_ref()
-                        .map(|url| simulacra_mcp::McpServerDescriptor {
-                            name: server.name.clone(),
-                            url: url.clone(),
-                            transport: server.transport.clone(),
+                    if server.transport.as_deref() == Some("wasm") {
+                        server.module.as_ref().map(|module| {
+                            simulacra_mcp::McpServerDescriptor::wasm(
+                                server.name.clone(),
+                                simulacra_mcp::DeferredWasmMcpServerDescriptor {
+                                    module_path: std::path::PathBuf::from(module),
+                                    network_allowlist: server.network.clone(),
+                                    hooks: Some(Arc::clone(&pipeline)),
+                                    journal: Some(Arc::clone(&journal)),
+                                    agent_id: simulacra_types::AgentId(String::new()),
+                                },
+                            )
                         })
+                    } else {
+                        server.url.as_ref().map(|url| {
+                            simulacra_mcp::McpServerDescriptor::network(
+                                server.name.clone(),
+                                url.clone(),
+                                server.transport.clone(),
+                            )
+                        })
+                    }
                 })
                 .collect();
             simulacra_mcp::McpCatalog::new(descriptors)
@@ -1075,14 +1090,16 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
             .context("failed to register Skill tool")?;
     }
 
-    if let Some(catalog) = mcp_catalog {
+    if let Some(catalog) = &mcp_catalog {
         registry
             .register(Box::new(simulacra_mcp::McpSearchTool::new(Arc::clone(
-                &catalog,
+                catalog,
             ))))
             .context("failed to register mcp_search")?;
         registry
-            .register(Box::new(simulacra_mcp::McpCallTool::new(catalog)))
+            .register(Box::new(simulacra_mcp::McpCallTool::new(Arc::clone(
+                catalog,
+            ))))
             .context("failed to register mcp_call")?;
     }
 
@@ -1238,6 +1255,7 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
         activity_sink,
         activity_rx,
         skill_catalog,
+        mcp_catalog,
         project_root,
         pipeline,
         memory_runtime,
@@ -1744,6 +1762,12 @@ fn run_booted(
                 Arc::clone(&boot.vfs),
                 session_config,
             );
+            if let Some(catalog) = &boot.mcp_catalog {
+                session.set_skill_dependency_activator(
+                    Arc::clone(catalog) as Arc<dyn simulacra_types::SkillDependencyActivator>,
+                    boot.capability_token.clone(),
+                );
+            }
 
             // If the user supplied --session with an id that already has a
             // persisted checkpoint, restore messages and VFS state from it.

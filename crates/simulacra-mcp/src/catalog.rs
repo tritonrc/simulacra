@@ -14,8 +14,61 @@ use crate::McpManager;
 #[derive(Clone, Debug)]
 pub struct McpServerDescriptor {
     pub name: String,
-    pub url: String,
-    pub transport: Option<String>,
+    pub kind: McpServerKind,
+}
+
+#[derive(Clone)]
+pub enum McpServerKind {
+    Network {
+        url: String,
+        transport: Option<String>,
+    },
+    Wasm(WasmMcpServerDescriptor),
+}
+
+impl std::fmt::Debug for McpServerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Network { transport, .. } => f
+                .debug_struct("Network")
+                .field("transport", transport)
+                .finish(),
+            Self::Wasm(descriptor) => f.debug_tuple("Wasm").field(descriptor).finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct WasmMcpServerDescriptor {
+    pub module_path: std::path::PathBuf,
+    pub network_allowlist: Vec<String>,
+    pub hooks: Option<Arc<simulacra_hooks::HookPipeline>>,
+    pub journal: Option<Arc<dyn simulacra_types::JournalStorage>>,
+    pub agent_id: simulacra_types::AgentId,
+}
+
+impl std::fmt::Debug for WasmMcpServerDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmMcpServerDescriptor")
+            .field("module_path", &self.module_path)
+            .field("network_allowlist", &self.network_allowlist)
+            .finish_non_exhaustive()
+    }
+}
+
+impl McpServerDescriptor {
+    pub fn network(name: String, url: String, transport: Option<String>) -> Self {
+        Self {
+            name,
+            kind: McpServerKind::Network { url, transport },
+        }
+    }
+    pub fn wasm(name: String, descriptor: WasmMcpServerDescriptor) -> Self {
+        Self {
+            name,
+            kind: McpServerKind::Wasm(descriptor),
+        }
+    }
 }
 
 /// A catalog belongs to one agent/session. Descriptors are inert until a skill
@@ -37,9 +90,9 @@ impl McpCatalog {
     pub fn new(descriptors: Vec<McpServerDescriptor>) -> Result<Arc<Self>, ToolError> {
         let mut by_name = HashMap::new();
         for descriptor in descriptors {
-            if descriptor.name.trim().is_empty() || descriptor.url.trim().is_empty() {
+            if descriptor.name.trim().is_empty() {
                 return Err(ToolError::ExecutionFailed(
-                    "configured MCP server requires a non-empty name and URL".into(),
+                    "configured MCP server requires a non-empty name".into(),
                 ));
             }
             if by_name
@@ -115,7 +168,16 @@ impl McpCatalog {
                     "skill {skill:?} references unknown MCP server {server:?}"
                 ))
             })?;
-            manager.connect_named(&descriptor.name, &descriptor.url, descriptor.transport.as_deref()).await
+            match &descriptor.kind {
+                McpServerKind::Network { url, transport } => manager.connect_named(&descriptor.name, url, transport.as_deref()).await,
+                McpServerKind::Wasm(descriptor) => {
+                    let mut module = crate::load_wasm_mcp_module(&descriptor.module_path).map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+                    module = module.with_network_allowlist(descriptor.network_allowlist.clone()).with_agent_id(descriptor.agent_id.clone());
+                    if let Some(hooks) = &descriptor.hooks { module = module.with_hooks(Arc::clone(hooks)); }
+                    if let Some(journal) = &descriptor.journal { module = module.with_journal(Arc::clone(journal)); }
+                    manager.connect_wasm_module(server, module).await
+                }
+            }
                 .map_err(|error| {
                     tracing::warn!(simulacra.skill.name = %skill, simulacra.mcp.activation.outcome = "failure", server = %server, error = %error, "MCP skill activation failed");
                     ToolError::ExecutionFailed(format!("skill {skill:?} could not activate MCP server {server:?}: {error}"))

@@ -1632,77 +1632,52 @@ impl SimulacraEngine {
                     &agent_type_name_owned,
                 )
                 .map_err(|e| format!("failed to discover catalog skills: {e}"))?;
+                let mcp_catalog = if let Some(ref mcp_config) = config_for_worker.mcp {
+                    let descriptors: Vec<_> = mcp_config.servers.iter().filter(|server| {
+                        tenant_mcp_servers.contains(&server.name)
+                            && mcp_capability_may_cover_server(&capability_token.mcp_tools, &server.name)
+                    }).filter_map(|server| {
+                        if server.transport.as_deref() == Some("wasm") {
+                            server.module.as_ref().map(|module| simulacra_mcp::McpServerDescriptor::wasm(
+                                server.name.clone(),
+                                simulacra_mcp::DeferredWasmMcpServerDescriptor {
+                                    module_path: std::path::PathBuf::from(module), network_allowlist: server.network.clone(),
+                                    hooks: Some(Arc::clone(&hook_pipeline)), journal: Some(Arc::clone(&journal)), agent_id: AgentId(task_id.clone()),
+                                },
+                            ))
+                        } else {
+                            server.url.as_ref().map(|url| simulacra_mcp::McpServerDescriptor::network(server.name.clone(), url.clone(), server.transport.clone()))
+                        }
+                    }).collect();
+                    if descriptors.is_empty() {
+                        None
+                    } else {
+                        Some(simulacra_mcp::McpCatalog::new(descriptors).map_err(|error| format!("invalid MCP catalog: {error}"))?)
+                    }
+                } else { None };
+                if let Some(catalog) = &mcp_catalog {
+                    for skill in &skill_catalog {
+                        catalog.validate_dependencies(&skill.name, &skill.mcp_servers, &capability_token)
+                            .map_err(|error| format!("invalid skill MCP dependency: {error}"))?;
+                    }
+                }
                 if skill_catalog
                     .iter()
                     .any(|skill| !skill.disable_model_invocation && skill.allow_implicit_invocation)
                 {
                     registry
-                        .register(Box::new(SkillTool::new(Arc::clone(&cell), skill_catalog)))
+                        .register(Box::new(match &mcp_catalog {
+                            Some(catalog) => SkillTool::new(Arc::clone(&cell), skill_catalog)
+                                .with_dependency_activator(Arc::clone(catalog) as Arc<dyn simulacra_types::SkillDependencyActivator>),
+                            None => SkillTool::new(Arc::clone(&cell), skill_catalog),
+                        }))
                         .map_err(|e| format!("failed to register Skill tool: {e}"))?;
                 }
-
-                if let Some(ref mcp_config) = config_for_worker.mcp {
-                    let allowed_mcp_servers: Vec<&simulacra_config::McpServerConfig> = mcp_config
-                        .servers
-                        .iter()
-                        .filter(|server| {
-                            tenant_mcp_servers.contains(&server.name)
-                                && mcp_capability_may_cover_server(
-                                    &capability_token.mcp_tools,
-                                    &server.name,
-                                )
-                        })
-                        .collect();
-                    let network_descriptors: Vec<(String, Option<String>, Option<String>)> =
-                        allowed_mcp_servers
-                            .iter()
-                            .filter(|s| s.transport.as_deref() != Some("wasm"))
-                            .map(|s| (s.name.clone(), s.url.clone(), s.transport.clone()))
-                            .collect();
-                    let wasm_descriptors: Vec<simulacra_mcp::WasmMcpServerDescriptor> =
-                        allowed_mcp_servers
-                            .iter()
-                            .filter(|s| s.transport.as_deref() == Some("wasm"))
-                            .filter_map(|s| {
-                                let module = s.module.as_ref()?;
-                                Some(simulacra_mcp::WasmMcpServerDescriptor {
-                                    name: s.name.clone(),
-                                    module_path: std::path::PathBuf::from(module),
-                                    network_allowlist: s.network.clone(),
-                                    hooks: Some(Arc::clone(&hook_pipeline)),
-                                    journal: Some(Arc::clone(&journal)),
-                                    agent_id: AgentId(task_id.clone()),
-                                })
-                            })
-                            .collect();
-                    let total_servers = network_descriptors.len() + wasm_descriptors.len();
-
-                    if total_servers > 0 {
-                        let mcp_tools = simulacra_mcp::create_mcp_tools_with_wasm(
-                            &network_descriptors,
-                            &wasm_descriptors,
-                        )
-                        .await;
-
-                        tracing::info!(
-                            task_id = %task_id,
-                            mcp_tool_count = mcp_tools.len(),
-                            mcp_server_count = total_servers,
-                            "MCP tool discovery complete for server-launched agent"
-                        );
-
-                        for tool in mcp_tools.into_iter().filter(|tool| {
-                            mcp_capability_covers_tool(
-                                &capability_token.mcp_tools,
-                                tool.server_name(),
-                                tool.tool_name(),
-                            )
-                        }) {
-                            registry
-                                .register(Box::new(tool))
-                                .map_err(|e| format!("failed to register MCP tool: {e}"))?;
-                        }
-                    }
+                if let Some(catalog) = mcp_catalog {
+                    registry.register(Box::new(simulacra_mcp::McpSearchTool::new(Arc::clone(&catalog))))
+                        .map_err(|e| format!("failed to register mcp_search: {e}"))?;
+                    registry.register(Box::new(simulacra_mcp::McpCallTool::new(catalog)))
+                        .map_err(|e| format!("failed to register mcp_call: {e}"))?;
                 }
 
                 let mut spawn_rx = None;
@@ -2066,57 +2041,6 @@ fn mcp_capability_may_cover_server(patterns: &[String], server: &str) -> bool {
         };
         !tool_pattern.is_empty() && (server_pattern == "*" || server_pattern == server)
     })
-}
-
-fn mcp_capability_covers_tool(patterns: &[String], server: &str, tool: &str) -> bool {
-    let qualified = format!("mcp:{server}:{tool}");
-    patterns.iter().any(|pattern| {
-        let Some(rest) = pattern.strip_prefix("mcp:") else {
-            return false;
-        };
-        let Some((server_pattern, tool_pattern)) = rest.split_once(':') else {
-            return false;
-        };
-        !server_pattern.is_empty()
-            && !tool_pattern.is_empty()
-            && mcp_pattern_matches(pattern, &qualified)
-    })
-}
-
-fn mcp_pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    let pattern_bytes = pattern.as_bytes();
-    let value_bytes = value.as_bytes();
-    let (mut pattern_i, mut value_i) = (0, 0);
-    let mut star_i = None;
-    let mut value_after_star = 0;
-
-    while value_i < value_bytes.len() {
-        if pattern_i < pattern_bytes.len()
-            && (pattern_bytes[pattern_i] == value_bytes[value_i]
-                || pattern_bytes[pattern_i] == b'?')
-        {
-            pattern_i += 1;
-            value_i += 1;
-        } else if pattern_i < pattern_bytes.len() && pattern_bytes[pattern_i] == b'*' {
-            star_i = Some(pattern_i);
-            pattern_i += 1;
-            value_after_star = value_i;
-        } else if let Some(star) = star_i {
-            pattern_i = star + 1;
-            value_after_star += 1;
-            value_i = value_after_star;
-        } else {
-            return false;
-        }
-    }
-
-    while pattern_i < pattern_bytes.len() && pattern_bytes[pattern_i] == b'*' {
-        pattern_i += 1;
-    }
-    pattern_i == pattern_bytes.len()
 }
 
 /// Build a fresh in-memory `Catalog` and seed it from `SimulacraConfig` so the

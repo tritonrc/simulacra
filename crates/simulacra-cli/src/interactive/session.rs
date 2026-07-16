@@ -8,8 +8,8 @@ use simulacra_runtime::{
     SupervisorPayload, TurnResult,
 };
 use simulacra_types::{
-    ActivityEvent, AgentId, ExitReason, Message, Provider, ResourceBudget, Role, ToolCallMessage,
-    VirtualFs,
+    ActivityEvent, AgentId, CapabilityToken, ExitReason, Message, Provider, ResourceBudget, Role,
+    SkillDependencyActivator, ToolCallMessage, VirtualFs,
 };
 #[cfg(any(test, feature = "test-support"))]
 use simulacra_types::{ProviderError, ProviderResponse};
@@ -81,6 +81,8 @@ where
     /// The currently active child agent_type (set when a spawn_agent call is in flight).
     /// Used for prefixing child output, status line delegation text, and cancel behavior.
     active_child_type: Option<String>,
+    skill_dependency_activator: Option<Arc<dyn SkillDependencyActivator>>,
+    skill_capability: Option<CapabilityToken>,
 }
 
 impl<P, I> InteractiveSession<P, I>
@@ -115,7 +117,18 @@ where
             session_span: None,
             supervisor: None,
             active_child_type,
+            skill_dependency_activator: None,
+            skill_capability: None,
         }
+    }
+
+    pub fn set_skill_dependency_activator(
+        &mut self,
+        activator: Arc<dyn SkillDependencyActivator>,
+        capability: CapabilityToken,
+    ) {
+        self.skill_dependency_activator = Some(activator);
+        self.skill_capability = Some(capability);
     }
 
     pub fn start(&mut self) -> SessionView {
@@ -220,6 +233,33 @@ where
                         .iter()
                         .find(|s| s.name == skill_name && s.user_invocable)
                     {
+                        if let (Some(activator), Some(capability)) = (
+                            self.skill_dependency_activator.clone(),
+                            self.skill_capability.clone(),
+                        ) {
+                            let dependency_result = std::thread::spawn({
+                                let name = skill.name.clone();
+                                let servers = skill.mcp_servers.clone();
+                                move || {
+                                    tokio::runtime::Builder::new_current_thread()
+                                        .enable_all()
+                                        .build()
+                                        .map_err(|error| error.to_string())?
+                                        .block_on(activator.activate(name, servers, capability))
+                                        .map_err(|error| error.to_string())
+                                }
+                            })
+                            .join()
+                            .unwrap_or_else(|_| Err("skill MCP activation thread panicked".into()));
+                            if let Err(error) = dependency_result {
+                                let message =
+                                    format!("failed to load skill {skill_name:?}: {error}");
+                                self.view.error = Some(message.clone());
+                                self.view.visible_output.push(message.clone());
+                                self.io.write_line(&message);
+                                return self.view.clone();
+                            }
+                        }
                         // User-triggered skill loads emit a tracing event
                         // linked to the interactive_turn span before provider
                         // execution with simulacra.skill.source = "user".

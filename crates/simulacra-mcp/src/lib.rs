@@ -18,7 +18,10 @@ mod transport;
 mod wasm;
 
 pub use bootstrap::{WasmMcpServerDescriptor, create_mcp_tools, create_mcp_tools_with_wasm};
-pub use catalog::{McpCallTool, McpCatalog, McpSearchTool, McpServerDescriptor};
+pub use catalog::{
+    McpCallTool, McpCatalog, McpSearchTool, McpServerDescriptor, McpServerKind,
+    WasmMcpServerDescriptor as DeferredWasmMcpServerDescriptor,
+};
 pub use domain::transport_config::parse_wasm_transport;
 pub use error::McpError;
 pub use manager::McpManager;
