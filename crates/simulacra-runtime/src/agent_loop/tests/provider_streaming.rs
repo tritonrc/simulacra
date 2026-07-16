@@ -237,6 +237,81 @@ async fn provider_tool_call_deltas_map_to_activity_events_without_partial_journa
 }
 
 #[tokio::test]
+async fn mcp_meta_tool_stream_deltas_redact_arguments_while_ordinary_tools_remain_unchanged() {
+    let provider = StreamingFakeProvider::with_events(
+        text_response("done"),
+        vec![
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index: 0,
+                tool_call_id: Some("search-1".into()),
+                name: Some("mcp_search".into()),
+                arguments_delta: "{\"query\":\"QUERYSECRET".into(),
+            },
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index: 0,
+                tool_call_id: Some("search-1".into()),
+                name: None,
+                arguments_delta: " Authorization: Bearer SEARCHAUTH\"}".into(),
+            },
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index: 1,
+                tool_call_id: Some("call-1".into()),
+                name: Some("mcp_call".into()),
+                arguments_delta: "{\"arguments\":{\"token\":\"CALLSECRET\"}}".into(),
+            },
+            simulacra_types::ProviderStreamEvent::ToolCallDelta {
+                index: 2,
+                tool_call_id: Some("ordinary-1".into()),
+                name: Some("file_read".into()),
+                arguments_delta: "{\"path\":\"/tmp/kept\"}".into(),
+            },
+        ],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(provider),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        default_budget(),
+        Some(Arc::new(crate::ChannelActivitySink::new(tx))),
+        None,
+    );
+
+    agent.run("stream secret tool args").await.unwrap();
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    let deltas = collect_tool_call_deltas(&events);
+    assert_eq!(deltas.len(), 4);
+    for delta in &deltas[..3] {
+        let ActivityEvent::ToolCallDelta {
+            tool_call_id,
+            name,
+            arguments_delta,
+            ..
+        } = delta
+        else {
+            unreachable!()
+        };
+        assert!(tool_call_id.is_some());
+        assert!(name.as_deref().is_some_and(|name| name.starts_with("mcp_")) || name.is_none());
+        assert_eq!(arguments_delta, "[REDACTED]");
+    }
+    assert!(matches!(
+        &deltas[3],
+        ActivityEvent::ToolCallDelta { name: Some(name), arguments_delta, .. }
+            if name == "file_read" && arguments_delta == "{\"path\":\"/tmp/kept\"}"
+    ));
+    let rendered = format!("{deltas:?}");
+    assert!(!rendered.contains("QUERYSECRET"));
+    assert!(!rendered.contains("SEARCHAUTH"));
+    assert!(!rendered.contains("CALLSECRET"));
+}
+
+#[tokio::test]
 async fn non_streaming_provider_uses_chat_and_emits_single_full_token() {
     let provider = FakeProvider::new(vec![text_response("fallback text")]);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

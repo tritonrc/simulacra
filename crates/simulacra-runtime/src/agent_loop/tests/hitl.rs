@@ -206,6 +206,70 @@ async fn tool_approval_required_emits_before_tool_start_and_approval_executes() 
     assert!(saw_tool_start, "approved tool should emit ToolStart");
 }
 
+#[tokio::test]
+async fn mcp_meta_tool_approval_events_redact_arguments_while_ordinary_tools_remain_unchanged() {
+    let (senders, hitl) = AgentHitlRuntime::channel_pair(true);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sink: Arc<dyn ActivitySink> = Arc::new(crate::ChannelActivitySink::new(event_tx));
+    let search_args = serde_json::json!({"query":"QUERYSECRET Authorization: Bearer SEARCHAUTH"});
+    let remote_args = serde_json::json!({"token":"CALLSECRET","module_path":"/private/CALLMODULE.wasm"});
+    let call_args = serde_json::json!({"server":"github","tool":"issues","arguments":remote_args});
+    let response = ProviderResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![
+                ToolCallMessage { id: "search-approval".into(), name: "mcp_search".into(), arguments: search_args.clone() },
+                ToolCallMessage { id: "call-approval".into(), name: "mcp_call".into(), arguments: call_args.clone() },
+                ToolCallMessage { id: "echo-approval".into(), name: "echo".into(), arguments: serde_json::json!({"ordinary":"kept"}) },
+            ],
+            tool_call_id: None,
+            provider_content: Vec::new(),
+        },
+        token_usage: TokenUsage::default(),
+        finish_reason: FinishReason::ToolUse,
+        provider_response_id: Some("approval-response".into()),
+        model: "test-model".into(),
+    };
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(EchoTool)).unwrap();
+    tools.register(Box::new(CapturingMetaTool { name: "mcp_search", calls: Arc::new(Mutex::new(Vec::new())) })).unwrap();
+    tools.register(Box::new(CapturingMetaTool { name: "mcp_call", calls: Arc::new(Mutex::new(Vec::new())) })).unwrap();
+    let mut agent = hitl_loop(
+        FakeProvider::new(vec![response]),
+        tools,
+        hitl,
+        Arc::clone(&sink),
+        Arc::new(InMemoryJournalStorage::new()),
+    );
+    let handle = tokio::spawn(async move {
+        let mut messages = conversation("approve MCP tools");
+        agent.run_single_turn(&mut messages).await.unwrap()
+    });
+
+    let mut approvals = Vec::new();
+    while approvals.len() < 3 {
+        let event = event_rx.recv().await.expect("activity event");
+        if let ActivityEvent::ToolApprovalRequired { tool_call_id, name, arguments, .. } = event {
+            approvals.push((name, arguments));
+            senders.approval_tx.send(ToolApprovalResponse { tool_call_id, approved: true, reason: None }).await.unwrap();
+        }
+    }
+    handle.await.unwrap();
+    assert_eq!(
+        approvals,
+        vec![
+            ("mcp_search".into(), serde_json::json!({"query_length":search_args["query"].as_str().unwrap().len()})),
+            ("mcp_call".into(), serde_json::json!({"server":"github","tool":"issues","argument_length":remote_args.to_string().len()})),
+            ("echo".into(), serde_json::json!({"ordinary":"kept"})),
+        ]
+    );
+    let rendered = format!("{approvals:?}");
+    for secret in ["QUERYSECRET", "SEARCHAUTH", "CALLSECRET", "CALLMODULE"] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
 struct CountingHitlTool {
     calls: Arc<AtomicUsize>,
 }
