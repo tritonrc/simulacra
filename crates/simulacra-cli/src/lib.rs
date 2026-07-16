@@ -3115,9 +3115,9 @@ task = "catalog bootstrap"
             entries.iter().any(|entry| matches!(
                 &entry.entry,
                 JournalEntryKind::ToolCall { tool_name, arguments, .. }
-                    if tool_name == "mcp_search" && arguments == &json!({"query":"issues"})
+                    if tool_name == "mcp_search" && arguments == &json!({"query_length":6})
             )),
-            "production construction must journal search under the entry agent; entries: {entries:?}"
+            "production construction must journal safe search metadata under the entry agent; entries: {entries:?}"
         );
         assert!(
             entries.iter().any(|entry| matches!(
