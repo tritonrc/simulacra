@@ -927,6 +927,126 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn activation_inventories_exactly_two_declared_servers_and_never_touches_configured_third()
+     {
+        let _guard = catalog_test_guard().await;
+        let github = JsonRpcServer::new("github_issues").await;
+        let linear = JsonRpcServer::new("linear_issues").await;
+        let dormant = JsonRpcServer::new("dormant_tool").await;
+        let catalog = McpCatalog::new(vec![
+            McpServerDescriptor::network("github".into(), github.url.clone(), Some("http".into())),
+            McpServerDescriptor::network("linear".into(), linear.url.clone(), Some("http".into())),
+            McpServerDescriptor::network(
+                "dormant".into(),
+                dormant.url.clone(),
+                Some("http".into()),
+            ),
+        ])
+        .expect("catalog should construct");
+
+        assert_eq!(
+            catalog
+                .activate(
+                    "repo-work",
+                    &["github".into(), "linear".into()],
+                    &mcp_capability(),
+                )
+                .await
+                .expect("declared dependencies should activate"),
+            2
+        );
+
+        for server in [&github, &linear] {
+            assert_eq!(server.initialize_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(server.tools_list_requests.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(dormant.initialize_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(dormant.tools_list_requests.load(Ordering::SeqCst), 0);
+        assert_eq!(dormant.tool_call_requests.load(Ordering::SeqCst), 0);
+
+        let results = McpSearchTool::new(catalog)
+            .call(json!({"query":""}), &mcp_capability())
+            .await
+            .expect("search should expose only activated inventories");
+        let servers = results
+            .as_array()
+            .expect("search result array")
+            .iter()
+            .map(|result| result["server"].as_str().expect("server name"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(servers, BTreeSet::from(["github", "linear"]));
+    }
+
+    #[tokio::test]
+    async fn concurrent_agent_catalogs_remain_isolated_and_reactivation_reuses_each_inventory_once()
+    {
+        let _guard = catalog_test_guard().await;
+        let first_server = JsonRpcServer::new("first_tool").await;
+        let second_server = JsonRpcServer::new("second_tool").await;
+        let first = McpCatalog::new(vec![McpServerDescriptor::network(
+            "shared-name".into(),
+            first_server.url.clone(),
+            Some("http".into()),
+        )])
+        .expect("first catalog should construct");
+        let second = McpCatalog::new(vec![McpServerDescriptor::network(
+            "shared-name".into(),
+            second_server.url.clone(),
+            Some("http".into()),
+        )])
+        .expect("second catalog should construct");
+
+        let dependencies = vec!["shared-name".into()];
+        let capability = mcp_capability();
+        let (first_activation, second_activation) = tokio::join!(
+            first.activate("first-skill", &dependencies, &capability),
+            second.activate("second-skill", &dependencies, &capability),
+        );
+        assert_eq!(first_activation.expect("first activation"), 1);
+        assert_eq!(second_activation.expect("second activation"), 1);
+
+        let first_results = McpSearchTool::new(Arc::clone(&first))
+            .call(json!({"query":""}), &mcp_capability())
+            .await
+            .expect("first search");
+        assert_eq!(first_results[0]["tool"], "first_tool");
+        let unpublished_second_error = McpCallTool::new(Arc::clone(&second))
+            .call(
+                json!({"server":"shared-name","tool":"second_tool","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("first catalog publication must not authorize second catalog");
+        assert!(
+            unpublished_second_error
+                .to_string()
+                .contains("not activated and search-published")
+        );
+
+        let (first_cached, second_cached) = tokio::join!(
+            first.activate("first-skill", &dependencies, &capability),
+            second.activate("second-skill", &dependencies, &capability),
+        );
+        assert_eq!(first_cached.expect("first cached activation"), 0);
+        assert_eq!(second_cached.expect("second cached activation"), 0);
+        for server in [&first_server, &second_server] {
+            assert_eq!(server.initialize_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(server.tools_list_requests.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            McpSearchTool::new(first)
+                .call(json!({"query":""}), &mcp_capability())
+                .await
+                .expect("repeat first search")
+                .as_array()
+                .expect("search result array")
+                .len(),
+            1,
+            "cached activation must not duplicate indexed tools"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn activation_telemetry_covers_prevalidation_and_connection_failures_without_secrets() {
         let _guard = catalog_test_guard().await;
