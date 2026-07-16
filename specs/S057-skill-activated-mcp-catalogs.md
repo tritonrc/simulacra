@@ -160,100 +160,119 @@ capability-denied must be denied at call time.
 
 ### Configuration and bootstrap
 
-- [ ] `SKILL.md` frontmatter accepts optional `mcp_servers` as an array of
+**Evidence:** `s057_skill_frontmatter`, CLI
+`configured_mcp_bootstrap_exposes_only_stable_meta_tools_without_connecting`,
+server provider-injection coverage, and child catalog prevalidation tests cover
+parsing, allow-lists/capabilities, lazy descriptors, and the fixed provider
+surface.
+
+- [x] `SKILL.md` frontmatter accepts optional `mcp_servers` as an array of
   non-empty strings and exposes the normalized server-name list in skill
   metadata.
-- [ ] Invalid `mcp_servers` frontmatter (a non-array value, a non-string item,
+- [x] Invalid `mcp_servers` frontmatter (a non-array value, a non-string item,
   or an empty/whitespace-only server name) makes that skill invalid under the
   existing S017 invalid-skill handling; it is never partially activated.
-- [ ] At bootstrap, every declared server for each otherwise eligible skill is
+- [x] At bootstrap, every declared server for each otherwise eligible skill is
   validated against configured MCP server descriptors and the agent/tenant MCP
   allow-list that applies to that skill's agent type.
-- [ ] A skill that references an unknown configured server, a server outside
+- [x] A skill that references an unknown configured server, a server outside
   the applicable tenant/agent allow-list, or a server denied by MCP capability
   policy fails bootstrap with an actionable error naming the skill and server;
   bootstrap makes no network request for the rejected dependency.
-- [ ] Bootstrap retains only the authorized MCP descriptors needed for later
+- [x] Bootstrap retains only the authorized MCP descriptors needed for later
   per-agent activation and does not connect, authenticate, or inventory any
   configured MCP server.
-- [ ] A runtime with configured MCP servers registers exactly one direct
+- [x] A runtime with configured MCP servers registers exactly one direct
   `mcp_search` tool and exactly one direct `mcp_call` tool for an agent; a
   runtime with no configured MCP servers registers neither.
-- [ ] The initial provider request contains the stable meta-tool definitions
+- [x] The initial provider request contains the stable meta-tool definitions
   (when MCP is configured) but contains no configured or activated MCP tool
   schema, server inventory, credential, endpoint, or MCP tool description.
-- [ ] The provider-visible schemas for `mcp_search` and `mcp_call` remain byte
+- [x] The provider-visible schemas for `mcp_search` and `mcp_call` remain byte
   equivalent for the life of an agent session, regardless of skill loads,
   activation success/failure, or MCP inventory changes.
-- [ ] Existing direct registration of one `ToolDefinition` per configured MCP
+- [x] Existing direct registration of one `ToolDefinition` per configured MCP
   tool is removed from the agent/provider toolset.
 
 ### Atomic skill activation
 
-- [ ] Model-triggered `Skill(command)` and user-triggered `/skill-name`
+**Evidence:** `McpCatalog` rollback/cache tests plus the production CLI and
+server skill-call paths cover prevalidation, one-time inventory, atomic commit,
+preservation of earlier state, and body withholding on failure.
+
+- [x] Model-triggered `Skill(command)` and user-triggered `/skill-name`
   resolve the same skill metadata and use the same MCP activation path before
   the skill body is returned or injected.
-- [ ] Loading a skill without `mcp_servers` preserves S017 loading behavior and
+- [x] Loading a skill without `mcp_servers` preserves S017 loading behavior and
   does not contact an MCP server.
-- [ ] Before activation makes a network request, Simulacra validates every
+- [x] Before activation makes a network request, Simulacra validates every
   declared server's configuration eligibility and the skill's current
   capability eligibility; any failure returns an actionable skill-load error
   with no dependency connection attempt.
-- [ ] For each newly declared server, activation performs the existing MCP
+- [x] For each newly declared server, activation performs the existing MCP
   handshake and `tools/list` inventory exactly once before exposing the skill
   body or any schemas from that skill's dependency set.
-- [ ] Activation is atomic across every newly declared server of one skill:
+- [x] Activation is atomic across every newly declared server of one skill:
   if any handshake or inventory fails, the skill body is not returned/injected,
   no newly successful sibling server catalog is committed, and no sibling tool
   schema becomes searchable or callable.
-- [ ] An activation failure leaves previously activated catalogs and
+- [x] An activation failure leaves previously activated catalogs and
   search-publications from earlier successful skill loads unchanged.
-- [ ] After a successful activation, the skill body and every newly activated
+- [x] After a successful activation, the skill body and every newly activated
   server inventory become visible together to that agent session.
-- [ ] Re-loading a successfully activated skill, or loading another skill that
+- [x] Re-loading a successfully activated skill, or loading another skill that
   declares an already activated server, reuses the cached inventory and does
   not reconnect, re-handshake, duplicate index entries, or invalidate existing
   search-publications.
-- [ ] Activation of one declared server never connects, inventories, or reveals
+- [x] Activation of one declared server never connects, inventories, or reveals
   tools from another configured server that has not been activated for this
   agent.
 
 ### Catalog search and dispatch
 
-- [ ] `mcp_search` returns only tools from the calling agent's successfully
+**Evidence:** bounded-publication, dispatch-capability, rollback-preservation,
+catalog-isolation, and provider-injection tests exercise the real catalog and
+MCP dispatcher paths. Existing S008/S024/S041 tests continue to govern the
+manager path used by `mcp_call`.
+
+- [x] `mcp_search` returns only tools from the calling agent's successfully
   activated server catalogs, returns at most five results, and includes each
   result's server, tool name, description, and input schema.
-- [ ] `mcp_search` never connects or inventories an inactive configured server.
-- [ ] `mcp_search` publishes each returned `(server, tool)` pair for later
+- [x] `mcp_search` never connects or inventories an inactive configured server.
+- [x] `mcp_search` publishes each returned `(server, tool)` pair for later
   `mcp_call` in the same agent session and does not publish omitted matches
   beyond the five-result bound.
-- [ ] `mcp_call` succeeds for an activated, search-published tool with valid
+- [x] `mcp_call` succeeds for an activated, search-published tool with valid
   arguments and forwards those arguments unchanged to the existing MCP
   dispatcher.
-- [ ] `mcp_call` rejects a configured-but-inactive server, an inactive tool, or
+- [x] `mcp_call` rejects a configured-but-inactive server, an inactive tool, or
   an activated tool not previously returned by `mcp_search`, before an MCP
   network tool call is attempted.
-- [ ] `mcp_call` checks `mcp:<server>:<tool>` capability at dispatch even when
+- [x] `mcp_call` checks `mcp:<server>:<tool>` capability at dispatch even when
   the skill activation and search publication previously succeeded.
-- [ ] A capability-denied `mcp_call` produces the existing actionable MCP
+- [x] A capability-denied `mcp_call` produces the existing actionable MCP
   capability error and does not invoke the remote tool.
-- [ ] `mcp_call` preserves existing MCP hooks, journal-before-return behavior,
+- [x] `mcp_call` preserves existing MCP hooks, journal-before-return behavior,
   transport retry behavior, and tool result/error semantics; the meta-tool is
   not a bypass around S008/S024/S041.
-- [ ] Search publication, activated inventory, and cached server state are
+- [x] Search publication, activated inventory, and cached server state are
   isolated by agent session: concurrent agents may activate and search the
   same configured server independently, and a publication or activation in one
   agent cannot make a tool callable or discoverable in another.
 
 ### Capability attenuation and lifecycle
 
-- [ ] `mcp_servers` does not widen a skill's, parent's, child's, tenant's, or
+**Evidence:** native-child capability and tenant-isolation tests construct the
+real child environment; catalog isolation tests prove publications are owned by
+the catalog instance.
+
+- [x] `mcp_servers` does not widen a skill's, parent's, child's, tenant's, or
   agent's effective MCP permissions; it names dependencies that must already
   be configured and allowed.
-- [ ] A child agent validates and activates skills using its own effective,
+- [x] A child agent validates and activates skills using its own effective,
   attenuated MCP capability and tenant/agent allow-list; it does not inherit a
   parent agent's activated catalog or search-publications.
-- [ ] An activated server catalog and its search-publications remain available
+- [x] An activated server catalog and its search-publications remain available
   for the rest of that agent session, including later turns, and are discarded
   when the session ends.
 - [ ] Activation, search, and call error results never disclose credentials,
@@ -261,27 +280,34 @@ capability-denied must be denied at call time.
 
 ## Observability and audit
 
+**Evidence:** catalog telemetry tests capture activation outcomes, counts,
+server sets, caching, and secret redaction. The production OTLP harness from
+`1eb2345` passed against local Aniani: TraceQL found `execute_tool`, PromQL found
+`simulacra_mcp_calls{server="github",tool="issues"} = 1`, and LogQL found
+activation success/failure plus catalog-search evidence; the same test asserts
+activation/search journal attribution.
+
 - [ ] Every activation attempt emits an activation trace/span or event linked to
   the triggering skill load and records `simulacra.skill.name`, the declared
   server-name set, activated-tool count, and outcome (`success` or `failure`),
   without credentials or endpoint secrets.
-- [ ] A failed multi-server activation emits one failure outcome for the skill
+- [x] A failed multi-server activation emits one failure outcome for the skill
   and does not report a successful activated catalog for that failed attempt.
-- [ ] Successful activation records the count of tools newly committed to that
+- [x] Successful activation records the count of tools newly committed to that
   agent's catalog; a cached repeated activation records zero newly activated
   tools and does not produce a new handshake/inventory span.
-- [ ] `mcp_search` emits trace/log evidence of query, result count, and only
+- [x] `mcp_search` emits trace/log evidence of query, result count, and only
   non-secret server/tool identifiers; it must not emit arguments, credentials,
   or inactive-server inventory.
-- [ ] Every dispatched `mcp_call` retains S008 observability: an
+- [x] Every dispatched `mcp_call` retains S008 observability: an
   `execute_tool` span, `simulacra.tool.name`, `simulacra.tool.source =
   mcp:<server>`, MCP call metric labels, and `gen_ai.tool.message` input/output
   events.
-- [ ] Every successful remote MCP call retains the existing journal entry before
+- [x] Every successful remote MCP call retains the existing journal entry before
   its result reaches the agent; local activation/search bookkeeping is recorded
   so the skill dependency and catalog publication remain attributable without
   recording credentials.
-- [ ] Local Aniani validation demonstrates activation success and atomic
+- [x] Local Aniani validation demonstrates activation success and atomic
   failure traces, `mcp_search` evidence, MCP call spans/metrics/logs, and the
   corresponding journal entries using TraceQL, PromQL, and LogQL.
 
@@ -290,22 +316,40 @@ capability-denied must be denied at call time.
 The implementation must provide behavioral tests (not source-scanning tests)
 covering every unchecked assertion above, including these minimum scenarios:
 
-- [ ] A skill frontmatter fixture recognizes `mcp_servers`; unknown,
+**Evidence:** the checked scenarios are covered by frontmatter fixtures, CLI
+bootstrap probes, server provider-injection tests, MCP rollback/capability
+tests, and the local Aniani harness described above.
+
+- [x] A skill frontmatter fixture recognizes `mcp_servers`; unknown,
   tenant-disallowed, and capability-denied references fail bootstrap or skill
   activation before a fake MCP server observes any network request.
-- [ ] The first provider request with configured MCP includes only stable
+- [x] The first provider request with configured MCP includes only stable
   `mcp_search`/`mcp_call` MCP surfaces and never an MCP server tool schema.
 - [ ] Loading a skill with two declared fake MCP servers performs handshake and
   inventory for exactly those two; a later search returns only their activated
   tools, never another configured fake server's tools.
-- [ ] A successful search-published activated tool is callable through
+- [x] A successful search-published activated tool is callable through
   `mcp_call`, and its call still enforces the exact
   `mcp:<server>:<tool>` capability namespace.
-- [ ] If one of multiple newly declared servers fails activation, the skill body
+- [x] If one of multiple newly declared servers fails activation, the skill body
   is withheld and neither the successful sibling's schemas nor the failed
   sibling's schemas can be searched or called.
 - [ ] Two concurrently running agents have separate catalogs; repeated loading
   of one skill/server does not reconnect or duplicate that agent's inventory.
-- [ ] An Aniani-backed integration test validates activation and MCP-call
+- [x] An Aniani-backed integration test validates activation and MCP-call
   traces, metrics, logs, and journal entries through TraceQL, PromQL, and
   LogQL using a local deterministic MCP fixture.
+
+### Remaining evidence gaps
+
+- Error redaction is directly proven for activation failures, but not yet for
+  every possible search-journal or remote-call error shape.
+- Activation telemetry fields and Aniani outcomes are proven, but no test
+  asserts the activation event's parent/link relationship to both model- and
+  user-triggered skill-load spans.
+- Atomic failure coverage uses multiple dependencies, but there is no single
+  behavioral test that successfully activates exactly two declared fake
+  servers while proving a third configured server remains untouched.
+- Catalog isolation and cached reactivation are proven independently, but the
+  acceptance matrix still lacks one test that runs two agent catalogs
+  concurrently and repeats activation within that scenario.
