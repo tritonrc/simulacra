@@ -120,6 +120,129 @@ async fn tool_call_then_text_response() {
     ));
 }
 
+struct CapturingMetaTool {
+    name: &'static str,
+    calls: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl simulacra_types::Tool for CapturingMetaTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "captures runtime tool arguments".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.calls.lock().unwrap().push(arguments);
+        Box::pin(async { Ok(serde_json::json!({"ok":true})) })
+    }
+}
+
+#[tokio::test]
+async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_dispatch() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let query = "issues https://QUERYUSER:QUERYPASS@example.invalid/mcp?token=QUERYTOKEN Authorization: Bearer QUERYAUTH";
+    let remote_arguments = serde_json::json!({
+        "endpoint":"https://CALLUSER:CALLPASS@example.invalid/mcp?token=CALLTOKEN",
+        "authorization":"Bearer CALLAUTH",
+        "module_path":"/private/CALLMODULE.wasm"
+    });
+    let search_arguments = serde_json::json!({"query":query});
+    let call_arguments = serde_json::json!({
+        "server":"github",
+        "tool":"issues",
+        "arguments":remote_arguments
+    });
+    let provider = FakeProvider::new(vec![
+        tool_call_response("mcp_search", search_arguments.clone()),
+        tool_call_response("mcp_call", call_arguments.clone()),
+        text_response("Done"),
+    ]);
+    let search_calls = Arc::new(Mutex::new(Vec::new()));
+    let call_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(CapturingMetaTool {
+            name: "mcp_search",
+            calls: Arc::clone(&search_calls),
+        }))
+        .unwrap();
+    tools
+        .register(Box::new(CapturingMetaTool {
+            name: "mcp_call",
+            calls: Arc::clone(&call_calls),
+        }))
+        .unwrap();
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    agent.run("exercise MCP meta tools").await.unwrap();
+
+    assert_eq!(*search_calls.lock().unwrap(), vec![search_arguments]);
+    assert_eq!(*call_calls.lock().unwrap(), vec![call_arguments]);
+    let entries = journal
+        .read_all(&AgentId("test-agent".into()))
+        .expect("runtime journal should read");
+    let outer_calls = entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            JournalEntryKind::ToolCall {
+                tool_name,
+                arguments,
+                ..
+            } if tool_name == "mcp_search" || tool_name == "mcp_call" => {
+                Some((tool_name.clone(), arguments.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outer_calls,
+        vec![
+            ("mcp_search".into(), serde_json::json!({"query_length":query.len()})),
+            (
+                "mcp_call".into(),
+                serde_json::json!({
+                    "server":"github",
+                    "tool":"issues",
+                    "argument_length":remote_arguments.to_string().len()
+                })
+            )
+        ]
+    );
+    let rendered = format!("{outer_calls:?}");
+    for secret in [
+        "QUERYUSER",
+        "QUERYPASS",
+        "QUERYTOKEN",
+        "QUERYAUTH",
+        "CALLUSER",
+        "CALLPASS",
+        "CALLTOKEN",
+        "CALLAUTH",
+        "CALLMODULE",
+    ] {
+        assert!(!rendered.contains(secret));
+    }
+}
+
 struct CapturingSequencedProvider {
     responses: Mutex<Vec<ProviderResponse>>,
     calls: Arc<Mutex<Vec<Vec<Message>>>>,
