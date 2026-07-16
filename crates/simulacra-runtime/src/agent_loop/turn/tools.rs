@@ -144,7 +144,7 @@ impl AgentLoop {
             tool_call_id: Some(tc.id.clone()),
 
             tool_name: tc.name.clone(),
-            arguments: tc.arguments.clone(),
+            arguments: safe_outer_tool_arguments(&tc.name, &tc.arguments),
         };
         self.journal_entry(tool_call.clone())?;
         self.consume_replay_entry(&tool_call)
@@ -154,7 +154,7 @@ impl AgentLoop {
         self.sink.emit(ActivityEvent::ToolStart {
             tool_call_id: tc.id.clone(),
             name: tc.name.clone(),
-            arguments: tc.arguments.clone(),
+            arguments: safe_outer_tool_arguments(&tc.name, &tc.arguments),
         });
     }
 
@@ -202,5 +202,35 @@ impl AgentLoop {
             tool_call_id: Some(tc.id.clone()),
             provider_content: vec![],
         })
+    }
+}
+
+fn safe_outer_tool_arguments(tool_name: &str, arguments: &serde_json::Value) -> serde_json::Value {
+    match tool_name {
+        "mcp_search" => serde_json::json!({
+            "query_length": arguments
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len)
+                .unwrap_or(0),
+        }),
+        "mcp_call" => {
+            let remote_arguments = arguments
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "server": arguments
+                    .get("server")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                "tool": arguments
+                    .get("tool")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                "argument_length": remote_arguments.to_string().len(),
+            })
+        }
+        _ => arguments.clone(),
     }
 }
