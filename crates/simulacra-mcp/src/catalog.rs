@@ -464,6 +464,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct CapturedEvent {
         fields: HashMap<String, String>,
+        current_span: Option<String>,
     }
 
     struct EventCapture {
@@ -477,14 +478,17 @@ mod tests {
         fn on_event(
             &self,
             event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
             let mut fields = HashMap::new();
             event.record(&mut FieldVisitor(&mut fields));
             self.events
                 .lock()
                 .expect("event capture mutex")
-                .push(CapturedEvent { fields });
+                .push(CapturedEvent {
+                    fields,
+                    current_span: ctx.lookup_current().map(|span| span.name().to_string()),
+                });
         }
     }
 
@@ -1197,6 +1201,50 @@ mod tests {
         assert!(!rendered.contains(&secret_endpoint));
         assert!(!rendered.contains("SUPERSECRET"));
         assert!(!rendered.to_ascii_lowercase().contains("authorization"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_skill_activation_telemetry_is_attributed_to_triggering_tool_span() {
+        let _guard = catalog_test_guard().await;
+        let catalog = McpCatalog::new(vec![echo_descriptor("github", "model-agent")])
+            .expect("catalog should construct");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let tool_span = tracing::info_span!(
+            "tool_invoke",
+            gen_ai.tool.name = "Skill",
+            simulacra.skill.source = "model"
+        );
+        let _entered = tool_span.enter();
+        catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect("activation should succeed");
+
+        let captured = activation_events(&events);
+        assert_eq!(captured.len(), 1);
+        let activation = &captured[0];
+        assert_eq!(activation.current_span.as_deref(), Some("tool_invoke"));
+        assert_eq!(
+            activation
+                .fields
+                .get("simulacra.skill.source")
+                .map(String::as_str),
+            Some("model"),
+            "activation event must carry explicit model attribution rather than relying only on an ambient span: {activation:?}"
+        );
+        assert_eq!(
+            activation
+                .fields
+                .get("simulacra.mcp.activation.link")
+                .map(String::as_str),
+            Some("tool_invoke"),
+            "activation event must retain an explicit trigger link for exported telemetry: {activation:?}"
+        );
     }
 
     #[tokio::test]
