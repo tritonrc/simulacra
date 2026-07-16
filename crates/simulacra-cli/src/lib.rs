@@ -2921,7 +2921,7 @@ task = "catalog bootstrap"
 
     fn serve_catalog_once(listener: TcpListener) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            for _ in 0..3 {
+            loop {
                 let (mut stream, _) = listener.accept().expect("MCP request should arrive");
                 stream
                     .set_read_timeout(Some(std::time::Duration::from_secs(2)))
@@ -2954,19 +2954,34 @@ task = "catalog bootstrap"
                     }
                 }
                 let request = String::from_utf8_lossy(&request);
+                let is_call = request.contains("\"method\":\"tools/call\"");
                 let body = if request.contains("\"method\":\"initialize\"") {
                     json!({"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"test","version":"1"},"capabilities":{}}}).to_string()
+                } else if is_call {
+                    json!({"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"S057 fixture result"}]}}).to_string()
                 } else {
                     json!({"jsonrpc":"2.0","result":{"tools":[{"name":"issues","description":"Search issues","inputSchema":{"type":"object"}}]}}).to_string()
                 };
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
                     .expect("MCP response should write");
+                if is_call {
+                    break;
+                }
             }
         })
     }
 
     #[test]
     fn production_bootstrap_wires_activation_and_search_journal_attribution() {
+        let _otel = init_tracing(&TracingPlan {
+            backend: TracingBackend::Otlp,
+            level: "INFO".to_string(),
+            otlp_endpoint: Some(
+                std::env::var("S057_OTLP_ENDPOINT")
+                    .unwrap_or_else(|_| "http://localhost:4320".to_string()),
+            ),
+        })
+        .expect("S057 OTLP telemetry should initialize");
         let listener = TcpListener::bind("127.0.0.1:0").expect("MCP fixture should bind");
         let url = format!("http://{}", listener.local_addr().expect("fixture address"));
         let worker = serve_catalog_once(listener);
@@ -2997,6 +3012,14 @@ task = "catalog bootstrap"
                 )
                 .await
                 .expect("catalog search should succeed");
+            boot.tool_registry
+                .call(
+                    "mcp_call",
+                    json!({"server":"github","tool":"issues","arguments":{"query":"S057"}}),
+                    &boot.capability_token,
+                )
+                .await
+                .expect("search-published MCP tool call should succeed");
         });
         worker.join().expect("MCP fixture should stop");
 
