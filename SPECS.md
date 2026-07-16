@@ -61,6 +61,7 @@ Each spec lives in `specs/` and is testable. If code and spec disagree, the spec
 | `specs/S054-child-agent-orchestration.md` | Active | Child agent orchestration: status, bounded wait, and close tools for supervised child handles |
 | `specs/S055-cli-jsonl-output.md` | Active | CLI headless JSONL output stream: `--output-format jsonl` emits the activity event stream as one envelope JSON object per line on stdout with a terminal `result` line, for programmatic/orchestrator consumption |
 | `specs/S056-acp-child-agents.md` | Active | ACP-backed child agents as an alternate supervised child runtime behind the existing child-control tools, with ACP execution treated as an opaque injected runtime boundary |
+| `specs/S057-skill-activated-mcp-catalogs.md` | Active | Skill-activated MCP catalogs: stable `mcp_search`/`mcp_call` meta-tools, atomic per-agent dependency activation, and session-scoped searchable MCP inventories |
 
 ## Spec Lifecycle
 
