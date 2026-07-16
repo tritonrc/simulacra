@@ -123,7 +123,7 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Option<String> {
 
 fn json_http_response(body: &str) -> String {
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     )
@@ -131,7 +131,7 @@ fn json_http_response(body: &str) -> String {
 
 fn json_http_response_with_session(body: &str, session_id: &str) -> String {
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         session_id,
         body.len(),
         body
@@ -142,7 +142,7 @@ fn json_http_response_with_session(body: &str, session_id: &str) -> String {
 fn sse_http_response(json_body: &str) -> String {
     let sse_body = format!("event: message\ndata: {}\n\n", json_body);
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         sse_body.len(),
         sse_body
     )
@@ -152,7 +152,7 @@ fn sse_http_response(json_body: &str) -> String {
 fn sse_http_response_with_session(json_body: &str, session_id: &str) -> String {
     let sse_body = format!("event: message\ndata: {}\n\n", json_body);
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nMcp-Session-Id: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nMcp-Session-Id: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         session_id,
         sse_body.len(),
         sse_body
@@ -204,6 +204,7 @@ impl StreamableHttpServer {
 impl Drop for StreamableHttpServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(&self.addr);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -217,10 +218,6 @@ fn spawn_streamable_http_server(
 ) -> StreamableHttpServer {
     let listener =
         TcpListener::bind("127.0.0.1:0").expect("streamable HTTP test server should bind");
-    listener
-        .set_nonblocking(true)
-        .expect("streamable HTTP test server should become nonblocking");
-
     let addr = listener
         .local_addr()
         .expect("streamable HTTP test server should have a local address")
@@ -243,13 +240,13 @@ fn spawn_streamable_http_server(
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
-                    while let Some(request) = read_http_request(&mut stream) {
+                    if let Some(request) = read_http_request(&mut stream) {
                         if !request.starts_with("POST ") {
                             let response = http_response_status(405, "Method Not Allowed");
                             let _ = stream.write_all(response.as_bytes());
-                            break;
+                            continue;
                         }
 
                         post_attempts_for_thread.fetch_add(1, Ordering::SeqCst);
@@ -290,10 +287,8 @@ fn spawn_streamable_http_server(
                             json_http_response(&body)
                         };
                         let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
                 }
                 Err(_) => break,
             }
@@ -327,10 +322,6 @@ fn spawn_streamable_http_server_sse(
 ) -> StreamableHttpServer {
     let listener =
         TcpListener::bind("127.0.0.1:0").expect("streamable HTTP SSE test server should bind");
-    listener
-        .set_nonblocking(true)
-        .expect("streamable HTTP SSE test server should become nonblocking");
-
     let addr = listener
         .local_addr()
         .expect("streamable HTTP SSE test server should have a local address")
@@ -353,13 +344,13 @@ fn spawn_streamable_http_server_sse(
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
-                    while let Some(request) = read_http_request(&mut stream) {
+                    if let Some(request) = read_http_request(&mut stream) {
                         if !request.starts_with("POST ") {
                             let response = http_response_status(405, "Method Not Allowed");
                             let _ = stream.write_all(response.as_bytes());
-                            break;
+                            continue;
                         }
 
                         post_attempts_for_thread.fetch_add(1, Ordering::SeqCst);
@@ -403,10 +394,8 @@ fn spawn_streamable_http_server_sse(
                             json_http_response(&body)
                         };
                         let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
                 }
                 Err(_) => break,
             }
@@ -432,4 +421,3 @@ fn spawn_streamable_http_server_sse(
 // Returns a configurable HTTP status code on POST (simulating a legacy
 // SSE-only server that rejects the streamable HTTP initialize POST).
 // Serves SSE endpoint discovery on GET /sse, handles JSON-RPC on POST /mcp-rpc.
-
