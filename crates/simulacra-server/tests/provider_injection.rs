@@ -387,7 +387,7 @@ async fn create_catalog_agent_with_skills_and_capabilities(
                 max_tokens: Some(256),
                 memory_pool_id: None,
                 skill_ids,
-                capabilities: &capabilities,
+                capabilities,
                 channel_ids: &[],
             },
         )
