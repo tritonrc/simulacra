@@ -2743,6 +2743,232 @@ task = "bootstrap"
     }
 }
 
+#[cfg(test)]
+mod s057_final_red_tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    use serde_json::json;
+    use simulacra_types::{AgentId, JournalEntryKind};
+
+    use super::*;
+
+    struct CatalogProject {
+        _dir: tempfile::TempDir,
+        config_path: PathBuf,
+    }
+
+    impl CatalogProject {
+        fn new(mcp_block: &str, mcp_capability: &str) -> Self {
+            let dir = tempfile::tempdir().expect("temporary project should be created");
+            let skill_dir = dir.path().join("skills/repo-work");
+            std::fs::create_dir_all(&skill_dir).expect("skill directory should be created");
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: repo-work\ndescription: Work with repositories.\nmcp_servers:\n  - github\n---\n\nPRIVATE SKILL BODY\n",
+            )
+            .expect("skill fixture should be written");
+            let config_path = dir.path().join("simulacra.toml");
+            std::fs::write(
+                &config_path,
+                format!(
+                    r#"[project]
+name = "s057-final-red"
+
+[agent_types.default]
+model = "claude-sonnet-4-20250514"
+skills = ["repo-work"]
+max_turns = 4
+max_tokens = 4096
+
+[agent_types.default.capabilities]
+skill_patterns = ["skill:repo-work"]
+mcp = [{mcp_capability:?}]
+paths_read = ["/workspace/**", "/skills/**"]
+paths_write = ["/workspace/**"]
+
+{mcp_block}
+
+[task]
+entry_agent = "default"
+task = "catalog bootstrap"
+"#
+                ),
+            )
+            .expect("config fixture should be written");
+            Self {
+                _dir: dir,
+                config_path,
+            }
+        }
+
+        fn args(&self) -> CliArgs {
+            CliArgs {
+                config_path: self.config_path.to_string_lossy().into_owned(),
+                task: None,
+                mode: Some(CliMode::Headless),
+                verbose: false,
+                otlp_endpoint: None,
+                session: None,
+                model: None,
+                max_turns: None,
+                max_tokens: None,
+                max_cost: None,
+                no_catalog: true,
+                output_format: OutputFormat::Text,
+            }
+        }
+    }
+
+    #[test]
+    fn bootstrap_rejects_skill_mcp_dependency_when_mcp_is_absent() {
+        let project = CatalogProject::new("", "mcp:github:*");
+
+        let error = match bootstrap(&project.args()) {
+            Ok(_) => panic!("bootstrap must reject a skill whose MCP dependency has no catalog"),
+            Err(error) => error,
+        };
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("repo-work") && message.contains("github"),
+            "bootstrap error must identify the skill and unavailable server: {message}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_rejects_capability_filtered_skill_dependency_without_network_access() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("probe should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("probe should be nonblocking");
+        let url = format!(
+            "http://{}/mcp",
+            listener.local_addr().expect("probe address")
+        );
+        let project = CatalogProject::new(
+            &format!("[[mcp.servers]]\nname = \"github\"\ntransport = \"http\"\nurl = {url:?}"),
+            "mcp:linear:*",
+        );
+
+        let error = match bootstrap(&project.args()) {
+            Ok(_) => panic!("bootstrap must reject a capability-filtered MCP dependency"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "dependency prevalidation must fail before opening a network connection"
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("repo-work") && message.contains("github"));
+    }
+
+    fn serve_catalog_once(listener: TcpListener) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("MCP request should arrive");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("read timeout should configure");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                let mut expected_len = None;
+                loop {
+                    let read = stream.read(&mut buffer).expect("MCP request should read");
+                    request.extend_from_slice(&buffer[..read]);
+                    if expected_len.is_none()
+                        && let Some(end) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let header_end = end + 4;
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let body_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        expected_len = Some(header_end + body_len);
+                    }
+                    if expected_len.is_some_and(|length| request.len() >= length) {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let body = if request.contains("\"method\":\"initialize\"") {
+                    json!({"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"test","version":"1"},"capabilities":{}}}).to_string()
+                } else {
+                    json!({"jsonrpc":"2.0","result":{"tools":[{"name":"issues","description":"Search issues","inputSchema":{"type":"object"}}]}}).to_string()
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    .expect("MCP response should write");
+            }
+        })
+    }
+
+    #[test]
+    fn production_bootstrap_wires_activation_and_search_journal_attribution() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("MCP fixture should bind");
+        let url = format!("http://{}", listener.local_addr().expect("fixture address"));
+        let worker = serve_catalog_once(listener);
+        let project = CatalogProject::new(
+            &format!("[[mcp.servers]]\nname = \"github\"\ntransport = \"http\"\nurl = {url:?}"),
+            "mcp:github:*",
+        );
+        let boot = bootstrap(&project.args()).expect("production bootstrap should succeed");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+
+        runtime.block_on(async {
+            boot.tool_registry
+                .call(
+                    "Skill",
+                    json!({"command":"repo-work"}),
+                    &boot.capability_token,
+                )
+                .await
+                .expect("skill activation should succeed");
+            boot.tool_registry
+                .call(
+                    "mcp_search",
+                    json!({"query":"issues"}),
+                    &boot.capability_token,
+                )
+                .await
+                .expect("catalog search should succeed");
+        });
+        worker.join().expect("MCP fixture should stop");
+
+        let entries = boot
+            .journal
+            .read_all(&AgentId(boot.entry_agent.clone()))
+            .expect("production journal should be readable");
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::ToolCall { tool_name, arguments, .. }
+                    if tool_name == "mcp_activation"
+                        && arguments == &json!({"skill":"repo-work","servers":["github"]})
+            )),
+            "production construction must journal activation under the entry agent; entries: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::ToolCall { tool_name, arguments, .. }
+                    if tool_name == "mcp_search" && arguments == &json!({"query":"issues"})
+            )),
+            "production construction must journal search under the entry agent; entries: {entries:?}"
+        );
+    }
+}
+
 /// Validate a user-supplied session id before it is used as a filesystem
 /// path component. Session ids must match `^[a-zA-Z0-9_-]+$`: this rejects
 /// path-traversal attempts (`../`, `..\\`), absolute paths, dotfiles, and
