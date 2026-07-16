@@ -84,6 +84,12 @@ impl McpManager {
             .as_ref()
             .map(|arc| arc.load(Ordering::Acquire))
     }
+
+    pub(crate) fn discard_server(&mut self, server: &str) {
+        self.connections.remove(server);
+        #[cfg(feature = "wasm")]
+        self.wasm_modules.remove(server);
+    }
 }
 
 impl Default for McpManager {

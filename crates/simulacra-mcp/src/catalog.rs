@@ -162,6 +162,7 @@ impl McpCatalog {
 
         let mut temporary = BTreeMap::new();
         let mut manager = self.manager.lock().await;
+        let result: Result<(), ToolError> = async {
         for server in &pending {
             let descriptor = self.descriptors.get(server).ok_or_else(|| {
                 ToolError::ExecutionFailed(format!(
@@ -189,6 +190,17 @@ impl McpCatalog {
                 })?;
             temporary.insert(server.clone(), tools);
         }
+        manager
+            .append_journal_tool_call("mcp_activation", &json!({"skill": skill, "servers": pending}))
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+        Ok(())
+        }.await;
+        if let Err(error) = result {
+            for server in &pending {
+                manager.discard_server(server);
+            }
+            return Err(error);
+        }
         drop(manager);
         let count = temporary.values().map(Vec::len).sum();
         let mut state = self.state.lock().await;
@@ -197,7 +209,7 @@ impl McpCatalog {
         Ok(count)
     }
 
-    async fn search(&self, query: &str) -> Vec<Value> {
+    async fn search(&self, query: &str) -> Result<Vec<Value>, ToolError> {
         let needle = query.to_lowercase();
         let mut matches = Vec::new();
         let mut state = self.state.lock().await;
@@ -211,11 +223,16 @@ impl McpCatalog {
         }
         matches.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
         matches.truncate(5);
+        self.manager
+            .lock()
+            .await
+            .append_journal_tool_call("mcp_search", &json!({"query": query}))
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
         for (server, tool) in &matches {
             state.published.insert((server.clone(), tool.name.clone()));
         }
         tracing::info!(simulacra.mcp.search.query = %query, simulacra.mcp.search.result_count = matches.len(), "MCP catalog search");
-        matches.into_iter().map(|(server, tool)| json!({"server": server, "tool": tool.name, "description": tool.description, "input_schema": tool.input_schema})).collect()
+        Ok(matches.into_iter().map(|(server, tool)| json!({"server": server, "tool": tool.name, "description": tool.description, "input_schema": tool.input_schema})).collect())
     }
 
     async fn call(
@@ -296,7 +313,7 @@ impl Tool for McpSearchTool {
             let query = query.ok_or_else(|| {
                 ToolError::InvalidArguments("mcp_search requires string query".into())
             })?;
-            Ok(Value::Array(self.catalog.search(&query).await))
+            Ok(Value::Array(self.catalog.search(&query).await?))
         })
     }
 }
@@ -450,22 +467,23 @@ mod tests {
                             let Some(request) = read_json_rpc_request(&mut stream) else {
                                 continue;
                             };
-                            let body = if request.contains("\\\"method\\\":\\\"initialize\\\"") {
+                            let body = if request.contains("\"method\":\"initialize\"") {
                                 initialize_for_thread.fetch_add(1, Ordering::SeqCst);
                                 json!({"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"test","version":"1"},"capabilities":{}}}).to_string()
-                            } else if request.contains("\\\"method\\\":\\\"tools/list\\\"") {
+                            } else if request.contains("\"method\":\"tools/list\"") {
                                 list_for_thread.fetch_add(1, Ordering::SeqCst);
                                 json!({"jsonrpc":"2.0","result":{"tools":[{"name":tool_name,"description":"A catalog test tool","inputSchema":{"type":"object"}}]}}).to_string()
                             } else {
                                 json!({"jsonrpc":"2.0","result":{}}).to_string()
                             };
                             let response = format!(
-                                "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                 body.len(),
                                 body
                             );
                             let _ = stream.write_all(response.as_bytes());
                             let _ = stream.flush();
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(2))
@@ -579,6 +597,16 @@ mod tests {
             .await
             .expect_err("one unavailable dependency must fail the whole activation");
 
+        assert_eq!(
+            healthy.initialize_requests.load(Ordering::SeqCst),
+            1,
+            "the healthy sibling must complete initialize before the unavailable sibling fails"
+        );
+        assert_eq!(
+            healthy.tools_list_requests.load(Ordering::SeqCst),
+            1,
+            "the healthy sibling must complete tools/list before the unavailable sibling fails"
+        );
         assert!(
             catalog.state.lock().await.activated.is_empty(),
             "failed activation must not publish inventory"
