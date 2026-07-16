@@ -380,6 +380,76 @@ fn configured_native_child_prevalidates_skill_dependencies_with_attenuated_capab
     assert!(matches!(mcp_probe.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
 }
 
+#[test]
+fn configured_native_child_enforces_tenant_mcp_allowlist_before_network_access() {
+    let _env_lock = openai_env_guard();
+    let provider = FakeOpenAiServer::new(CannedResponse::json(serde_json::json!({
+        "id": "unexpected-provider-call",
+        "model": "child-model",
+        "choices": [{"message":{"role":"assistant","content":"unexpected"},"finish_reason":"stop"}],
+        "usage": {"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+    })));
+    let _base_url = EnvGuard::set("OPENAI_BASE_URL", &provider.base_url());
+    let _api_base = EnvGuard::set("OPENAI_API_BASE", &provider.base_url());
+    let _api_key = EnvGuard::set("OPENAI_API_KEY", "test-key");
+    let mcp_probe = TcpListener::bind("127.0.0.1:0").expect("MCP probe should bind");
+    mcp_probe.set_nonblocking(true).expect("probe nonblocking");
+    let endpoint = format!("http://{}", mcp_probe.local_addr().expect("probe address"));
+    let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    vfs.mkdir("/workspace").expect("workspace should be created");
+    let mut config =
+        configured_child_catalog_config(&vfs, "github", "mcp:github:*", endpoint);
+    config.tenants.insert(
+        "tenant-a".into(),
+        simulacra_config::TenantConfig {
+            agent_type: "researcher".into(),
+            integrations: None,
+            mcp_servers: Some(vec!["linear".into()]),
+        },
+    );
+    let factory = AgentTaskFactory {
+        config,
+        provider_kind: ProviderKind::OpenAI,
+        vfs,
+        journal: Arc::new(InMemoryJournalStorage::new()),
+        activity_sink: Arc::new(NoopActivitySink),
+        parent_capability: CapabilityToken {
+            mcp_tools: vec!["mcp:github:*".into()],
+            skill_patterns: vec!["skill:repo-work".into()],
+            ..Default::default()
+        },
+        supervisor_sender: None,
+        parent_model: "parent-model".into(),
+        pipeline: None,
+        script_executor: None,
+        child_cell_configurator: None,
+        child_tool_registrar: None,
+        child_provider_factory: None,
+        acp_child_runtime: None,
+    };
+    let mut spawn = spawn_config("tenant-child-mcp-denied", "parent-agent", child_budget(32, 1, 0));
+    spawn.agent_type = Some("researcher".into());
+
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime should build")
+        .block_on(factory.create_task(spawn, CancellationToken::new(Duration::from_secs(1))))
+        .expect_err("tenant-excluded MCP dependency must reject configured child construction");
+    let message = error.to_string();
+    assert!(message.contains("repo-work") && message.contains("github"));
+    assert!(matches!(mcp_probe.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    assert_eq!(
+        provider
+            .requests
+            .lock()
+            .expect("provider request mutex")
+            .len(),
+        0,
+        "tenant dependency validation must fail before child provider execution"
+    );
+}
+
 #[tokio::test]
 async fn generic_spawn_parent_max_sub_agents_zero_remains_unlimited() {
     let factory = RecordingTaskFactory::new(vec![Ok(child_success_output())]);
