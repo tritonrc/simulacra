@@ -2113,6 +2113,27 @@ fn start_supervisor_actor(
             None
         }
     };
+    let allowed_mcp_servers = if parts.config.tenants.is_empty() {
+        parts
+            .config
+            .mcp
+            .as_ref()
+            .map(|mcp| {
+                mcp.servers
+                    .iter()
+                    .map(|server| server.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        parts
+            .config
+            .tenants
+            .values()
+            .find(|tenant| tenant.agent_type == parts.entry_agent)
+            .and_then(|tenant| tenant.mcp_servers.clone())
+            .unwrap_or_default()
+    };
     let task_factory = Arc::new(AgentTaskFactory {
         config: parts.config,
         provider_kind: parts.provider_kind,
@@ -2120,6 +2141,7 @@ fn start_supervisor_actor(
         journal: parts.journal,
         activity_sink: supervisor_sink,
         parent_capability: parts.parent_capability.clone(),
+        allowed_mcp_servers: Some(allowed_mcp_servers),
         supervisor_sender: parts.supervisor_sender,
         parent_model: parts.parent_model,
         pipeline: Some(Arc::clone(&parts.pipeline)),
@@ -2971,6 +2993,49 @@ task = "catalog bootstrap"
         })
     }
 
+    fn aniani_get(path: &str) -> String {
+        let mut stream = std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:4320".parse().expect("Aniani address"),
+            std::time::Duration::from_secs(1),
+        )
+        .expect("local Aniani must be running on localhost:4320 for S057 validation");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("Aniani read timeout");
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost:4320\r\nConnection: close\r\n\r\n"
+        )
+        .expect("Aniani query should write");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("Aniani query should read");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "Aniani query failed: {response}"
+        );
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .expect("Aniani response should have an HTTP body")
+    }
+
+    fn await_aniani_evidence(path: &str, required: &[&str]) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let body = aniani_get(path);
+            if required.iter().all(|needle| body.contains(needle)) {
+                return body;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Aniani did not index required evidence {required:?}; last response: {body}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
     #[test]
     fn production_bootstrap_wires_activation_and_search_journal_attribution() {
         let _otel = init_tracing(&TracingPlan {
@@ -3020,6 +3085,16 @@ task = "catalog bootstrap"
                 )
                 .await
                 .expect("search-published MCP tool call should succeed");
+            boot.mcp_catalog
+                .as_ref()
+                .expect("configured MCP should retain its catalog")
+                .activate(
+                    "atomic-failure-s057",
+                    &["github".into(), "missing".into()],
+                    &boot.capability_token,
+                )
+                .await
+                .expect_err("unknown sibling must produce one atomic activation failure");
         });
         worker.join().expect("MCP fixture should stop");
 
@@ -3043,6 +3118,34 @@ task = "catalog bootstrap"
                     if tool_name == "mcp_search" && arguments == &json!({"query":"issues"})
             )),
             "production construction must journal search under the entry agent; entries: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::ToolCall { tool_name, arguments, .. }
+                    if tool_name == "mcp_activation"
+                        && arguments == &json!({"skill":"atomic-failure-s057","servers":["github","missing"]})
+            )),
+            "atomic failure must remain journal-attributable; entries: {entries:?}"
+        );
+
+        await_aniani_evidence(
+            "/api/search?q=%7B%20name%3D%22execute_tool%22%20%7D",
+            &["execute_tool"],
+        );
+        await_aniani_evidence(
+            "/api/v1/query?query=simulacra_mcp_calls",
+            &["simulacra_mcp_calls", "github", "issues"],
+        );
+        await_aniani_evidence(
+            "/loki/api/v1/query?query=%7B%7D",
+            &[
+                "repo-work",
+                "atomic-failure-s057",
+                "MCP catalog search",
+                "success",
+                "failure",
+            ],
         );
     }
 }
