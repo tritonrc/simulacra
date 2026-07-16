@@ -19,6 +19,10 @@ pub(super) struct ChildEnvironmentSpec<'a> {
     pub(super) tool_registrar: Option<ChildToolRegistrar>,
     pub(super) spawn_tool: Option<ChildSpawnToolSpec>,
     pub(super) parent_sink: Arc<dyn ActivitySink>,
+    /// Full configured runtime surface used only for configured native child
+    /// skill/MCP discovery. Generic leaf children deliberately receive None.
+    pub(super) runtime_config: Option<&'a simulacra_config::SimulacraConfig>,
+    pub(super) skill_names: &'a [String],
 }
 
 pub(super) struct ChildEnvironment {
@@ -90,6 +94,9 @@ fn build_child_registry(
 ) -> Result<simulacra_tool::ToolRegistry, simulacra_types::ToolError> {
     let mut registry = simulacra_tool::ToolRegistry::new();
     simulacra_tool::register_builtins(&mut registry, Arc::clone(cell))?;
+    if let Some(config) = spec.runtime_config {
+        register_child_skill_mcp_catalog(&mut registry, cell, spec, config)?;
+    }
     if let Some(register_extra_tools) = &spec.tool_registrar {
         register_extra_tools(&mut registry, Arc::clone(cell))?;
     }
@@ -125,4 +132,129 @@ fn build_child_registry(
         registry.register(Box::new(CloseChildAgentTool { sender }))?;
     }
     Ok(registry)
+}
+
+fn register_child_skill_mcp_catalog(
+    registry: &mut simulacra_tool::ToolRegistry,
+    cell: &Arc<simulacra_sandbox::AgentCell>,
+    spec: &ChildEnvironmentSpec<'_>,
+    config: &simulacra_config::SimulacraConfig,
+) -> Result<(), simulacra_types::ToolError> {
+    let skills = simulacra_tool::discover_and_filter_skills(
+        &spec.inherited_vfs,
+        spec.skill_names,
+        &spec.child_config.capability,
+        spec.agent_type_name,
+    )
+    .map_err(|error| simulacra_types::ToolError::ExecutionFailed(error.to_string()))?;
+
+    let configured_names: std::collections::HashSet<&str> = config
+        .mcp
+        .as_ref()
+        .into_iter()
+        .flat_map(|mcp| &mcp.servers)
+        .map(|server| server.name.as_str())
+        .collect();
+    for skill in &skills {
+        for server in &skill.mcp_servers {
+            if !configured_names.contains(server.as_str()) {
+                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "skill {:?} references unknown configured MCP server {:?}",
+                    skill.name, server
+                )));
+            }
+            if !mcp_capability_may_cover_server(&spec.child_config.capability.mcp_tools, server) {
+                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "skill {:?} MCP server {:?} is denied by the child's attenuated capability",
+                    skill.name, server
+                )));
+            }
+        }
+    }
+
+    let Some(mcp) = config.mcp.as_ref().filter(|mcp| !mcp.servers.is_empty()) else {
+        return if skills.iter().any(|skill| !skill.mcp_servers.is_empty()) {
+            Err(simulacra_types::ToolError::ExecutionFailed(
+                "configured child skill requires MCP but no MCP catalog is configured".into(),
+            ))
+        } else {
+            register_child_skill_tool(registry, cell, skills, None)
+        };
+    };
+
+    let descriptors = mcp
+        .servers
+        .iter()
+        .filter(|server| {
+            mcp_capability_may_cover_server(&spec.child_config.capability.mcp_tools, &server.name)
+        })
+        .filter_map(|server| {
+            if server.transport.as_deref() == Some("wasm") {
+                server.module.as_ref().map(|module| {
+                    simulacra_mcp::McpServerDescriptor::wasm(
+                        server.name.clone(),
+                        simulacra_mcp::DeferredWasmMcpServerDescriptor {
+                            module_path: std::path::PathBuf::from(module),
+                            network_allowlist: server.network.clone(),
+                            hooks: spec.pipeline.clone(),
+                            journal: Some(Arc::clone(&spec.inherited_journal)),
+                            agent_id: spec.spawn_config.agent_id.clone(),
+                        },
+                    )
+                })
+            } else {
+                server.url.as_ref().map(|url| {
+                    simulacra_mcp::McpServerDescriptor::network(
+                        server.name.clone(),
+                        url.clone(),
+                        server.transport.clone(),
+                    )
+                })
+            }
+        })
+        .collect();
+    let catalog = simulacra_mcp::McpCatalog::with_journal(
+        descriptors,
+        Arc::clone(&spec.inherited_journal),
+        spec.spawn_config.agent_id.clone(),
+    )?;
+    register_child_skill_tool(registry, cell, skills, Some(Arc::clone(&catalog)))?;
+    registry.register(Box::new(simulacra_mcp::McpSearchTool::new(Arc::clone(
+        &catalog,
+    ))))?;
+    registry.register(Box::new(simulacra_mcp::McpCallTool::new(catalog)))?;
+    Ok(())
+}
+
+fn register_child_skill_tool(
+    registry: &mut simulacra_tool::ToolRegistry,
+    cell: &Arc<simulacra_sandbox::AgentCell>,
+    skills: Vec<simulacra_tool::SkillMeta>,
+    catalog: Option<Arc<simulacra_mcp::McpCatalog>>,
+) -> Result<(), simulacra_types::ToolError> {
+    if skills
+        .iter()
+        .any(|skill| !skill.disable_model_invocation && skill.allow_implicit_invocation)
+    {
+        let tool = simulacra_tool::SkillTool::new(Arc::clone(cell), skills);
+        let tool = match catalog {
+            Some(catalog) => tool.with_dependency_activator(
+                catalog as Arc<dyn simulacra_types::SkillDependencyActivator>,
+            ),
+            None => tool,
+        };
+        registry.register(Box::new(tool))?;
+    }
+    Ok(())
+}
+
+fn mcp_capability_may_cover_server(patterns: &[String], server: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        pattern
+            .strip_prefix("mcp:")
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(server_pattern, tool_pattern)| {
+                !tool_pattern.is_empty() && (server_pattern == "*" || server_pattern == server)
+            })
+    })
 }

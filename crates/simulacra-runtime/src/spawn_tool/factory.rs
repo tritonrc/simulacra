@@ -119,6 +119,7 @@ impl crate::TaskFactory for AgentTaskFactory {
         let child_tool_registrar = self.child_tool_registrar.clone();
         let child_provider_factory = self.child_provider_factory.clone();
         let acp_child_runtime = self.acp_child_runtime.clone();
+        let runtime_config = self.config.clone();
 
         Box::pin(async move {
             let mut input_queue = Some(input_queue);
@@ -178,6 +179,8 @@ impl crate::TaskFactory for AgentTaskFactory {
                     tool_registrar: child_tool_registrar.clone(),
                     spawn_tool: None,
                     parent_sink,
+                    runtime_config: None,
+                    skill_names: &[],
                 })?;
 
                 run_spawn_before_hook(
@@ -341,6 +344,8 @@ impl crate::TaskFactory for AgentTaskFactory {
                 tool_registrar: child_tool_registrar.clone(),
                 spawn_tool,
                 parent_sink,
+                runtime_config: Some(&runtime_config),
+                skill_names: &agent_type_config.skills,
             })?;
 
             run_spawn_before_hook(
