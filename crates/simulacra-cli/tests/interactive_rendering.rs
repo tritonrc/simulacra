@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use simulacra_cli::interactive::{
@@ -86,13 +87,15 @@ impl InteractiveOutput for TestIo {
 }
 
 fn unique_path(name: &str) -> PathBuf {
+    static NEXT_PATH_ID: AtomicU64 = AtomicU64::new(0);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "simulacra-cli-s018-{name}-{stamp}-{}.toml",
-        std::process::id()
+        "simulacra-cli-s018-{name}-{stamp}-{}-{}.toml",
+        std::process::id(),
+        NEXT_PATH_ID.fetch_add(1, Ordering::Relaxed)
     ))
 }
 
