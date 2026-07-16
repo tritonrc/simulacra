@@ -685,22 +685,25 @@ mod tests {
             .await
             .expect_err("unknown dependency should fail prevalidation");
 
-        let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable port");
-        let secret_endpoint = format!(
-            "http://{}/mcp?credential=SUPERSECRET",
-            unavailable.local_addr().expect("unavailable address")
-        );
-        drop(unavailable);
+        let secret_endpoint =
+            "http://catalog-user:SUPERSECRET@127.0.0.1:not-a-port/mcp?credential=QUERYSECRET";
         let disconnected = McpCatalog::new(vec![McpServerDescriptor::network(
             "linear".into(),
-            secret_endpoint.clone(),
+            secret_endpoint.into(),
             Some("http".into()),
         )])
         .expect("catalog should construct");
-        disconnected
+        let activation_error = disconnected
             .activate("connection-skill", &["linear".into()], &mcp_capability())
             .await
             .expect_err("unavailable dependency should fail activation");
+        let activation_error = activation_error.to_string();
+        assert!(
+            !activation_error.contains("SUPERSECRET")
+                && !activation_error.contains("QUERYSECRET")
+                && !activation_error.contains(secret_endpoint),
+            "activation errors must redact endpoint credentials and URLs, got: {activation_error}"
+        );
 
         let captured = activation_events(&events);
         assert_eq!(
@@ -722,9 +725,13 @@ mod tests {
             "0",
             "failure",
         );
-        let rendered = format!("{captured:?}");
-        assert!(!rendered.contains("SUPERSECRET"));
-        assert!(!rendered.contains(&secret_endpoint));
+        let rendered = format!("{:?}", events.lock().expect("event capture mutex"));
+        assert!(
+            !rendered.contains("SUPERSECRET")
+                && !rendered.contains("QUERYSECRET")
+                && !rendered.contains(secret_endpoint),
+            "activation logs must redact endpoint credentials and URLs, got: {rendered}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1689,6 +1689,20 @@ async fn configured_mcp_servers_are_not_contacted_without_agent_mcp_capability()
     let first_call_tools = recorded_tools
         .first()
         .expect("provider should receive tools");
+    let mcp_surface: Vec<_> = first_call_tools
+        .iter()
+        .filter(|tool| tool.name.starts_with("mcp_"))
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(
+        mcp_surface,
+        vec!["mcp_search", "mcp_call"],
+        "configured MCP must retain exactly its fixed provider-visible meta-tools even when capability filtering leaves no descriptor; tools were: {:?}",
+        first_call_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+    );
     assert!(
         !first_call_tools.iter().any(|tool| tool.name == "echo"),
         "agents without MCP capability must not receive configured MCP schemas; tools were: {:?}",
