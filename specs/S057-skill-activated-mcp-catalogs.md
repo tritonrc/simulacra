@@ -156,8 +156,12 @@ existing S008 behavior for hooks, journaling before return, transport retry,
 spans, and errors. The raw arguments are forwarded unchanged to the MCP
 dispatcher, but observability and journal records contain only safe metadata:
 `server`, `tool`, and serialized argument length. `gen_ai.tool.message` input
-events likewise contain argument length rather than the raw argument value. A
-searched tool that later becomes capability-denied must be denied at call time.
+events likewise contain argument length rather than the raw argument value. The
+outer `AgentLoop` journal entry and `ToolStart` activity payload apply the same
+projection before publication, so activity consumers and server SSE streams
+never receive raw `mcp_search` queries or `mcp_call` arguments. The registry and
+MCP dispatcher still receive the original values unchanged. A searched tool
+that later becomes capability-denied must be denied at call time.
 
 ## Behavior
 
@@ -240,6 +244,10 @@ manager path used by `mcp_call`. `successful_search_and_call_redact_secret_input
 and the reconciled MCP protocol tests prove raw search queries and call
 arguments still reach their functional paths but are replaced in journals and
 telemetry by query/argument length plus non-secret server/tool metadata.
+`mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_dispatch`
+proves the same boundary at the outer runtime journal and `ToolStart` activity
+surface; downstream activity and SSE serialization consume that already-safe
+payload rather than the provider's raw meta-tool input.
 
 - [x] `mcp_search` returns only tools from the calling agent's successfully
   activated server catalogs, returns at most five results, and includes each
@@ -297,7 +305,10 @@ activation/search journal attribution. Model and interactive tests additionally
 assert explicit source/link fields and span correlation across the user
 activation thread bridge. Search telemetry records `query_length`, result count,
 and returned server/tool identifiers; call telemetry records server/tool and
-`argument_length`. Neither path records the raw query or raw call arguments.
+`argument_length`. Outer AgentLoop journal entries and `ToolStart` activity
+events use the same safe shapes, which are the shapes exposed to activity/SSE
+consumers. No runtime audit, telemetry, activity, or SSE layer records the raw
+query or raw call arguments.
 
 - [x] Every activation attempt emits an activation trace/span or event linked to
   the triggering skill load and records `simulacra.skill.name`, the declared
@@ -315,12 +326,16 @@ and returned server/tool identifiers; call telemetry records server/tool and
   `execute_tool` span, `simulacra.tool.name`, `simulacra.tool.source =
   mcp:<server>`, MCP call metric labels, and `gen_ai.tool.message` input-metadata
   and output events. Input telemetry contains server/tool and argument length,
-  never raw arguments; dispatch still receives the original arguments unchanged.
+  never raw arguments; outer `ToolStart` activity and downstream SSE expose the
+  same metadata-only shape, while dispatch receives the original arguments
+  unchanged.
 - [x] Every successful remote MCP call retains the existing journal entry before
   its result reaches the agent; local activation/search bookkeeping is recorded
-  so the skill dependency and catalog publication remain attributable. Search
-  journals store query length; call journals store server/tool and argument
-  length. Raw query text, raw arguments, and credentials are not recorded.
+  so the skill dependency and catalog publication remain attributable. Both the
+  outer AgentLoop journal and MCP manager audit use safe metadata: search
+  entries store query length; call entries store server/tool and argument
+  length. Raw query text, raw arguments, and credentials are not recorded at
+  either layer.
 - [x] Local Aniani validation demonstrates activation success and atomic
   failure traces, `mcp_search` evidence, MCP call spans/metrics/logs, and the
   corresponding journal entries using TraceQL, PromQL, and LogQL.
