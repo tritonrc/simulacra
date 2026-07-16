@@ -11,11 +11,12 @@ use simulacra_cli::interactive::{
     InteractiveSessionConfig, SessionView, StreamEvent,
 };
 use simulacra_cli::{CliArgs, CliMode, bootstrap, run};
+use simulacra_mcp::McpCatalog;
 use simulacra_runtime::{
     AgentLoop, AgentLoopConfig, InMemoryJournalStorage, InMemorySessionStorage,
     NoopContextStrategy, RuntimeError, Session, SessionStorage,
 };
-use simulacra_tool::ToolRegistry;
+use simulacra_tool::{SkillMeta, ToolRegistry};
 use simulacra_types::{
     AgentId, CapabilityToken, ExitReason, FinishReason, Message, Provider, ProviderError,
     ProviderResponse, ResourceBudget, Role, TokenUsage, ToolCallMessage, ToolDefinition, VirtualFs,
@@ -34,6 +35,7 @@ struct CapturedSpan {
 struct CapturedEvent {
     level: String,
     fields: HashMap<String, String>,
+    current_span: Option<String>,
 }
 
 struct CaptureLayer {
@@ -106,11 +108,7 @@ where
         }
     }
 
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let mut fields = HashMap::new();
         let mut visitor = FieldVisitor(&mut fields);
         event.record(&mut visitor);
@@ -118,6 +116,7 @@ where
         self.events.lock().unwrap().push(CapturedEvent {
             level: event.metadata().level().to_string(),
             fields,
+            current_span: ctx.lookup_current().map(|span| span.name().to_string()),
         });
     }
 }
@@ -2050,6 +2049,85 @@ mod observability {
                 && span.parent.as_deref() == Some("interactive_session")
                 && span.fields.get("simulacra.turn.number").map(String::as_str) == Some("1")
         }));
+    }
+
+    #[test]
+    fn user_skill_load_links_activation_across_thread_bridge_before_body_injection() {
+        let _test_guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let provider = Arc::new(FakeProvider::success("unused"));
+        let storage: Arc<dyn SessionStorage> = Arc::new(InMemorySessionStorage::new());
+        let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+        let mut config = build_interactive_config(None, None);
+        config.skill_catalog = vec![SkillMeta {
+            name: "repo-work".into(),
+            description: "Repository workflow".into(),
+            vfs_path: "/skills/repo-work/SKILL.md".into(),
+            disable_model_invocation: false,
+            allow_implicit_invocation: true,
+            user_invocable: true,
+            allowed_tools: Vec::new(),
+            mcp_servers: Vec::new(),
+            body: Some("USER_SKILL_BODY_SENTINEL".into()),
+        }];
+        let mut session = InteractiveSession::new(TestIo::tty(), provider, storage, vfs, config);
+        session.set_skill_dependency_activator(
+            McpCatalog::new(Vec::new()).expect("empty catalog should construct"),
+            CapabilityToken::default(),
+        );
+        session.start();
+
+        let (view, spans, events) = capture_trace(|| session.dispatch_command("/repo-work"));
+        assert_eq!(
+            view.messages
+                .iter()
+                .find(|message| message.content == "USER_SKILL_BODY_SENTINEL")
+                .map(|message| &message.role),
+            Some(&Role::User),
+            "skill body is injected only after dependency activation succeeds"
+        );
+
+        let trigger_index = events
+            .iter()
+            .position(|event| {
+                event
+                    .fields
+                    .get("message")
+                    .is_some_and(|message| message.contains("user-triggered skill load recorded"))
+            })
+            .expect("user skill trigger event");
+        let activation_index = events
+            .iter()
+            .position(|event| {
+                event
+                    .fields
+                    .contains_key("simulacra.mcp.activated_tool_count")
+            })
+            .expect("MCP activation event");
+        assert!(trigger_index < activation_index);
+        let activation = &events[activation_index];
+        assert_eq!(
+            activation
+                .fields
+                .get("simulacra.skill.source")
+                .map(String::as_str),
+            Some("user")
+        );
+        let correlation = activation
+            .fields
+            .get("simulacra.mcp.activation.correlation")
+            .expect("activation correlation must survive thread bridge");
+        assert!(!correlation.is_empty());
+        assert_eq!(activation.current_span.as_deref(), Some("user_skill_load"));
+        let trigger_span = spans
+            .iter()
+            .find(|span| span.name == "user_skill_load")
+            .expect("user skill trigger span");
+        assert_eq!(
+            trigger_span
+                .fields
+                .get("simulacra.mcp.activation.correlation"),
+            Some(correlation)
+        );
     }
 
     #[test]
