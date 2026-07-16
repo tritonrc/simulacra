@@ -353,6 +353,7 @@ fn s056_factory(
         journal: Arc::new(InMemoryJournalStorage::new()),
         activity_sink,
         parent_capability: s056_parent_capability(),
+        allowed_mcp_servers: None,
         supervisor_sender: None,
         parent_model: "parent-model".into(),
         pipeline: None,

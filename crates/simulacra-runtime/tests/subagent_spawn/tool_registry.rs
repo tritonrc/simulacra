@@ -47,6 +47,7 @@ fn generic_spawn_tool_registry_includes_all_builtins_and_excludes_spawn_agent() 
         journal,
         activity_sink: Arc::new(NoopActivitySink),
         parent_capability: parent_cap,
+        allowed_mcp_servers: None,
         supervisor_sender: Some(tx),
         parent_model: "parent-model".into(),
         pipeline: None,
@@ -158,6 +159,7 @@ fn configured_spawn_capable_child_registry_includes_all_child_control_tools() {
         journal,
         activity_sink: Arc::new(NoopActivitySink),
         parent_capability: parent_cap,
+        allowed_mcp_servers: None,
         supervisor_sender: Some(tx),
         parent_model: "parent-model".into(),
         pipeline: None,
@@ -293,6 +295,7 @@ fn configured_native_child_builds_its_own_stable_skill_mcp_catalog_without_conne
             skill_patterns: vec!["skill:repo-work".into()],
             ..Default::default()
         },
+        allowed_mcp_servers: None,
         supervisor_sender: None,
         parent_model: "parent-model".into(),
         pipeline: None,
@@ -357,6 +360,7 @@ fn configured_native_child_prevalidates_skill_dependencies_with_attenuated_capab
             skill_patterns: vec!["skill:repo-work".into()],
             ..Default::default()
         },
+        allowed_mcp_servers: None,
         supervisor_sender: None,
         parent_model: "parent-model".into(),
         pipeline: None,
@@ -418,6 +422,7 @@ fn configured_native_child_enforces_tenant_mcp_allowlist_before_network_access()
             skill_patterns: vec!["skill:repo-work".into()],
             ..Default::default()
         },
+        allowed_mcp_servers: Some(vec!["linear".into()]),
         supervisor_sender: None,
         parent_model: "parent-model".into(),
         pipeline: None,
@@ -674,6 +679,7 @@ fn generic_child_invoke_agent_span_nests_under_parent_trace() {
         journal,
         activity_sink: Arc::new(NoopActivitySink),
         parent_capability: CapabilityToken::default(),
+        allowed_mcp_servers: None,
         supervisor_sender: None,
         parent_model: "parent-model".into(),
         pipeline: None,
