@@ -1632,6 +1632,35 @@ impl SimulacraEngine {
                     &agent_type_name_owned,
                 )
                 .map_err(|e| format!("failed to discover catalog skills: {e}"))?;
+                let configured_mcp_names: std::collections::HashSet<&str> = config_for_worker
+                    .mcp
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|mcp| &mcp.servers)
+                    .map(|server| server.name.as_str())
+                    .collect();
+                for skill in &skill_catalog {
+                    for server in &skill.mcp_servers {
+                        if !configured_mcp_names.contains(server.as_str()) {
+                            return Err(format!(
+                                "skill {:?} references unknown configured MCP server {:?}",
+                                skill.name, server
+                            ));
+                        }
+                        if !tenant_mcp_servers.contains(server) {
+                            return Err(format!(
+                                "skill {:?} MCP server {:?} is denied by the tenant allow-list",
+                                skill.name, server
+                            ));
+                        }
+                        if !mcp_capability_may_cover_server(&capability_token.mcp_tools, server) {
+                            return Err(format!(
+                                "skill {:?} MCP server {:?} is denied by capability policy",
+                                skill.name, server
+                            ));
+                        }
+                    }
+                }
                 let mcp_catalog = if let Some(ref mcp_config) = config_for_worker.mcp {
                     let descriptors: Vec<_> = mcp_config.servers.iter().filter(|server| {
                         tenant_mcp_servers.contains(&server.name)
@@ -1652,7 +1681,11 @@ impl SimulacraEngine {
                     if descriptors.is_empty() {
                         None
                     } else {
-                        Some(simulacra_mcp::McpCatalog::new(descriptors).map_err(|error| format!("invalid MCP catalog: {error}"))?)
+                        Some(simulacra_mcp::McpCatalog::with_journal(
+                            descriptors,
+                            Arc::clone(&journal),
+                            AgentId(task_id.clone()),
+                        ).map_err(|error| format!("invalid MCP catalog: {error}"))?)
                     }
                 } else { None };
                 if let Some(catalog) = &mcp_catalog {

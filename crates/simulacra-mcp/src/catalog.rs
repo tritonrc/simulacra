@@ -88,6 +88,24 @@ struct CatalogState {
 
 impl McpCatalog {
     pub fn new(descriptors: Vec<McpServerDescriptor>) -> Result<Arc<Self>, ToolError> {
+        Self::build(descriptors, McpManager::new())
+    }
+
+    /// Construct a session catalog with its audit sink and agent attribution.
+    /// Activation and search bookkeeping use this journal before any network
+    /// side effect or publication becomes visible.
+    pub fn with_journal(
+        descriptors: Vec<McpServerDescriptor>,
+        journal: Arc<dyn simulacra_types::JournalStorage>,
+        agent_id: simulacra_types::AgentId,
+    ) -> Result<Arc<Self>, ToolError> {
+        Self::build(descriptors, McpManager::with_journal(journal, agent_id))
+    }
+
+    fn build(
+        descriptors: Vec<McpServerDescriptor>,
+        manager: McpManager,
+    ) -> Result<Arc<Self>, ToolError> {
         let mut by_name = HashMap::new();
         for descriptor in descriptors {
             if descriptor.name.trim().is_empty() {
@@ -106,7 +124,7 @@ impl McpCatalog {
         }
         Ok(Arc::new(Self {
             descriptors: by_name,
-            manager: Arc::new(Mutex::new(McpManager::new())),
+            manager: Arc::new(Mutex::new(manager)),
             state: Mutex::new(CatalogState::default()),
             activation_lock: Mutex::new(()),
         }))
@@ -150,18 +168,30 @@ impl McpCatalog {
                 unique.push(server.clone());
             }
         }
-        self.validate_dependencies(skill, &unique, capability)?;
+        let declared_servers = unique.clone();
+        let mut manager = self.manager.lock().await;
+        if let Err(error) = manager.append_journal_tool_call(
+            "mcp_activation",
+            &json!({"skill": skill, "servers": declared_servers}),
+        ) {
+            emit_activation_telemetry(skill, &declared_servers, 0, "failure");
+            return Err(ToolError::ExecutionFailed(error.to_string()));
+        }
+        if let Err(error) = self.validate_dependencies(skill, &unique, capability) {
+            emit_activation_telemetry(skill, &declared_servers, 0, "failure");
+            return Err(error);
+        }
         let already: BTreeSet<String> = self.state.lock().await.activated.keys().cloned().collect();
         let pending: Vec<_> = unique
             .into_iter()
             .filter(|server| !already.contains(server))
             .collect();
         if pending.is_empty() {
+            emit_activation_telemetry(skill, &declared_servers, 0, "success");
             return Ok(0);
         }
 
         let mut temporary = BTreeMap::new();
-        let mut manager = self.manager.lock().await;
         let result: Result<(), ToolError> = async {
         for server in &pending {
             let descriptor = self.descriptors.get(server).ok_or_else(|| {
@@ -190,29 +220,27 @@ impl McpCatalog {
                 })?;
             temporary.insert(server.clone(), tools);
         }
-        manager
-            .append_journal_tool_call("mcp_activation", &json!({"skill": skill, "servers": pending}))
-            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
         Ok(())
         }.await;
         if let Err(error) = result {
             for server in &pending {
                 manager.discard_server(server);
             }
+            emit_activation_telemetry(skill, &declared_servers, 0, "failure");
             return Err(error);
         }
         drop(manager);
         let count = temporary.values().map(Vec::len).sum();
         let mut state = self.state.lock().await;
         state.activated.extend(temporary);
-        tracing::info!(simulacra.skill.name = %skill, simulacra.mcp.activated_tool_count = count, simulacra.mcp.activation.outcome = "success", "MCP skill activation");
+        emit_activation_telemetry(skill, &declared_servers, count, "success");
         Ok(count)
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Value>, ToolError> {
         let needle = query.to_lowercase();
         let mut matches = Vec::new();
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         for (server, tools) in &state.activated {
             for tool in tools {
                 let haystack = format!("{} {}", tool.name, tool.description).to_lowercase();
@@ -221,6 +249,7 @@ impl McpCatalog {
                 }
             }
         }
+        drop(state);
         matches.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
         matches.truncate(5);
         self.manager
@@ -228,6 +257,7 @@ impl McpCatalog {
             .await
             .append_journal_tool_call("mcp_search", &json!({"query": query}))
             .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+        let mut state = self.state.lock().await;
         for (server, tool) in &matches {
             state.published.insert((server.clone(), tool.name.clone()));
         }
@@ -282,6 +312,17 @@ fn capability_allows_server(capability: &CapabilityToken, server: &str) -> bool 
         let mut parts = pattern.split(':');
         matches!((parts.next(), parts.next(), parts.next()), (Some("mcp"), Some(name), Some(_)) if name == server || name == "*")
     })
+}
+
+fn emit_activation_telemetry(skill: &str, servers: &[String], tool_count: usize, outcome: &str) {
+    let server_set = serde_json::to_string(servers).unwrap_or_else(|_| "[]".to_string());
+    tracing::info!(
+        simulacra.skill.name = %skill,
+        simulacra.mcp.servers = %server_set,
+        simulacra.mcp.activated_tool_count = tool_count,
+        simulacra.mcp.activation.outcome = %outcome,
+        "MCP skill activation"
+    );
 }
 
 pub struct McpSearchTool {

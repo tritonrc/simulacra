@@ -999,6 +999,51 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
     let skill_catalog =
         discover_and_filter_skills(&vfs, &agent_type.skills, &capability_token, &entry_agent)?;
 
+    let configured_mcp_names: std::collections::HashSet<&str> = config
+        .mcp
+        .as_ref()
+        .into_iter()
+        .flat_map(|mcp| &mcp.servers)
+        .map(|server| server.name.as_str())
+        .collect();
+    let tenant_mcp_allowlist = if config.tenants.is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .tenants
+                .values()
+                .find(|tenant| tenant.agent_type == entry_agent)
+                .and_then(|tenant| tenant.mcp_servers.as_deref())
+                .unwrap_or(&[]),
+        )
+    };
+    for skill in &skill_catalog {
+        for server in &skill.mcp_servers {
+            if !configured_mcp_names.contains(server.as_str()) {
+                anyhow::bail!(
+                    "skill {:?} references unknown configured MCP server {:?}",
+                    skill.name,
+                    server
+                );
+            }
+            if tenant_mcp_allowlist.is_some_and(|allowed| !allowed.contains(server)) {
+                anyhow::bail!(
+                    "skill {:?} MCP server {:?} is denied by the tenant allow-list",
+                    skill.name,
+                    server
+                );
+            }
+            if !mcp_patterns_may_cover_server(&capability_token.mcp_tools, server) {
+                anyhow::bail!(
+                    "skill {:?} MCP server {:?} is denied by capability policy",
+                    skill.name,
+                    server
+                );
+            }
+        }
+    }
+
     // S057 keeps configured descriptors inert at bootstrap.  The catalog is
     // session-local and performs its first handshake only when a loaded skill
     // declares the corresponding server dependency.
@@ -1010,6 +1055,12 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
             let descriptors = mcp
                 .servers
                 .iter()
+                .filter(|server| {
+                    tenant_mcp_allowlist.is_none_or(|allowed| allowed.contains(&server.name))
+                })
+                .filter(|server| {
+                    mcp_patterns_may_cover_server(&capability_token.mcp_tools, &server.name)
+                })
                 .filter_map(|server| {
                     if server.transport.as_deref() == Some("wasm") {
                         server.module.as_ref().map(|module| {
@@ -1035,7 +1086,11 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
                     }
                 })
                 .collect();
-            simulacra_mcp::McpCatalog::new(descriptors)
+            simulacra_mcp::McpCatalog::with_journal(
+                descriptors,
+                Arc::clone(&journal),
+                simulacra_types::AgentId(entry_agent.clone()),
+            )
         })
         .transpose()
         .context("invalid MCP catalog configuration")?;
@@ -2990,6 +3045,17 @@ fn validate_session_id(session_id: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn mcp_patterns_may_cover_server(patterns: &[String], server: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        pattern
+            .strip_prefix("mcp:")
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(server_pattern, tool_pattern)| {
+                !tool_pattern.is_empty() && (server_pattern == "*" || server_pattern == server)
+            })
+    })
 }
 
 fn load_config(args: &CliArgs, mode: CliMode) -> Result<SimulacraConfig> {
