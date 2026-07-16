@@ -290,7 +290,7 @@ impl McpCatalog {
         self.manager
             .lock()
             .await
-            .append_journal_tool_call("mcp_search", &json!({"query": query}))
+            .append_journal_tool_call("mcp_search", &json!({"query_length": query.len()}))
             .map_err(|_| {
                 tracing::warn!(stage = "audit", "MCP catalog search failed");
                 ToolError::ExecutionFailed("MCP catalog search could not be audited".into())
@@ -299,7 +299,18 @@ impl McpCatalog {
         for (server, tool) in &matches {
             state.published.insert((server.clone(), tool.name.clone()));
         }
-        tracing::info!(simulacra.mcp.search.query = %query, simulacra.mcp.search.result_count = matches.len(), "MCP catalog search");
+        tracing::info!(
+            simulacra.mcp.search.query_length = query.len(),
+            simulacra.mcp.search.result_count = matches.len(),
+            "MCP catalog search"
+        );
+        for (server, tool) in &matches {
+            tracing::info!(
+                server = %server,
+                tool = %tool.name,
+                "MCP catalog search result"
+            );
+        }
         Ok(matches.into_iter().map(|(server, tool)| json!({"server": server, "tool": tool.name, "description": tool.description, "input_schema": tool.input_schema})).collect())
     }
 

@@ -69,6 +69,8 @@ impl McpManager {
         }
 
         let source = format!("mcp:{server}");
+        let argument_length = input.to_string().len();
+        let safe_input = serde_json::json!({"argument_length": argument_length});
 
         let span = tracing::info_span!(
             "execute_tool",
@@ -91,14 +93,24 @@ impl McpManager {
             tracing::info!(
                 event = "gen_ai.tool.message",
                 simulacra.tool.source = %source,
-                input = %input,
-                "MCP tool input"
+                server = %server,
+                tool = %tool,
+                input = %safe_input,
+                gen_ai.tool.argument_length = argument_length,
+                "MCP tool input metadata"
             );
         }
 
         // Journal before side effect (Golden Rule).
         // If the journal append fails, abort — DO NOT execute the side effect.
-        self.append_journal_tool_call(tool, &input)?;
+        self.append_journal_tool_call(
+            tool,
+            &serde_json::json!({
+                "server": server,
+                "tool": tool,
+                "argument_length": argument_length,
+            }),
+        )?;
 
         let call_start = std::time::Instant::now();
         let result = self
