@@ -13,6 +13,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 #[cfg(feature = "sandbox")]
 use simulacra_sandbox::AgentCell;
+#[cfg(feature = "sandbox")]
+use simulacra_types::SkillDependencyActivator;
 use simulacra_types::{CapabilityToken, VirtualFs};
 #[cfg(feature = "sandbox")]
 use simulacra_types::{Tool, ToolDefinition, ToolError};
@@ -72,6 +74,9 @@ pub struct SkillMeta {
     /// does NOT bypass budgets. A skill never grants capabilities the agent does
     /// not already have.
     pub allowed_tools: Vec<String>,
+    /// Configured MCP server dependencies activated with this skill. These are
+    /// dependencies only; they never grant capability by themselves.
+    pub mcp_servers: Vec<String>,
     /// The parsed markdown body of SKILL.md (everything after YAML frontmatter).
     /// Populated at discovery time by `parse_skill_frontmatter` so that
     /// interactive `/skill-name` invocation can inject the body without VFS access.
@@ -124,6 +129,7 @@ pub struct SkillTool {
     /// Capability checks happen at the call site before returning a skill body.
     catalog: Vec<SkillMeta>,
     metadata_budget_chars: usize,
+    activator: Option<Arc<dyn SkillDependencyActivator>>,
 }
 
 #[cfg(feature = "sandbox")]
@@ -133,6 +139,7 @@ impl SkillTool {
             cell,
             catalog,
             metadata_budget_chars: DEFAULT_SKILL_METADATA_BUDGET_CHARS,
+            activator: None,
         }
     }
 
@@ -145,7 +152,16 @@ impl SkillTool {
             cell,
             catalog,
             metadata_budget_chars,
+            activator: None,
         }
+    }
+
+    pub fn with_dependency_activator(
+        mut self,
+        activator: Arc<dyn SkillDependencyActivator>,
+    ) -> Self {
+        self.activator = Some(activator);
+        self
     }
 
     /// Build the model-visible skill catalog description (name + description
@@ -315,8 +331,16 @@ impl Tool for SkillTool {
 
         let vfs_path = skill.vfs_path.clone();
         let cell = Arc::clone(&self.cell);
+        let activator = self.activator.clone();
+        let mcp_servers = skill.mcp_servers.clone();
+        let activation_capability = capability.clone();
 
         Box::pin(async move {
+            if let Some(activator) = activator {
+                activator
+                    .activate(command.clone(), mcp_servers, activation_capability)
+                    .await?;
+            }
             // Load the SKILL.md body via AgentCell::read_file (Golden Rule).
             // The tool reads the corresponding SKILL.md through
             // AgentCell::read_file, strips YAML frontmatter, and returns only

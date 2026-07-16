@@ -14,6 +14,8 @@ struct SkillFrontmatter {
     user_invocable: bool,
     #[serde(default)]
     allowed_tools: Vec<String>,
+    #[serde(default)]
+    mcp_servers: Vec<serde_yaml::Value>,
 }
 
 fn default_true() -> bool {
@@ -60,8 +62,28 @@ pub fn parse_skill_frontmatter(content: &str, vfs_path: &str) -> Result<SkillMet
             .map(|tool| tool.trim().to_string())
             .filter(|tool| !tool.is_empty())
             .collect(),
+        mcp_servers: normalize_mcp_servers(frontmatter.mcp_servers)?,
         body: Some(body.to_string()),
     })
+}
+
+fn normalize_mcp_servers(servers: Vec<serde_yaml::Value>) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::with_capacity(servers.len());
+    for server in servers {
+        let server = server.as_str().ok_or_else(|| {
+            "SKILL.md frontmatter mcp_servers entries must be server-name strings".to_string()
+        })?;
+        let server = server.trim();
+        if server.is_empty() {
+            return Err(
+                "SKILL.md frontmatter mcp_servers entries must be non-empty strings".into(),
+            );
+        }
+        if !normalized.iter().any(|existing| existing == server) {
+            normalized.push(server.to_string());
+        }
+    }
+    Ok(normalized)
 }
 
 /// Strip YAML frontmatter from a SKILL.md string, returning only the markdown

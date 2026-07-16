@@ -998,6 +998,40 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
     let skill_catalog =
         discover_and_filter_skills(&vfs, &agent_type.skills, &capability_token, &entry_agent)?;
 
+    // S057 keeps configured descriptors inert at bootstrap.  The catalog is
+    // session-local and performs its first handshake only when a loaded skill
+    // declares the corresponding server dependency.
+    let mcp_catalog = config
+        .mcp
+        .as_ref()
+        .filter(|mcp| !mcp.servers.is_empty())
+        .map(|mcp| {
+            let descriptors = mcp
+                .servers
+                .iter()
+                .filter_map(|server| {
+                    server
+                        .url
+                        .as_ref()
+                        .map(|url| simulacra_mcp::McpServerDescriptor {
+                            name: server.name.clone(),
+                            url: url.clone(),
+                            transport: server.transport.clone(),
+                        })
+                })
+                .collect();
+            simulacra_mcp::McpCatalog::new(descriptors)
+        })
+        .transpose()
+        .context("invalid MCP catalog configuration")?;
+    if let Some(catalog) = &mcp_catalog {
+        for skill in &skill_catalog {
+            catalog
+                .validate_dependencies(&skill.name, &skill.mcp_servers, &capability_token)
+                .context("skill MCP dependency is not eligible")?;
+        }
+    }
+
     // Agents with at least one model-visible skill register exactly one
     // built-in tool named `Skill`. Simulacra does NOT register one tool per skill.
     // Skills are not first-class tools.
@@ -1031,83 +1065,25 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
         .any(|s| !s.disable_model_invocation && s.allow_implicit_invocation);
     if has_model_visible {
         registry
-            .register(Box::new(SkillTool::new(
-                Arc::clone(&cell),
-                skill_catalog.clone(),
-            )))
+            .register(Box::new(match &mcp_catalog {
+                Some(catalog) => SkillTool::new(Arc::clone(&cell), skill_catalog.clone())
+                    .with_dependency_activator(
+                        Arc::clone(catalog) as Arc<dyn simulacra_types::SkillDependencyActivator>
+                    ),
+                None => SkillTool::new(Arc::clone(&cell), skill_catalog.clone()),
+            }))
             .context("failed to register Skill tool")?;
     }
 
-    // Register MCP tools from config.
-    //
-    // MCP servers configured in [mcp.servers] are connected and their tools
-    // discovered at bootstrap time. Each MCP tool is wrapped as a Simulacra Tool
-    // and registered in the ToolRegistry so the LLM can invoke it.
-    //
-    // Connection failures are logged and skipped — they do not prevent startup.
-    // The MCP handshake requires async I/O, so we create a temporary tokio
-    // runtime for this one-time startup cost.
-    if let Some(ref mcp_config) = config.mcp {
-        // Partition into network-transport servers (HTTP/SSE/auto) and
-        // WASM-transport servers. WASM modules need a different
-        // bootstrap path (compile + load + connect_wasm_module) but
-        // share the underlying McpManager so all tools — wherever they
-        // come from — go through the same capability + routing layer.
-        let network_descriptors: Vec<(String, Option<String>, Option<String>)> = mcp_config
-            .servers
-            .iter()
-            .filter(|s| s.transport.as_deref() != Some("wasm"))
-            .map(|s| (s.name.clone(), s.url.clone(), s.transport.clone()))
-            .collect();
-
-        // Each WASM MCP server gets the agent's journal and governance
-        // hook pipeline so `simulacra:mcp/http.fetch` invocations from the
-        // module run through the same audit trail and policy chain as
-        // host-side fetches. agent_id is empty here because the
-        // McpManager is shared across the CLI process; per-agent
-        // attribution is a future spec.
-        let wasm_descriptors: Vec<simulacra_mcp::WasmMcpServerDescriptor> = mcp_config
-            .servers
-            .iter()
-            .filter(|s| s.transport.as_deref() == Some("wasm"))
-            .filter_map(|s| {
-                let module = s.module.as_ref()?;
-                Some(simulacra_mcp::WasmMcpServerDescriptor {
-                    name: s.name.clone(),
-                    module_path: std::path::PathBuf::from(module),
-                    network_allowlist: s.network.clone(),
-                    hooks: Some(Arc::clone(&pipeline)),
-                    journal: Some(Arc::clone(&journal)),
-                    agent_id: simulacra_types::AgentId(String::new()),
-                })
-            })
-            .collect();
-
-        let total_servers = network_descriptors.len() + wasm_descriptors.len();
-
-        if total_servers > 0 {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("failed to build tokio runtime for MCP bootstrap")?;
-
-            let mcp_tools = rt.block_on(simulacra_mcp::create_mcp_tools_with_wasm(
-                &network_descriptors,
-                &wasm_descriptors,
-            ));
-
-            tracing::info!(
-                mcp_tool_count = mcp_tools.len(),
-                mcp_server_count = total_servers,
-                "MCP tool discovery complete"
-            );
-
-            for tool in mcp_tools {
-                registry
-                    .register(Box::new(tool))
-                    .context("failed to register MCP tool")?;
-            }
-        }
+    if let Some(catalog) = mcp_catalog {
+        registry
+            .register(Box::new(simulacra_mcp::McpSearchTool::new(Arc::clone(
+                &catalog,
+            ))))
+            .context("failed to register mcp_search")?;
+        registry
+            .register(Box::new(simulacra_mcp::McpCallTool::new(catalog)))
+            .context("failed to register mcp_call")?;
     }
 
     // Register WASM tools from config (feature-gated).

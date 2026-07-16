@@ -166,6 +166,29 @@ impl McpManager {
             .collect()
     }
 
+    /// Inventory exactly one registered server.  This is deliberately scoped so
+    /// skill activation cannot cause unrelated configured servers to connect.
+    pub async fn list_tools_for_server(
+        &mut self,
+        server: &str,
+    ) -> Result<Vec<ToolDefinition>, McpError> {
+        if !self.connections.contains_key(server) {
+            return Err(McpError::ConnectionFailed(format!(
+                "no connection configured for server {server}"
+            )));
+        }
+        self.ensure_server_connected(server).await;
+        let connection = self.connections.get(server).ok_or_else(|| {
+            McpError::ConnectionFailed(format!("no connection configured for server {server}"))
+        })?;
+        if !connection.handshake_done {
+            return Err(McpError::ConnectionFailed(format!(
+                "MCP handshake or tools/list failed for server {server}"
+            )));
+        }
+        Ok(connection.tools.iter().map(bridge_tool_schema).collect())
+    }
+
     /// Register an MCP server with an explicit name (used as the routing key
     /// for `call_tool`), rather than deriving the name from the URL hostname.
     ///

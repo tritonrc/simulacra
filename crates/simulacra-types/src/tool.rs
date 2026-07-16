@@ -285,6 +285,17 @@ pub trait Tool: Send + Sync + 'static {
     }
 }
 
+/// Host-side dependency activation invoked by the `Skill` tool before its body
+/// becomes visible. Implementations own any network-backed catalog state.
+pub trait SkillDependencyActivator: Send + Sync + 'static {
+    fn activate(
+        &self,
+        skill: String,
+        mcp_servers: Vec<String>,
+        capability: CapabilityToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), ToolError>> + Send + '_>>;
+}
+
 /// Errors from tool execution.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
