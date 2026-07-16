@@ -228,7 +228,8 @@ fn mcp_tool_calls_emit_gen_ai_tool_message_events_for_input_and_output() {
         })
         .expect("call_tool should emit a gen_ai.tool.message event for MCP tool input");
 
-    // Parse the input field as JSON to verify structure, not just substring
+    // Input telemetry retains only safe metadata. The echoed output above proves
+    // the fake remote dispatcher still received the original arguments unchanged.
     let input_json: serde_json::Value = serde_json::from_str(
         input_event
             .fields
@@ -237,9 +238,22 @@ fn mcp_tool_calls_emit_gen_ai_tool_message_events_for_input_and_output() {
     )
     .expect("input field should be valid JSON");
     assert_eq!(
-        input_json["query"],
-        json!("simulacra"),
-        "input event should contain the structured tool input with query field"
+        input_json,
+        json!({"argument_length": json!({"query":"simulacra"}).to_string().len()}),
+        "input event should contain only safe argument metadata"
+    );
+    assert_eq!(input_event.fields.get("server"), Some(&server.server_name().to_string()));
+    assert_eq!(input_event.fields.get("tool"), Some(&"echo".to_string()));
+    assert_eq!(
+        input_event.fields.get("gen_ai.tool.argument_length"),
+        Some(&json!({"query":"simulacra"}).to_string().len().to_string())
+    );
+    assert!(
+        !input_event
+            .fields
+            .get("input")
+            .expect("safe input metadata")
+            .contains("simulacra")
     );
 
     // Output event records `gen_ai.tool.result_length` (length only — full

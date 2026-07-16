@@ -233,7 +233,12 @@ async fn call_tool_records_a_tool_call_journal_entry() {
     assert!(matches!(
         &entries[0].entry,
         JournalEntryKind::ToolCall { tool_name, arguments, .. }
-            if tool_name == "echo" && arguments == &json!({ "query": "simulacra" })
+            if tool_name == "echo"
+                && arguments == &json!({
+                    "server": server.server_name(),
+                    "tool": "echo",
+                    "argument_length": json!({ "query": "simulacra" }).to_string().len(),
+                })
     ));
 
     // Verify ordering: journal append must happen before HTTP dispatch.
