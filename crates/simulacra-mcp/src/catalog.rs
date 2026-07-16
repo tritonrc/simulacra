@@ -374,7 +374,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
@@ -518,6 +518,14 @@ mod tests {
         }
     }
 
+    async fn catalog_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     fn read_json_rpc_request(stream: &mut std::net::TcpStream) -> Option<String> {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -566,6 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_multi_server_activation_discards_manager_state_and_retry_restarts_cleanly() {
+        let _guard = catalog_test_guard().await;
         let healthy = JsonRpcServer::new("healthy_tool");
         let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable port");
         let unavailable_url = format!(
@@ -635,6 +644,7 @@ mod tests {
     #[tokio::test]
     async fn activation_and_search_are_journaled_with_agent_attribution_before_catalog_visibility()
     {
+        let _guard = catalog_test_guard().await;
         let catalog = McpCatalog::new(vec![McpServerDescriptor::wasm(
             "github".into(),
             WasmMcpServerDescriptor {
