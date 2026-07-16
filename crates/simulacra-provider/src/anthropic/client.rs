@@ -2096,6 +2096,7 @@ mod tests {
     mod otel_span_tests {
         use super::*;
         use std::sync::Mutex;
+        use tracing::instrument::WithSubscriber as _;
         use tracing_subscriber::layer::SubscriberExt;
 
         /// Captured span data for test assertions.
@@ -2348,8 +2349,11 @@ mod tests {
             }];
             let mut budget = fresh_budget();
 
-            let _guard = tracing::subscriber::set_default(subscriber);
-            let _ = provider.chat(&messages, &[], &mut budget).await.unwrap();
+            let dispatch = tracing::Dispatch::new(subscriber);
+            let chat = tracing::dispatcher::with_default(&dispatch, || {
+                provider.chat(&messages, &[], &mut budget)
+            });
+            let _ = chat.with_subscriber(dispatch).await.unwrap();
 
             let spans = captured.lock().unwrap();
             let chat_span = spans
