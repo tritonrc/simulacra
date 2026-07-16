@@ -459,6 +459,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingJournal(Mutex<Vec<JournalEntry>>);
 
+    struct SecretFailingJournal;
+
     #[derive(Clone, Debug)]
     struct CapturedEvent {
         fields: HashMap<String, String>,
@@ -589,6 +591,35 @@ mod tests {
         }
     }
 
+    impl JournalStorage for SecretFailingJournal {
+        fn append(&self, _: JournalEntry) -> Result<(), JournalError> {
+            Err(JournalError::Storage(
+                "https://JOURNALUSER:JOURNALPASS@example.invalid/a?token=JOURNALQUERY Authorization: Bearer JOURNALAUTH /private/JOURNALMODULE.wasm".into(),
+            ))
+        }
+
+        fn read_all(&self, _: &AgentId) -> Result<Vec<JournalEntry>, JournalError> {
+            Ok(Vec::new())
+        }
+        fn query_token_usage(&self, _: &AgentId) -> Result<TokenUsage, JournalError> {
+            Ok(TokenUsage::default())
+        }
+        fn save_checkpoint(
+            &self,
+            _: &AgentId,
+            _: usize,
+            _: CheckpointData,
+        ) -> Result<(), JournalError> {
+            Ok(())
+        }
+        fn fork_from(&self, _: &AgentId, _: usize) -> Result<Vec<JournalEntry>, JournalError> {
+            Ok(Vec::new())
+        }
+        fn read_from(&self, _: &AgentId, _: usize) -> Result<Vec<JournalEntry>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+
     struct JsonRpcServer {
         url: String,
         initialize_requests: Arc<AtomicUsize>,
@@ -629,7 +660,11 @@ mod tests {
                             json!({"jsonrpc":"2.0","result":{"tools":[{"name":tool_name,"description":"A catalog test tool","inputSchema":{"type":"object"}}]}}).to_string()
                         } else if request.contains("\"method\":\"tools/call\"") {
                             tool_call_requests.fetch_add(1, Ordering::SeqCst);
-                            json!({"jsonrpc":"2.0","result":{"ok":true}}).to_string()
+                            if tool_name == "secret_error_tool" {
+                                json!({"jsonrpc":"2.0","error":{"code":-32000,"message":"https://REMOTEUSER:REMOTEPASS@example.invalid/mcp?token=REMOTEQUERY Authorization: Bearer REMOTEAUTH /private/REMOTEMODULE.wasm"}}).to_string()
+                            } else {
+                                json!({"jsonrpc":"2.0","result":{"ok":true}}).to_string()
+                            }
                         } else {
                             json!({"jsonrpc":"2.0","result":{}}).to_string()
                         };
@@ -1293,5 +1328,75 @@ mod tests {
                 .iter()
                 .all(|entry| entry.schema_version == JOURNAL_SCHEMA_VERSION)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn search_and_remote_call_errors_are_actionable_without_leaking_backend_secrets() {
+        let _guard = catalog_test_guard().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let journal_catalog = McpCatalog::with_journal(
+            Vec::new(),
+            Arc::new(SecretFailingJournal),
+            AgentId("redaction-agent".into()),
+        )
+        .expect("catalog should construct");
+        let search_error = McpSearchTool::new(journal_catalog)
+            .call(json!({"query":"issues"}), &mcp_capability())
+            .await
+            .expect_err("journal failure should fail search");
+
+        let remote = JsonRpcServer::new("secret_error_tool").await;
+        let remote_catalog = McpCatalog::new(vec![McpServerDescriptor::network(
+            "github".into(),
+            remote.url.clone(),
+            Some("http".into()),
+        )])
+        .expect("catalog should construct");
+        remote_catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect("activation should succeed");
+        McpSearchTool::new(Arc::clone(&remote_catalog))
+            .call(json!({"query":"secret_error_tool"}), &mcp_capability())
+            .await
+            .expect("search should publish remote tool");
+        let call_error = McpCallTool::new(remote_catalog)
+            .call(
+                json!({"server":"github","tool":"secret_error_tool","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("remote JSON-RPC failure should be returned");
+
+        let search_message = search_error.to_string();
+        let call_message = call_error.to_string();
+        let observable = format!(
+            "{search_message}\n{call_message}\n{:?}",
+            events.lock().expect("event capture mutex")
+        );
+        for secret in [
+            "JOURNALUSER",
+            "JOURNALPASS",
+            "JOURNALQUERY",
+            "JOURNALAUTH",
+            "JOURNALMODULE",
+            "REMOTEUSER",
+            "REMOTEPASS",
+            "REMOTEQUERY",
+            "REMOTEAUTH",
+            "REMOTEMODULE",
+        ] {
+            assert!(
+                !observable.contains(secret),
+                "returned errors and captured logs must redact {secret}; got: {observable}"
+            );
+        }
+        assert!(search_message.to_ascii_lowercase().contains("search"));
+        assert!(call_message.contains("github") && call_message.contains("secret_error_tool"));
     }
 }
