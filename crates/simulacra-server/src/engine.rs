@@ -1812,6 +1812,7 @@ impl SimulacraEngine {
                         journal: Arc::clone(&journal),
                         activity_sink: supervisor_sink,
                         parent_capability: capability_token.clone(),
+                        allowed_mcp_servers: Some(tenant_mcp_servers.clone()),
                         supervisor_sender: supervisor_tx_for_factory,
                         parent_model: model_clone.clone(),
                         pipeline: Some(Arc::clone(&hook_pipeline)),

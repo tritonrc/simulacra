@@ -37,6 +37,9 @@ pub struct AgentTaskFactory {
     /// The effective child capability = config_cap ∩ spawn_override ∩ parent_cap.
     #[allow(dead_code)]
     pub parent_capability: CapabilityToken,
+    /// Effective tenant/host MCP server grant resolved by the embedding
+    /// runtime. This is independent of per-tool capability patterns.
+    pub allowed_mcp_servers: Option<Vec<String>>,
     /// Supervisor channel sender — passed to child `SpawnAgentTool` instances
     /// so children with `spawn_types` can spawn their own descendants (S018 §173).
     pub supervisor_sender: Option<tokio::sync::mpsc::Sender<SupervisorMessage>>,
@@ -120,6 +123,7 @@ impl crate::TaskFactory for AgentTaskFactory {
         let child_provider_factory = self.child_provider_factory.clone();
         let acp_child_runtime = self.acp_child_runtime.clone();
         let runtime_config = self.config.clone();
+        let allowed_mcp_servers = self.allowed_mcp_servers.clone();
 
         Box::pin(async move {
             let mut input_queue = Some(input_queue);
@@ -181,6 +185,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                     parent_sink,
                     runtime_config: None,
                     skill_names: &[],
+                    allowed_mcp_servers: None,
                 })?;
 
                 run_spawn_before_hook(
@@ -346,6 +351,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                 parent_sink,
                 runtime_config: Some(&runtime_config),
                 skill_names: &agent_type_config.skills,
+                allowed_mcp_servers: allowed_mcp_servers.as_deref(),
             })?;
 
             run_spawn_before_hook(

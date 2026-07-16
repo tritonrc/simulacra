@@ -23,6 +23,7 @@ pub(super) struct ChildEnvironmentSpec<'a> {
     /// skill/MCP discovery. Generic leaf children deliberately receive None.
     pub(super) runtime_config: Option<&'a simulacra_config::SimulacraConfig>,
     pub(super) skill_names: &'a [String],
+    pub(super) allowed_mcp_servers: Option<&'a [String]>,
 }
 
 pub(super) struct ChildEnvironment {
@@ -155,11 +156,35 @@ fn register_child_skill_mcp_catalog(
         .flat_map(|mcp| &mcp.servers)
         .map(|server| server.name.as_str())
         .collect();
+    let derived_allowlist;
+    let allowed_servers = if let Some(allowed) = spec.allowed_mcp_servers {
+        allowed
+    } else if config.tenants.is_empty() {
+        derived_allowlist = configured_names
+            .iter()
+            .map(|server| (*server).to_string())
+            .collect::<Vec<_>>();
+        &derived_allowlist
+    } else {
+        derived_allowlist = config
+            .tenants
+            .values()
+            .find(|tenant| tenant.agent_type == spec.agent_type_name)
+            .and_then(|tenant| tenant.mcp_servers.clone())
+            .unwrap_or_default();
+        &derived_allowlist
+    };
     for skill in &skills {
         for server in &skill.mcp_servers {
             if !configured_names.contains(server.as_str()) {
                 return Err(simulacra_types::ToolError::ExecutionFailed(format!(
                     "skill {:?} references unknown configured MCP server {:?}",
+                    skill.name, server
+                )));
+            }
+            if !allowed_servers.contains(server) {
+                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "skill {:?} MCP server {:?} is denied by the effective server allow-list",
                     skill.name, server
                 )));
             }
@@ -185,6 +210,7 @@ fn register_child_skill_mcp_catalog(
     let descriptors = mcp
         .servers
         .iter()
+        .filter(|server| allowed_servers.contains(&server.name))
         .filter(|server| {
             mcp_capability_may_cover_server(&spec.child_config.capability.mcp_tools, &server.name)
         })
