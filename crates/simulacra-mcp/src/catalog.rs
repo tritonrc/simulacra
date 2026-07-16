@@ -542,23 +542,22 @@ mod tests {
                 Ok(0) => break,
                 Ok(read) => {
                     request.extend_from_slice(&buffer[..read]);
-                    if expected_len.is_none() {
-                        if let Some(end) =
+                    if expected_len.is_none()
+                        && let Some(end) =
                             request.windows(4).position(|window| window == b"\r\n\r\n")
-                        {
-                            let header_end = end + 4;
-                            let headers = String::from_utf8_lossy(&request[..header_end]);
-                            let body_len = headers
-                                .lines()
-                                .find_map(|line| {
-                                    let (name, value) = line.split_once(':')?;
-                                    name.eq_ignore_ascii_case("content-length")
-                                        .then(|| value.trim().parse::<usize>().ok())
-                                        .flatten()
-                                })
-                                .unwrap_or(0);
-                            expected_len = Some(header_end + body_len);
-                        }
+                    {
+                        let header_end = end + 4;
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let body_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        expected_len = Some(header_end + body_len);
                     }
                     if expected_len.is_some_and(|length| request.len() >= length) {
                         break;
