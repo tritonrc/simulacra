@@ -179,6 +179,9 @@ impl JsonRpcTestServer {
 impl Drop for JsonRpcTestServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // Wake the blocking accept so teardown never waits for another real
+        // client connection.
+        let _ = std::net::TcpStream::connect(&self.addr);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -195,10 +198,6 @@ fn json_http_response(body: &str) -> String {
 
 fn spawn_json_rpc_test_server(tools_list_body: &str, tool_call_body: &str) -> JsonRpcTestServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("JSON-RPC test server should bind");
-    listener
-        .set_nonblocking(true)
-        .expect("JSON-RPC test server should become nonblocking");
-
     let addr = listener
         .local_addr()
         .expect("JSON-RPC test server should have a local address")
@@ -217,7 +216,9 @@ fn spawn_json_rpc_test_server(tools_list_body: &str, tool_call_body: &str) -> Js
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    // Full-workspace linking can delay a later request-body chunk;
+                    // this fixture timeout is not part of the MCP behavior under test.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
                     if let Some(request) = read_http_request(&mut stream) {
                         request_count_for_thread.fetch_add(1, Ordering::SeqCst);
@@ -249,9 +250,6 @@ fn spawn_json_rpc_test_server(tools_list_body: &str, tool_call_body: &str) -> Js
                         let _ = stream.flush();
                         let _ = stream.shutdown(std::net::Shutdown::Both);
                     }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
                 }
                 Err(_) => break,
             }

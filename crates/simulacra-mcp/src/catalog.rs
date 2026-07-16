@@ -593,6 +593,7 @@ mod tests {
         url: String,
         initialize_requests: Arc<AtomicUsize>,
         tools_list_requests: Arc<AtomicUsize>,
+        tool_call_requests: Arc<AtomicUsize>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -607,12 +608,15 @@ mod tests {
             );
             let initialize_requests = Arc::new(AtomicUsize::new(0));
             let tools_list_requests = Arc::new(AtomicUsize::new(0));
+            let tool_call_requests = Arc::new(AtomicUsize::new(0));
             let initialize_for_thread = Arc::clone(&initialize_requests);
             let list_for_thread = Arc::clone(&tools_list_requests);
+            let calls_for_thread = Arc::clone(&tool_call_requests);
             let task = tokio::spawn(async move {
                 while let Ok((mut stream, _)) = listener.accept().await {
                     let initialize_requests = Arc::clone(&initialize_for_thread);
                     let tools_list_requests = Arc::clone(&list_for_thread);
+                    let tool_call_requests = Arc::clone(&calls_for_thread);
                     tokio::spawn(async move {
                         let Some(request) = read_json_rpc_request(&mut stream).await else {
                             return;
@@ -623,6 +627,9 @@ mod tests {
                         } else if request.contains("\"method\":\"tools/list\"") {
                             tools_list_requests.fetch_add(1, Ordering::SeqCst);
                             json!({"jsonrpc":"2.0","result":{"tools":[{"name":tool_name,"description":"A catalog test tool","inputSchema":{"type":"object"}}]}}).to_string()
+                        } else if request.contains("\"method\":\"tools/call\"") {
+                            tool_call_requests.fetch_add(1, Ordering::SeqCst);
+                            json!({"jsonrpc":"2.0","result":{"ok":true}}).to_string()
                         } else {
                             json!({"jsonrpc":"2.0","result":{}}).to_string()
                         };
@@ -640,6 +647,7 @@ mod tests {
                 url,
                 initialize_requests,
                 tools_list_requests,
+                tool_call_requests,
                 task,
             }
         }
@@ -789,6 +797,39 @@ mod tests {
                 .contains("not activated and search-published")
         );
         assert!(catalog.manager.lock().await.connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capability_denied_search_published_call_is_actionable_and_never_dispatched() {
+        let _guard = catalog_test_guard().await;
+        let server = JsonRpcServer::new("issues").await;
+        let catalog = McpCatalog::new(vec![McpServerDescriptor::network(
+            "github".into(),
+            server.url.clone(),
+            Some("http".into()),
+        )])
+        .expect("catalog should construct");
+        catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect("activation should succeed");
+        McpSearchTool::new(Arc::clone(&catalog))
+            .call(json!({"query":"issues"}), &mcp_capability())
+            .await
+            .expect("search should publish the tool");
+
+        let error = McpCallTool::new(catalog)
+            .call(
+                json!({"server":"github","tool":"issues","arguments":{}}),
+                &CapabilityToken::default(),
+            )
+            .await
+            .expect_err("current call capability must be enforced after publication");
+
+        let message = error.to_string();
+        assert!(message.contains("github") && message.contains("issues"));
+        assert!(message.contains("not in granted mcp_tools"));
+        assert_eq!(server.tool_call_requests.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
