@@ -264,7 +264,9 @@ manager path used by `mcp_call`.
 
 **Evidence:** native-child capability and tenant-isolation tests construct the
 real child environment; catalog isolation tests prove publications are owned by
-the catalog instance.
+the catalog instance. `search_and_remote_call_errors_are_actionable_without_leaking_backend_secrets`
+injects secret-bearing journal and remote JSON-RPC failures and verifies both
+returned errors and captured telemetry are redacted.
 
 - [x] `mcp_servers` does not widen a skill's, parent's, child's, tenant's, or
   agent's effective MCP permissions; it names dependencies that must already
@@ -275,7 +277,7 @@ the catalog instance.
 - [x] An activated server catalog and its search-publications remain available
   for the rest of that agent session, including later turns, and are discarded
   when the session ends.
-- [ ] Activation, search, and call error results never disclose credentials,
+- [x] Activation, search, and call error results never disclose credentials,
   authorization headers, or secret descriptor fields.
 
 ## Observability and audit
@@ -285,9 +287,11 @@ server sets, caching, and secret redaction. The production OTLP harness from
 `1eb2345` passed against local Aniani: TraceQL found `execute_tool`, PromQL found
 `simulacra_mcp_calls{server="github",tool="issues"} = 1`, and LogQL found
 activation success/failure plus catalog-search evidence; the same test asserts
-activation/search journal attribution.
+activation/search journal attribution. Model and interactive tests additionally
+assert explicit source/link fields and span correlation across the user
+activation thread bridge.
 
-- [ ] Every activation attempt emits an activation trace/span or event linked to
+- [x] Every activation attempt emits an activation trace/span or event linked to
   the triggering skill load and records `simulacra.skill.name`, the declared
   server-name set, activated-tool count, and outcome (`success` or `failure`),
   without credentials or endpoint secrets.
@@ -318,14 +322,17 @@ covering every unchecked assertion above, including these minimum scenarios:
 
 **Evidence:** the checked scenarios are covered by frontmatter fixtures, CLI
 bootstrap probes, server provider-injection tests, MCP rollback/capability
-tests, and the local Aniani harness described above.
+tests, and the local Aniani harness described above. The final matrix tests
+activate exactly two declared servers while leaving a configured third dormant,
+and use `tokio::join!` to prove two concurrent catalogs remain isolated while
+cached reactivation avoids reconnection and duplicate indexing.
 
 - [x] A skill frontmatter fixture recognizes `mcp_servers`; unknown,
   tenant-disallowed, and capability-denied references fail bootstrap or skill
   activation before a fake MCP server observes any network request.
 - [x] The first provider request with configured MCP includes only stable
   `mcp_search`/`mcp_call` MCP surfaces and never an MCP server tool schema.
-- [ ] Loading a skill with two declared fake MCP servers performs handshake and
+- [x] Loading a skill with two declared fake MCP servers performs handshake and
   inventory for exactly those two; a later search returns only their activated
   tools, never another configured fake server's tools.
 - [x] A successful search-published activated tool is callable through
@@ -334,22 +341,8 @@ tests, and the local Aniani harness described above.
 - [x] If one of multiple newly declared servers fails activation, the skill body
   is withheld and neither the successful sibling's schemas nor the failed
   sibling's schemas can be searched or called.
-- [ ] Two concurrently running agents have separate catalogs; repeated loading
+- [x] Two concurrently running agents have separate catalogs; repeated loading
   of one skill/server does not reconnect or duplicate that agent's inventory.
 - [x] An Aniani-backed integration test validates activation and MCP-call
   traces, metrics, logs, and journal entries through TraceQL, PromQL, and
   LogQL using a local deterministic MCP fixture.
-
-### Remaining evidence gaps
-
-- Error redaction is directly proven for activation failures, but not yet for
-  every possible search-journal or remote-call error shape.
-- Activation telemetry fields and Aniani outcomes are proven, but no test
-  asserts the activation event's parent/link relationship to both model- and
-  user-triggered skill-load spans.
-- Atomic failure coverage uses multiple dependencies, but there is no single
-  behavioral test that successfully activates exactly two declared fake
-  servers while proving a third configured server remains untouched.
-- Catalog isolation and cached reactivation are proven independently, but the
-  acceptance matrix still lacks one test that runs two agent catalogs
-  concurrently and repeats activation within that scenario.
