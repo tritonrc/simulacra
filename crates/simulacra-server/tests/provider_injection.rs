@@ -502,11 +502,12 @@ async fn spawn_minimal_mcp_server() -> MinimalMcpServer {
             };
             let body = body.to_string();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
             let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
         }
     });
 
