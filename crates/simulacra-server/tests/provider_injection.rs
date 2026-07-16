@@ -320,6 +320,16 @@ async fn create_catalog_agent_with_capabilities(
 }
 
 async fn create_catalog_skill(catalog: &Catalog, tenant: &Tenant, name: &str, body: &str) -> Skill {
+    create_catalog_skill_with_metadata(catalog, tenant, name, body, None).await
+}
+
+async fn create_catalog_skill_with_metadata(
+    catalog: &Catalog,
+    tenant: &Tenant,
+    name: &str,
+    body: &str,
+    metadata: Option<Value>,
+) -> Skill {
     catalog
         .skills()
         .create(
@@ -328,7 +338,7 @@ async fn create_catalog_skill(catalog: &Catalog, tenant: &Tenant, name: &str, bo
                 name,
                 description: Some("Use runbook."),
                 body,
-                metadata: None,
+                metadata: metadata.as_ref(),
             },
         )
         .await
@@ -343,8 +353,27 @@ async fn create_catalog_agent_with_skills(
     model: &str,
     skill_ids: &[SkillId],
 ) {
-    let capabilities = Vec::new();
+    create_catalog_agent_with_skills_and_capabilities(
+        catalog,
+        tenant,
+        name,
+        system_prompt,
+        model,
+        skill_ids,
+        &[],
+    )
+    .await;
+}
 
+async fn create_catalog_agent_with_skills_and_capabilities(
+    catalog: &Catalog,
+    tenant: &Tenant,
+    name: &str,
+    system_prompt: &str,
+    model: &str,
+    skill_ids: &[SkillId],
+    capabilities: &[String],
+) {
     catalog
         .agents()
         .create(
@@ -374,12 +403,23 @@ async fn ensure_tenant(catalog: &Catalog, namespace: &str) -> Tenant {
         .expect("tenant should exist")
 }
 
-async fn spawn_minimal_mcp_server() -> (String, Arc<AtomicUsize>) {
+struct MinimalMcpServer {
+    url: String,
+    initialize_count: Arc<AtomicUsize>,
+    list_count: Arc<AtomicUsize>,
+    call_count: Arc<AtomicUsize>,
+}
+
+async fn spawn_minimal_mcp_server() -> MinimalMcpServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("MCP fixture should bind");
     let addr = listener.local_addr().expect("MCP fixture addr");
+    let initialize_count = Arc::new(AtomicUsize::new(0));
+    let list_count = Arc::new(AtomicUsize::new(0));
     let call_count = Arc::new(AtomicUsize::new(0));
+    let initialize_count_for_task = Arc::clone(&initialize_count);
+    let list_count_for_task = Arc::clone(&list_count);
     let call_count_for_task = Arc::clone(&call_count);
 
     tokio::spawn(async move {
@@ -387,10 +427,13 @@ async fn spawn_minimal_mcp_server() -> (String, Arc<AtomicUsize>) {
             let Ok((mut socket, _)) = listener.accept().await else {
                 break;
             };
+            let initialize_count = Arc::clone(&initialize_count_for_task);
+            let list_count = Arc::clone(&list_count_for_task);
             let call_count = Arc::clone(&call_count_for_task);
             tokio::spawn(async move {
                 let request = read_http_request(&mut socket).await;
                 let body = if request.contains("\"method\":\"initialize\"") {
+                    initialize_count.fetch_add(1, Ordering::SeqCst);
                     json!({
                         "jsonrpc": "2.0",
                         "id": 1,
@@ -401,6 +444,7 @@ async fn spawn_minimal_mcp_server() -> (String, Arc<AtomicUsize>) {
                         }
                     })
                 } else if request.contains("\"method\":\"tools/list\"") {
+                    list_count.fetch_add(1, Ordering::SeqCst);
                     json!({
                         "jsonrpc": "2.0",
                         "id": 2,
@@ -458,7 +502,12 @@ async fn spawn_minimal_mcp_server() -> (String, Arc<AtomicUsize>) {
         }
     });
 
-    (format!("http://{addr}/mcp"), call_count)
+    MinimalMcpServer {
+        url: format!("http://{addr}/mcp"),
+        initialize_count,
+        list_count,
+        call_count,
+    }
 }
 
 #[allow(dead_code)]
@@ -1443,26 +1492,35 @@ async fn server_task_registers_catalog_skill_tool_and_loads_catalog_skill_body()
 }
 
 #[tokio::test]
-async fn configured_mcp_server_tools_are_registered_for_server_runs() {
+async fn configured_mcp_servers_are_deferred_until_skill_activation_in_server_runs() {
     let catalog = Catalog::open_in_memory().expect("in-memory catalog");
     let tenant = ensure_tenant(&catalog, "default").await;
-    create_catalog_agent_with_capabilities(
+    let skill = create_catalog_skill_with_metadata(
+        &catalog,
+        &tenant,
+        "mcp-runbook",
+        "Use mcp_search to find the echo tool, then call it through mcp_call.",
+        Some(json!({ "mcp_servers": ["fetcher"] })),
+    )
+    .await;
+    create_catalog_agent_with_skills_and_capabilities(
         &catalog,
         &tenant,
         "mcp-agent",
         "Use MCP when useful.",
         "claude-3-5-sonnet",
+        std::slice::from_ref(&skill.id),
         &["mcp:fetcher".to_string()],
     )
     .await;
 
-    let (mcp_url, mcp_call_count) = spawn_minimal_mcp_server().await;
+    let mcp_server = spawn_minimal_mcp_server().await;
     let mut config = empty_config();
     config.mcp = Some(McpConfig {
         servers: vec![McpServerConfig {
             name: "fetcher".to_string(),
             transport: Some("http".to_string()),
-            url: Some(mcp_url),
+            url: Some(mcp_server.url.clone()),
             module: None,
             env: None,
             network: vec![],
@@ -1472,9 +1530,21 @@ async fn configured_mcp_server_tools_are_registered_for_server_runs() {
 
     let provider = Arc::new(ScriptedProvider::new([
         tool_call_response(
+            "call-skill",
+            "Skill",
+            json!({ "command": "mcp-runbook" }),
+            "claude-3-5-sonnet",
+        ),
+        tool_call_response(
+            "call-search",
+            "mcp_search",
+            json!({ "query": "echo" }),
+            "claude-3-5-sonnet",
+        ),
+        tool_call_response(
             "call-echo",
-            "echo",
-            json!({ "text": "hello" }),
+            "mcp_call",
+            json!({ "server": "fetcher", "tool": "echo", "arguments": { "text": "hello" } }),
             "claude-3-5-sonnet",
         ),
         assistant_response("done.", "claude-3-5-sonnet"),
@@ -1504,21 +1574,67 @@ async fn configured_mcp_server_tools_are_registered_for_server_runs() {
         .first()
         .expect("provider should receive tools");
     assert!(
-        first_call_tools.iter().any(|tool| tool.name == "echo"),
-        "server-launched agents with configured MCP must receive discovered MCP tools; tools were: {:?}",
+        first_call_tools
+            .iter()
+            .any(|tool| tool.name == "mcp_search")
+            && first_call_tools.iter().any(|tool| tool.name == "mcp_call"),
+        "configured MCP should expose only the stable meta-tools; tools were: {:?}",
         first_call_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()
     );
     assert!(
-        mcp_call_count.load(Ordering::SeqCst) >= 1,
-        "the selected MCP server tool should be invoked through tools/call"
+        !first_call_tools
+            .iter()
+            .any(|tool| matches!(tool.name.as_str(), "echo" | "delete")),
+        "configured MCP schemas must not enter the initial provider tool set; tools were: {:?}",
+        first_call_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        mcp_server.initialize_count.load(Ordering::SeqCst),
+        1,
+        "only the Skill activation should initialize the declared MCP server"
+    );
+    assert_eq!(
+        mcp_server.list_count.load(Ordering::SeqCst),
+        1,
+        "only the Skill activation should inventory the declared MCP server"
+    );
+    assert_eq!(
+        mcp_server.call_count.load(Ordering::SeqCst),
+        1,
+        "mcp_call should dispatch exactly the search-published echo tool"
+    );
+
+    let recorded_messages = provider.recorded_messages();
+    let search_result = recorded_messages[2]
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("call-search"))
+        .expect("mcp_search result should reach the next provider call");
+    assert!(
+        search_result.content.contains("fetcher")
+            && search_result.content.contains("echo")
+            && search_result.content.contains("Echo a payload."),
+        "mcp_search should publish the activated tool schema: {:?}",
+        search_result.content
+    );
+    let call_result = recorded_messages[3]
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("call-echo"))
+        .expect("mcp_call result should reach the next provider call");
+    assert!(
+        call_result.content.contains("echo: hello"),
+        "mcp_call should preserve the MCP dispatcher result: {:?}",
+        call_result.content
     );
 }
 
 #[tokio::test]
-async fn configured_mcp_server_tools_are_not_registered_without_agent_mcp_capability() {
+async fn configured_mcp_servers_are_not_contacted_without_agent_mcp_capability() {
     let catalog = Catalog::open_in_memory().expect("in-memory catalog");
     let tenant = ensure_tenant(&catalog, "default").await;
     create_catalog_agent_with_capabilities(
@@ -1531,13 +1647,13 @@ async fn configured_mcp_server_tools_are_not_registered_without_agent_mcp_capabi
     )
     .await;
 
-    let (mcp_url, mcp_call_count) = spawn_minimal_mcp_server().await;
+    let mcp_server = spawn_minimal_mcp_server().await;
     let mut config = empty_config();
     config.mcp = Some(McpConfig {
         servers: vec![McpServerConfig {
             name: "fetcher".to_string(),
             transport: Some("http".to_string()),
-            url: Some(mcp_url),
+            url: Some(mcp_server.url.clone()),
             module: None,
             env: None,
             network: vec![],
@@ -1575,21 +1691,31 @@ async fn configured_mcp_server_tools_are_not_registered_without_agent_mcp_capabi
         .expect("provider should receive tools");
     assert!(
         !first_call_tools.iter().any(|tool| tool.name == "echo"),
-        "agents without MCP capability must not receive discovered MCP tools; tools were: {:?}",
+        "agents without MCP capability must not receive configured MCP schemas; tools were: {:?}",
         first_call_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        mcp_call_count.load(Ordering::SeqCst),
+        mcp_server.initialize_count.load(Ordering::SeqCst),
+        0,
+        "agents without MCP capability must not initialize configured MCP servers"
+    );
+    assert_eq!(
+        mcp_server.list_count.load(Ordering::SeqCst),
+        0,
+        "agents without MCP capability must not inventory configured MCP servers"
+    );
+    assert_eq!(
+        mcp_server.call_count.load(Ordering::SeqCst),
         0,
         "without an MCP grant, the fixture should never receive tools/call"
     );
 }
 
 #[tokio::test]
-async fn explicit_mcp_tool_capability_filters_provider_visible_tools() {
+async fn explicit_mcp_tool_capability_keeps_provider_surface_stable_before_skill_load() {
     let catalog = Catalog::open_in_memory().expect("in-memory catalog");
     let tenant = ensure_tenant(&catalog, "default").await;
     create_catalog_agent_with_capabilities(
@@ -1602,13 +1728,13 @@ async fn explicit_mcp_tool_capability_filters_provider_visible_tools() {
     )
     .await;
 
-    let (mcp_url, _mcp_call_count) = spawn_minimal_mcp_server().await;
+    let mcp_server = spawn_minimal_mcp_server().await;
     let mut config = empty_config();
     config.mcp = Some(McpConfig {
         servers: vec![McpServerConfig {
             name: "fetcher".to_string(),
             transport: Some("http".to_string()),
-            url: Some(mcp_url),
+            url: Some(mcp_server.url.clone()),
             module: None,
             env: None,
             network: vec![],
@@ -1645,21 +1771,28 @@ async fn explicit_mcp_tool_capability_filters_provider_visible_tools() {
         .first()
         .expect("provider should receive tools");
     assert!(
-        first_call_tools.iter().any(|tool| tool.name == "echo"),
-        "explicit MCP tool grant should expose the matching tool; tools were: {:?}",
+        first_call_tools
+            .iter()
+            .any(|tool| tool.name == "mcp_search")
+            && first_call_tools.iter().any(|tool| tool.name == "mcp_call"),
+        "an MCP-capable agent should receive the fixed catalog meta-tools; tools were: {:?}",
         first_call_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()
     );
     assert!(
-        !first_call_tools.iter().any(|tool| tool.name == "delete"),
-        "explicit MCP tool grant must hide other server tools; tools were: {:?}",
+        !first_call_tools
+            .iter()
+            .any(|tool| matches!(tool.name.as_str(), "echo" | "delete")),
+        "MCP tool capabilities must not cause eager remote schemas; tools were: {:?}",
         first_call_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()
     );
+    assert_eq!(mcp_server.initialize_count.load(Ordering::SeqCst), 0);
+    assert_eq!(mcp_server.list_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
