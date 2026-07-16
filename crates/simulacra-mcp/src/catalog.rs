@@ -412,6 +412,7 @@ impl Tool for McpCallTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -423,9 +424,93 @@ mod tests {
         AgentId, CheckpointData, JOURNAL_SCHEMA_VERSION, JournalEntry, JournalEntryKind,
         JournalError, JournalStorage, TokenUsage,
     };
+    use tracing_subscriber::layer::SubscriberExt;
 
     #[derive(Default)]
     struct RecordingJournal(Mutex<Vec<JournalEntry>>);
+
+    #[derive(Clone, Debug)]
+    struct CapturedEvent {
+        fields: HashMap<String, String>,
+    }
+
+    struct EventCapture {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for EventCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = HashMap::new();
+            event.record(&mut FieldVisitor(&mut fields));
+            self.events
+                .lock()
+                .expect("event capture mutex")
+                .push(CapturedEvent { fields });
+        }
+    }
+
+    struct FieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+    impl tracing::field::Visit for FieldVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn activation_events(events: &Arc<Mutex<Vec<CapturedEvent>>>) -> Vec<CapturedEvent> {
+        events
+            .lock()
+            .expect("event capture mutex")
+            .iter()
+            .filter(|event| {
+                event
+                    .fields
+                    .contains_key("simulacra.mcp.activated_tool_count")
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn assert_activation_event(
+        event: &CapturedEvent,
+        skill: &str,
+        servers: &str,
+        tool_count: &str,
+        outcome: &str,
+    ) {
+        assert_eq!(
+            event.fields.get("simulacra.skill.name"),
+            Some(&skill.into())
+        );
+        assert_eq!(
+            event.fields.get("simulacra.mcp.servers"),
+            Some(&servers.into())
+        );
+        assert_eq!(
+            event.fields.get("simulacra.mcp.activated_tool_count"),
+            Some(&tool_count.into())
+        );
+        assert_eq!(
+            event.fields.get("simulacra.mcp.activation.outcome"),
+            Some(&outcome.into())
+        );
+    }
 
     impl JournalStorage for RecordingJournal {
         fn append(&self, entry: JournalEntry) -> Result<(), JournalError> {
@@ -617,6 +702,116 @@ mod tests {
             }
         }
         (!request.is_empty()).then(|| String::from_utf8_lossy(&request).into_owned())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn activation_telemetry_covers_prevalidation_and_connection_failures_without_secrets() {
+        let _guard = catalog_test_guard().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        let unknown = McpCatalog::new(Vec::new()).expect("empty catalog should construct");
+        unknown
+            .activate("preflight-skill", &["github".into()], &mcp_capability())
+            .await
+            .expect_err("unknown dependency should fail prevalidation");
+
+        let unavailable = TcpListener::bind("127.0.0.1:0").expect("reserve unavailable port");
+        let secret_endpoint = format!(
+            "http://{}/mcp?credential=SUPERSECRET",
+            unavailable.local_addr().expect("unavailable address")
+        );
+        drop(unavailable);
+        let disconnected = McpCatalog::new(vec![McpServerDescriptor::network(
+            "linear".into(),
+            secret_endpoint.clone(),
+            Some("http".into()),
+        )])
+        .expect("catalog should construct");
+        disconnected
+            .activate("connection-skill", &["linear".into()], &mcp_capability())
+            .await
+            .expect_err("unavailable dependency should fail activation");
+
+        let captured = activation_events(&events);
+        assert_eq!(
+            captured.len(),
+            2,
+            "one summary event per attempt: {captured:?}"
+        );
+        assert_activation_event(
+            &captured[0],
+            "preflight-skill",
+            "[\"github\"]",
+            "0",
+            "failure",
+        );
+        assert_activation_event(
+            &captured[1],
+            "connection-skill",
+            "[\"linear\"]",
+            "0",
+            "failure",
+        );
+        let rendered = format!("{captured:?}");
+        assert!(!rendered.contains("SUPERSECRET"));
+        assert!(!rendered.contains(&secret_endpoint));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn activation_telemetry_reports_committed_and_cached_success_with_declared_set() {
+        let _guard = catalog_test_guard().await;
+        let secret_endpoint = "https://user:SUPERSECRET@example.invalid/mcp".to_string();
+        let catalog = McpCatalog::new(vec![McpServerDescriptor::wasm(
+            "github".into(),
+            WasmMcpServerDescriptor {
+                module_path: std::path::PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/echo-mcp.wasm"
+                )),
+                network_allowlist: vec![secret_endpoint.clone()],
+                hooks: None,
+                journal: None,
+                agent_id: AgentId("telemetry-agent".into()),
+            },
+        )])
+        .expect("catalog should construct");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        assert_eq!(
+            catalog
+                .activate("repo-work", &["github".into()], &mcp_capability())
+                .await
+                .expect("initial activation should commit inventory"),
+            1
+        );
+        assert_eq!(
+            catalog
+                .activate("repo-work", &["github".into()], &mcp_capability())
+                .await
+                .expect("repeat activation should use cached inventory"),
+            0
+        );
+
+        let captured = activation_events(&events);
+        assert_eq!(
+            captured.len(),
+            2,
+            "one summary event per attempt: {captured:?}"
+        );
+        assert_activation_event(&captured[0], "repo-work", "[\"github\"]", "1", "success");
+        assert_activation_event(&captured[1], "repo-work", "[\"github\"]", "0", "success");
+        let rendered = format!("{captured:?}");
+        assert!(!rendered.contains(&secret_endpoint));
+        assert!(!rendered.contains("SUPERSECRET"));
+        assert!(!rendered.to_ascii_lowercase().contains("authorization"));
     }
 
     #[tokio::test]
