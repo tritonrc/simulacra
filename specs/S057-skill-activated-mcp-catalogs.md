@@ -167,7 +167,11 @@ correlation by tool-call index or ID preserves the redaction decision. Ordinary
 tools retain their original approval, start, and streaming-delta payloads. The
 registry and MCP dispatcher still receive the original MCP meta-tool values
 unchanged. A searched tool that later becomes capability-denied must be denied
-at call time.
+at call time. Successful `mcp_call` results follow the complementary boundary:
+the exact result is delivered to the model, while registry result logs expose
+only `[REDACTED]` plus result length and `ToolOutput` activity/server SSE expose
+only `[REDACTED] (result_length=<n>)`. Ordinary-tool result logging and activity
+remain unchanged.
 
 ## Behavior
 
@@ -257,6 +261,9 @@ payload rather than the provider's raw meta-tool input. HITL and streaming tests
 prove `ToolApprovalRequired` uses the metadata-only shape and every MCP
 `ToolCallDelta`, including unnamed continuation chunks, emits `[REDACTED]`.
 Those tests also prove ordinary-tool arguments and deltas are unchanged.
+Successful-result tests prove the exact MCP result reaches the model while
+registry logs, `ToolOutput`, and server SSE contain only redaction markers and
+result length; ordinary-tool output remains unchanged.
 
 - [x] `mcp_search` returns only tools from the calling agent's successfully
   activated server catalogs, returns at most five results, and includes each
@@ -290,6 +297,9 @@ real child environment; catalog isolation tests prove publications are owned by
 the catalog instance. `search_and_remote_call_errors_are_actionable_without_leaking_backend_secrets`
 injects secret-bearing journal and remote JSON-RPC failures and verifies both
 returned errors and captured telemetry are redacted.
+`legacy_sse_activation_failure_redacts_endpoint_secrets_but_retains_safe_context`
+proves legacy SSE URL, userinfo, query, authorization, and module-path details
+are removed while server/transport/stage context remains actionable.
 
 - [x] `mcp_servers` does not widen a skill's, parent's, child's, tenant's, or
   agent's effective MCP permissions; it names dependencies that must already
@@ -321,7 +331,10 @@ consumers. `ToolApprovalRequired` is projected identically. Streaming
 `[REDACTED]`, carrying the decision across unnamed continuation chunks by
 tool-call index or ID. Ordinary-tool activity remains unchanged. No runtime
 audit, telemetry, approval, activity, or SSE layer records the raw MCP query or
-raw MCP call arguments.
+raw MCP call arguments. Successful MCP result observability is also bounded:
+registry logs retain result length, and `ToolOutput` activity/server SSE retain
+only the redaction marker plus result length, while the exact result remains in
+the model-facing tool message.
 
 - [x] Every activation attempt emits an activation trace/span or event linked to
   the triggering skill load and records `simulacra.skill.name`, the declared
@@ -342,8 +355,10 @@ raw MCP call arguments.
   never raw arguments; outer `ToolStart` and `ToolApprovalRequired` activity and
   downstream SSE expose the same metadata-only shape. Streaming MCP
   `ToolCallDelta` chunks, including continuation chunks, expose `[REDACTED]`.
+  Successful result telemetry contains `[REDACTED]` and result length;
+  `ToolOutput` activity and server SSE contain the same safe result metadata.
   Ordinary tools remain unchanged, while MCP dispatch receives the original
-  arguments unchanged.
+  arguments and the model receives the exact MCP result unchanged.
 - [x] Every successful remote MCP call retains the existing journal entry before
   its result reaches the agent; local activation/search bookkeeping is recorded
   so the skill dependency and catalog publication remain attributable. Both the
