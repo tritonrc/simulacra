@@ -3038,7 +3038,7 @@ task = "catalog bootstrap"
 
     #[test]
     fn production_bootstrap_wires_activation_and_search_journal_attribution() {
-        let _otel = init_tracing(&TracingPlan {
+        let otel = init_tracing(&TracingPlan {
             backend: TracingBackend::Otlp,
             level: "INFO".to_string(),
             otlp_endpoint: Some(
@@ -3046,7 +3046,8 @@ task = "catalog bootstrap"
                     .unwrap_or_else(|_| "http://localhost:4320".to_string()),
             ),
         })
-        .expect("S057 OTLP telemetry should initialize");
+        .expect("S057 OTLP telemetry should initialize")
+        .expect("S057 test must create OTLP providers");
         let listener = TcpListener::bind("127.0.0.1:0").expect("MCP fixture should bind");
         let url = format!("http://{}", listener.local_addr().expect("fixture address"));
         let worker = serve_catalog_once(listener);
@@ -3128,6 +3129,16 @@ task = "catalog bootstrap"
             )),
             "atomic failure must remain journal-attributable; entries: {entries:?}"
         );
+
+        otel.logger_provider
+            .force_flush()
+            .expect("S057 OTLP logs should flush before Aniani polling");
+        otel.meter_provider
+            .force_flush()
+            .expect("S057 OTLP metrics should flush before Aniani polling");
+        otel.tracer_provider
+            .force_flush()
+            .expect("S057 OTLP traces should flush before Aniani polling");
 
         await_aniani_evidence(
             "/api/search?q=%7B%20name%3D%22execute_tool%22%20%7D",

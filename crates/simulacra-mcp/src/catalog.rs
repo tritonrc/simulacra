@@ -80,10 +80,122 @@ pub struct McpCatalog {
     activation_lock: Mutex<()>,
 }
 
-#[derive(Default)]
 struct CatalogState {
+    snapshot: Arc<CatalogSnapshot>,
+    // Retained as the mutable commit source for activation. Search reads only
+    // the immutable snapshot.
     activated: BTreeMap<String, Vec<ToolDefinition>>,
     published: HashSet<(String, String)>,
+}
+
+impl Default for CatalogState {
+    fn default() -> Self {
+        Self {
+            snapshot: Arc::new(CatalogSnapshot::default()),
+            activated: BTreeMap::new(),
+            published: HashSet::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CatalogSnapshot {
+    entries: Vec<SearchEntry>,
+    postings: BTreeMap<String, Vec<usize>>,
+}
+
+struct SearchEntry {
+    server: String,
+    tool_index: usize,
+    tool_name: String,
+    normalized_tool_name: String,
+    server_tokens: Vec<String>,
+    tool_tokens: Vec<String>,
+    description_tokens: Vec<String>,
+}
+
+impl CatalogSnapshot {
+    /// Build the immutable, schema-free search projection. The authoritative
+    /// inventory remains in `CatalogState`; only result winners consult it to
+    /// materialize their schemas.
+    fn build(inventories: &BTreeMap<String, Vec<ToolDefinition>>) -> Self {
+        let mut entries = Vec::new();
+        let mut postings: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (server, tools) in inventories {
+            let server_tokens = normalize_tokens(server);
+            for (tool_index, tool) in tools.iter().enumerate() {
+                let tool_tokens = normalize_tokens(&tool.name);
+                let description_tokens = normalize_tokens(&tool.description);
+                let entry_index = entries.len();
+                let mut indexed_tokens = BTreeSet::new();
+                indexed_tokens.extend(server_tokens.iter().cloned());
+                indexed_tokens.extend(tool_tokens.iter().cloned());
+                indexed_tokens.extend(description_tokens.iter().cloned());
+                for token in indexed_tokens {
+                    postings.entry(token).or_default().push(entry_index);
+                }
+                entries.push(SearchEntry {
+                    server: server.clone(),
+                    tool_index,
+                    tool_name: tool.name.clone(),
+                    normalized_tool_name: tool_tokens.join(" "),
+                    server_tokens: server_tokens.clone(),
+                    tool_tokens,
+                    description_tokens,
+                });
+            }
+        }
+        Self { entries, postings }
+    }
+
+    fn candidates_for_term(&self, term: &str) -> BTreeSet<usize> {
+        let mut candidates = BTreeSet::new();
+        if let Some(exact) = self.postings.get(term) {
+            candidates.extend(exact);
+        }
+        if term.chars().count() >= 3 {
+            for (token, postings) in self.postings.range(term.to_owned()..) {
+                if !token.starts_with(term) {
+                    break;
+                }
+                candidates.extend(postings);
+            }
+        }
+        candidates
+    }
+}
+
+#[cfg(test)]
+fn refresh_test_snapshot(state: &mut CatalogState) {
+    // Some focused tests seed the authoritative inventory directly. Rebuild
+    // only the schema-free projection for that test seam.
+    state.snapshot = Arc::new(CatalogSnapshot::build(&state.activated));
+}
+
+#[cfg(not(test))]
+fn refresh_test_snapshot(_: &mut CatalogState) {}
+
+fn normalize_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn field_score(tokens: &[String], term: &str, exact: u32, prefix: u32) -> u32 {
+    if tokens.iter().any(|token| token == term) {
+        exact
+    } else if term.chars().count() >= 3 && tokens.iter().any(|token| token.starts_with(term)) {
+        prefix
+    } else {
+        0
+    }
+}
+
+struct RankedMatch {
+    entry_index: usize,
+    score: u32,
 }
 
 impl McpCatalog {
@@ -268,25 +380,71 @@ impl McpCatalog {
         let count = temporary.values().map(Vec::len).sum();
         let mut state = self.state.lock().await;
         state.activated.extend(temporary);
+        // Publish the index while the authoritative inventory is still held,
+        // so readers can never observe a snapshot that disagrees with it.
+        state.snapshot = Arc::new(CatalogSnapshot::build(&state.activated));
         emit_activation_telemetry(skill, &declared_servers, count, "success", context);
         Ok(count)
     }
 
     async fn search(&self, query: &str) -> Result<Vec<Value>, ToolError> {
-        let needle = query.to_lowercase();
-        let mut matches = Vec::new();
-        let state = self.state.lock().await;
-        for (server, tools) in &state.activated {
-            for tool in tools {
-                let haystack = format!("{} {}", tool.name, tool.description).to_lowercase();
-                if needle.is_empty() || haystack.contains(&needle) {
-                    matches.push((server.clone(), tool.clone()));
+        let snapshot = {
+            let mut state = self.state.lock().await;
+            refresh_test_snapshot(&mut state);
+            Arc::clone(&state.snapshot)
+        };
+        let mut seen_terms = HashSet::new();
+        let terms: Vec<_> = normalize_tokens(query)
+            .into_iter()
+            .filter(|term| seen_terms.insert(term.clone()))
+            .collect();
+        let catalog_tool_count = snapshot.entries.len();
+        let candidates = if terms.is_empty() {
+            (0..catalog_tool_count).collect::<BTreeSet<_>>()
+        } else {
+            let mut term_sets = terms.iter().map(|term| snapshot.candidates_for_term(term));
+            let Some(mut intersection) = term_sets.next() else {
+                return Ok(Vec::new());
+            };
+            for term_set in term_sets {
+                intersection.retain(|candidate| term_set.contains(candidate));
+            }
+            intersection
+        };
+        let indexed_candidate_count = candidates.len();
+        // Matching and per-term relevance intentionally use distinct terms,
+        // but complete-name relevance retains the query's normalized order.
+        // Keeping the first occurrence also means duplicate query terms cannot
+        // alter ranking.
+        let complete_query = terms.join(" ");
+        let mut winners: Vec<RankedMatch> = Vec::with_capacity(5);
+        for entry_index in candidates {
+            let entry = &snapshot.entries[entry_index];
+            let score = terms.iter().fold(0_u32, |total, term| {
+                total
+                    + field_score(&entry.tool_tokens, term, 6, 5)
+                        .max(field_score(&entry.server_tokens, term, 4, 3))
+                        .max(field_score(&entry.description_tokens, term, 2, 1))
+            }) + u32::from(
+                !complete_query.is_empty() && complete_query == entry.normalized_tool_name,
+            ) * 1_000;
+            let insertion = winners
+                .iter()
+                .position(|existing| {
+                    let other = &snapshot.entries[existing.entry_index];
+                    score > existing.score
+                        || (score == existing.score
+                            && (entry.server.as_str(), entry.tool_name.as_str())
+                                < (other.server.as_str(), other.tool_name.as_str()))
+                })
+                .unwrap_or(winners.len());
+            if insertion < 5 {
+                winners.insert(insertion, RankedMatch { entry_index, score });
+                if winners.len() > 5 {
+                    winners.pop();
                 }
             }
         }
-        drop(state);
-        matches.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.name.cmp(&b.1.name)));
-        matches.truncate(5);
         self.manager
             .lock()
             .await
@@ -296,22 +454,37 @@ impl McpCatalog {
                 ToolError::ExecutionFailed("MCP catalog search could not be audited".into())
             })?;
         let mut state = self.state.lock().await;
-        for (server, tool) in &matches {
-            state.published.insert((server.clone(), tool.name.clone()));
-        }
+        let results = winners
+            .iter()
+            .map(|winner| {
+                let entry = &snapshot.entries[winner.entry_index];
+                state
+                    .published
+                    .insert((entry.server.clone(), entry.tool_name.clone()));
+                let tool = state
+                    .activated
+                    .get(&entry.server)
+                    .and_then(|tools| tools.get(entry.tool_index))
+                    .expect("published catalog snapshot entries retain authoritative tools");
+                json!({"server": entry.server, "tool": tool.name, "description": tool.description, "input_schema": tool.input_schema})
+            })
+            .collect();
         tracing::info!(
             simulacra.mcp.search.query_length = query.len(),
-            simulacra.mcp.search.result_count = matches.len(),
+            simulacra.mcp.search.result_count = winners.len(),
+            simulacra.mcp.search.catalog_tool_count = catalog_tool_count,
+            simulacra.mcp.search.indexed_candidate_count = indexed_candidate_count,
             "MCP catalog search"
         );
-        for (server, tool) in &matches {
+        for winner in &winners {
+            let entry = &snapshot.entries[winner.entry_index];
             tracing::info!(
-                server = %server,
-                tool = %tool.name,
+                server = %entry.server,
+                tool = %entry.tool_name,
                 "MCP catalog search result"
             );
         }
-        Ok(matches.into_iter().map(|(server, tool)| json!({"server": server, "tool": tool.name, "description": tool.description, "input_schema": tool.input_schema})).collect())
+        Ok(results)
     }
 
     async fn call(
@@ -692,6 +865,15 @@ mod tests {
 
     impl JsonRpcServer {
         async fn new(tool_name: &'static str) -> Self {
+            Self::with_tools(vec![ToolDefinition {
+                name: tool_name.into(),
+                description: "A catalog test tool".into(),
+                input_schema: json!({"type":"object"}),
+            }])
+            .await
+        }
+
+        async fn with_tools(tools: Vec<ToolDefinition>) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("test MCP server should bind");
@@ -710,6 +892,7 @@ mod tests {
                     let initialize_requests = Arc::clone(&initialize_for_thread);
                     let tools_list_requests = Arc::clone(&list_for_thread);
                     let tool_call_requests = Arc::clone(&calls_for_thread);
+                    let tools = tools.clone();
                     tokio::spawn(async move {
                         let Some(request) = read_json_rpc_request(&mut stream).await else {
                             return;
@@ -719,10 +902,10 @@ mod tests {
                             json!({"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"test","version":"1"},"capabilities":{}}}).to_string()
                         } else if request.contains("\"method\":\"tools/list\"") {
                             tools_list_requests.fetch_add(1, Ordering::SeqCst);
-                            json!({"jsonrpc":"2.0","result":{"tools":[{"name":tool_name,"description":"A catalog test tool","inputSchema":{"type":"object"}}]}}).to_string()
+                            json!({"jsonrpc":"2.0","result":{"tools":tools}}).to_string()
                         } else if request.contains("\"method\":\"tools/call\"") {
                             tool_call_requests.fetch_add(1, Ordering::SeqCst);
-                            if tool_name == "secret_error_tool" {
+                            if tools.iter().any(|tool| tool.name == "secret_error_tool") {
                                 json!({"jsonrpc":"2.0","error":{"code":-32000,"message":"https://REMOTEUSER:REMOTEPASS@example.invalid/mcp?token=REMOTEQUERY Authorization: Bearer REMOTEAUTH /private/REMOTEMODULE.wasm"}}).to_string()
                             } else {
                                 json!({"jsonrpc":"2.0","result":{"ok":true}}).to_string()
@@ -1646,5 +1829,410 @@ mod tests {
                     .get("tool")
                     .is_some_and(|value| value == "issues")
         }));
+    }
+
+    fn indexed_tool(name: &str, description: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.into(),
+            description: description.into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"payload": {"type": "string"}}
+            }),
+        }
+    }
+
+    fn indexed_descriptor(name: &str, server: &JsonRpcServer) -> McpServerDescriptor {
+        McpServerDescriptor::network(name.into(), server.url.clone(), Some("http".into()))
+    }
+
+    async fn indexed_search_pairs(catalog: &Arc<McpCatalog>, query: &str) -> Vec<(String, String)> {
+        McpSearchTool::new(Arc::clone(catalog))
+            .call(json!({"query": query}), &mcp_capability())
+            .await
+            .expect("search should succeed")
+            .as_array()
+            .expect("search result array")
+            .iter()
+            .map(|result| {
+                (
+                    result["server"].as_str().expect("server name").to_string(),
+                    result["tool"].as_str().expect("tool name").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn indexed_search_normalizes_boundaries_and_requires_every_distinct_term() {
+        let enterprise = JsonRpcServer::with_tools(vec![indexed_tool(
+            "Repo_Search",
+            "Find pull requests by CODE owner and language",
+        )])
+        .await;
+        let github = JsonRpcServer::with_tools(vec![indexed_tool(
+            "repo_owner",
+            "Show repository owner metadata",
+        )])
+        .await;
+        let linear = JsonRpcServer::with_tools(vec![indexed_tool(
+            "language_search",
+            "Search language references",
+        )])
+        .await;
+        let catalog = McpCatalog::new(vec![
+            indexed_descriptor("GitHub-Enterprise", &enterprise),
+            indexed_descriptor("github", &github),
+            indexed_descriptor("linear", &linear),
+        ])
+        .expect("catalog should construct");
+        catalog
+            .activate(
+                "repo-work",
+                &["GitHub-Enterprise".into(), "github".into(), "linear".into()],
+                &mcp_capability(),
+            )
+            .await
+            .expect("fixture inventories should activate");
+
+        let canonical = indexed_search_pairs(&catalog, "GITHUB repo CODE language").await;
+        assert_eq!(
+            canonical,
+            vec![("GitHub-Enterprise".into(), "Repo_Search".into())],
+            "server, tool, description, and query must be lowercased and tokenized at non-alphanumeric boundaries"
+        );
+        assert_eq!(
+            indexed_search_pairs(&catalog, "language code github repo").await,
+            canonical,
+            "query-term order must not affect matches or ranking"
+        );
+        assert_eq!(
+            indexed_search_pairs(&catalog, "repo language repo code github code").await,
+            canonical,
+            "duplicate normalized terms must not affect matches or ranking"
+        );
+        assert!(
+            indexed_search_pairs(&catalog, "github repo code language missing")
+                .await
+                .is_empty(),
+            "a tool missing any distinct query term must be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_search_honors_prefix_boundary_and_relevance_order() {
+        let zeta = JsonRpcServer::with_tools(vec![
+            indexed_tool("a", "one-character exact token"),
+            indexed_tool("al", "two-character exact token"),
+        ])
+        .await;
+        let alpha = JsonRpcServer::with_tools(vec![
+            indexed_tool("alpha", "Greek target"),
+            indexed_tool("alpine", "Mountain target"),
+        ])
+        .await;
+        let catalog = McpCatalog::new(vec![
+            indexed_descriptor("zeta", &zeta),
+            indexed_descriptor("alpha", &alpha),
+        ])
+        .expect("catalog should construct");
+        catalog
+            .activate(
+                "prefixes",
+                &["zeta".into(), "alpha".into()],
+                &mcp_capability(),
+            )
+            .await
+            .expect("fixture inventories should activate");
+        assert_eq!(
+            indexed_search_pairs(&catalog, "a").await,
+            vec![("zeta".into(), "a".into())],
+            "one-character terms must match exact tokens but not prefixes"
+        );
+        assert_eq!(
+            indexed_search_pairs(&catalog, "al").await,
+            vec![("zeta".into(), "al".into())],
+            "one- and two-character terms must not prefix-match longer tokens"
+        );
+        assert_eq!(
+            indexed_search_pairs(&catalog, "alp").await,
+            vec![
+                ("alpha".into(), "alpha".into()),
+                ("alpha".into(), "alpine".into()),
+            ],
+            "three-character terms may prefix-match indexed tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_search_applies_all_six_field_weights_in_order() {
+        let exact_tool = JsonRpcServer::with_tools(vec![indexed_tool("needle", "other")]).await;
+        let tool_prefix =
+            JsonRpcServer::with_tools(vec![indexed_tool("needlework", "other")]).await;
+        let exact_server = JsonRpcServer::with_tools(vec![indexed_tool("third", "other")]).await;
+        let server_prefix = JsonRpcServer::with_tools(vec![indexed_tool("fourth", "other")]).await;
+        let exact_description =
+            JsonRpcServer::with_tools(vec![indexed_tool("fifth", "needle token")]).await;
+        let description_prefix =
+            JsonRpcServer::with_tools(vec![indexed_tool("sixth", "needlework token")]).await;
+        let catalog = McpCatalog::new(vec![
+            indexed_descriptor("z-tool-exact", &exact_tool),
+            indexed_descriptor("z-tool-prefix", &tool_prefix),
+            indexed_descriptor("needle", &exact_server),
+            indexed_descriptor("needle-server", &server_prefix),
+            indexed_descriptor("z-description-exact", &exact_description),
+            indexed_descriptor("z-description-prefix", &description_prefix),
+        ])
+        .expect("catalog should construct");
+        let dependencies = [
+            "z-tool-exact".into(),
+            "z-tool-prefix".into(),
+            "needle".into(),
+            "needle-server".into(),
+            "z-description-exact".into(),
+            "z-description-prefix".into(),
+        ];
+        catalog
+            .activate("weights", &dependencies, &mcp_capability())
+            .await
+            .expect("fixture inventories should activate");
+        assert_eq!(
+            indexed_search_pairs(&catalog, "needle").await,
+            vec![
+                ("z-tool-exact".into(), "needle".into()),
+                ("z-tool-prefix".into(), "needlework".into()),
+                ("needle".into(), "third".into()),
+                ("needle-server".into(), "fourth".into()),
+                ("z-description-exact".into(), "fifth".into()),
+            ],
+            "the top-five bound must retain the first five weights and omit description prefix, the sixth"
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_search_complete_tool_name_boost_is_separate_from_token_weights() {
+        let server = JsonRpcServer::with_tools(vec![
+            indexed_tool("search-repo", "same"),
+            indexed_tool("repo-search", "same"),
+        ])
+        .await;
+        let catalog = McpCatalog::new(vec![indexed_descriptor("tools", &server)])
+            .expect("catalog should construct");
+        catalog
+            .activate("boost", &["tools".into()], &mcp_capability())
+            .await
+            .expect("fixture inventory should activate");
+        assert_eq!(
+            indexed_search_pairs(&catalog, "search repo").await,
+            vec![
+                ("tools".into(), "search-repo".into()),
+                ("tools".into(), "repo-search".into()),
+            ],
+            "a complete normalized query in a tool's native token order must boost that tool over a competing permutation"
+        );
+        assert_eq!(
+            indexed_search_pairs(&catalog, "repo search").await,
+            vec![
+                ("tools".into(), "repo-search".into()),
+                ("tools".into(), "search-repo".into()),
+            ],
+            "reordering terms must retain both matches while applying the complete-query boost to the corresponding native-order tool name"
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_search_ties_empty_query_and_publication_are_bounded_and_deterministic() {
+        let alpha = JsonRpcServer::with_tools(vec![
+            indexed_tool("gamma", "same tie"),
+            indexed_tool("alpha", "same tie"),
+            indexed_tool("beta", "same tie"),
+        ])
+        .await;
+        let bravo = JsonRpcServer::with_tools(vec![
+            indexed_tool("beta", "same tie"),
+            indexed_tool("alpha", "same tie"),
+        ])
+        .await;
+        let charlie = JsonRpcServer::with_tools(vec![indexed_tool("delta", "same tie")]).await;
+        let catalog = McpCatalog::new(vec![
+            indexed_descriptor("bravo", &bravo),
+            indexed_descriptor("alpha", &alpha),
+            indexed_descriptor("charlie", &charlie),
+        ])
+        .expect("catalog should construct");
+        let dependencies = ["bravo".into(), "alpha".into(), "charlie".into()];
+        assert_eq!(
+            catalog
+                .activate("ties", &dependencies, &mcp_capability())
+                .await
+                .expect("fixture inventories should activate"),
+            6
+        );
+        assert_eq!(
+            catalog
+                .activate("ties", &dependencies, &mcp_capability())
+                .await
+                .expect("repeat activation should reuse committed inventories"),
+            0
+        );
+        let expected = vec![
+            ("alpha".into(), "alpha".into()),
+            ("alpha".into(), "beta".into()),
+            ("alpha".into(), "gamma".into()),
+            ("bravo".into(), "alpha".into()),
+            ("bravo".into(), "beta".into()),
+        ];
+        assert_eq!(indexed_search_pairs(&catalog, "same").await, expected);
+        assert_eq!(indexed_search_pairs(&catalog, "").await, expected);
+
+        McpCallTool::new(Arc::clone(&catalog))
+            .call(
+                json!({"server":"alpha","tool":"alpha","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect("a returned result must be published and callable");
+        let omitted_error = McpCallTool::new(catalog)
+            .call(
+                json!({"server":"charlie","tool":"delta","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect_err("sixth match must not be published");
+        assert!(
+            omitted_error
+                .to_string()
+                .contains("not activated and search-published"),
+            "matches beyond the five-result bound must remain unpublished"
+        );
+    }
+
+    #[tokio::test]
+    async fn indexed_snapshot_replaces_atomically_after_later_success_without_losing_publication() {
+        let first = JsonRpcServer::with_tools(vec![indexed_tool("first_tool", "first")]).await;
+        let later = JsonRpcServer::with_tools(vec![indexed_tool("later_tool", "later")]).await;
+        let catalog = McpCatalog::new(vec![
+            indexed_descriptor("first", &first),
+            indexed_descriptor("later", &later),
+        ])
+        .expect("catalog should construct");
+        catalog
+            .activate("first-skill", &["first".into()], &mcp_capability())
+            .await
+            .expect("first inventory should activate");
+        assert_eq!(
+            indexed_search_pairs(&catalog, "first").await,
+            vec![("first".into(), "first_tool".into())]
+        );
+
+        catalog
+            .activate("later-skill", &["later".into()], &mcp_capability())
+            .await
+            .expect("later inventory should activate");
+        assert_eq!(
+            indexed_search_pairs(&catalog, "later").await,
+            vec![("later".into(), "later_tool".into())]
+        );
+        assert_eq!(
+            indexed_search_pairs(&catalog, "").await,
+            vec![
+                ("first".into(), "first_tool".into()),
+                ("later".into(), "later_tool".into()),
+            ]
+        );
+        McpCallTool::new(Arc::clone(&catalog))
+            .call(
+                json!({"server":"first","tool":"first_tool","arguments":{}}),
+                &mcp_capability(),
+            )
+            .await
+            .expect("publication from the earlier snapshot must survive replacement");
+        assert_eq!(
+            catalog
+                .activate("later-skill", &["later".into()], &mcp_capability())
+                .await
+                .expect("repeat activation should succeed"),
+            0
+        );
+        assert_eq!(indexed_search_pairs(&catalog, "").await.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn indexed_search_telemetry_reports_candidate_pruning_without_query_terms() {
+        let _guard = catalog_test_guard().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let github = JsonRpcServer::with_tools(vec![
+            indexed_tool("repo_search", "selective alpha"),
+            indexed_tool("issue_lookup", "ticket workflow"),
+        ])
+        .await;
+        let linear =
+            JsonRpcServer::with_tools(vec![indexed_tool("triage_queue", "ticket workflow")]).await;
+        let notion =
+            JsonRpcServer::with_tools(vec![indexed_tool("doc_search", "workspace notes")]).await;
+        let slack =
+            JsonRpcServer::with_tools(vec![indexed_tool("thread_lookup", "workspace chat")]).await;
+        let drive =
+            JsonRpcServer::with_tools(vec![indexed_tool("file_search", "workspace files")]).await;
+        let catalog = McpCatalog::new(vec![
+            indexed_descriptor("github", &github),
+            indexed_descriptor("linear", &linear),
+            indexed_descriptor("notion", &notion),
+            indexed_descriptor("slack", &slack),
+            indexed_descriptor("drive", &drive),
+        ])
+        .expect("catalog should construct");
+        catalog
+            .activate(
+                "telemetry",
+                &[
+                    "github".into(),
+                    "linear".into(),
+                    "notion".into(),
+                    "slack".into(),
+                    "drive".into(),
+                ],
+                &mcp_capability(),
+            )
+            .await
+            .expect("fixture inventories should activate");
+
+        let query = "selective alpha";
+        assert_eq!(
+            indexed_search_pairs(&catalog, query).await,
+            vec![("github".into(), "repo_search".into())]
+        );
+        let captured = events.lock().expect("event capture mutex");
+        let search_event = captured
+            .iter()
+            .find(|event| {
+                event.fields.get("simulacra.mcp.search.query_length")
+                    == Some(&query.len().to_string())
+            })
+            .expect("search telemetry event");
+        assert_eq!(
+            search_event
+                .fields
+                .get("simulacra.mcp.search.catalog_tool_count"),
+            Some(&"6".into())
+        );
+        let candidate_count = search_event
+            .fields
+            .get("simulacra.mcp.search.indexed_candidate_count")
+            .expect("candidate count telemetry")
+            .parse::<usize>()
+            .expect("candidate count should be numeric");
+        assert!(candidate_count > 0 && candidate_count < 6);
+        let rendered = format!("{captured:?}");
+        for forbidden in ["selective", "alpha", query] {
+            assert!(
+                !rendered.contains(forbidden),
+                "telemetry leaked {forbidden:?}"
+            );
+        }
     }
 }

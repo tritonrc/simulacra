@@ -32,6 +32,13 @@ connections and eager `tools/list`, and does not change MCP transport,
 capability, hook, journal, retry, or call-observability behavior already
 governed by S008/S024/S041.
 
+The indexed-search follow-up in this spec changes only `simulacra-mcp`:
+activated inventories are compiled into a session-local immutable inverted
+index so repeated searches do not normalize or sort the full catalog. Full
+tool schemas remain in the catalog and are cloned/serialized only for the
+winning results. The provider-visible meta-tool contracts and all existing
+activation, publication, call, and redaction boundaries remain unchanged.
+
 ## Non-Goals
 
 - No provider-visible MCP schema per server or per MCP tool.
@@ -45,6 +52,11 @@ governed by S008/S024/S041.
 - No change to the existing `Skill` tool name, skill-body format, or normal
   explicit user/model skill loading semantics except the activation behavior
   defined here.
+- No cache of query results or retention of normalized query material after a
+  search. The catalog index, not query caching, provides the optimization.
+- No server or skill filters on `mcp_search`.
+- No change to the provider-visible `mcp_search` or `mcp_call` names, input
+  schemas, or result fields.
 
 ## Design
 
@@ -66,7 +78,8 @@ Skill(command = "repo-work") or /repo-work
    |      any failure ----------------> discard temporary catalog; return error
    |
    v
-mcp_search(query) --> at most 5 ranked, activated schemas
+mcp_search(query) --> immutable session index snapshot
+                  --> bounded top-5 ranked, activated schemas
    |
    v
 mcp_call(server, tool, arguments) --> only a search-published activated tool
@@ -125,6 +138,39 @@ Only tools from the calling agent's activated catalog are eligible. Ranking is
 deterministic for identical catalog and query inputs; ties are ordered by server
 then tool name. An empty query is valid and returns the first ranked five
 activated tools; an empty activated catalog returns an empty successful result.
+
+### Indexed catalog snapshot
+
+Each successfully inventoried tool contributes index entries for its
+normalized configured server name, tool name, and description. Normalization
+lowercases text and splits it into tokens at non-alphanumeric boundaries. The
+index stores lookup and ranking metadata separately from full input schemas so
+searching non-winning candidates does not clone or serialize their schemas.
+
+The activated catalog exposes one immutable, session-scoped snapshot containing
+the committed inventories and their index. Search acquires that snapshot and
+releases mutable catalog state before candidate lookup and ranking. A successful
+activation builds the complete replacement snapshot before atomically
+publishing it. A failed activation publishes nothing, and reactivation of an
+already committed server neither duplicates inventory nor index entries.
+
+For a non-empty query, normalization also removes duplicate terms. Every
+distinct query term must match at least one indexed field for a tool, regardless
+of query-term order. Reordering terms therefore preserves eligibility and the
+base per-term relevance and tie behavior. A match is either an exact normalized
+token or a prefix of an indexed token when the query term has at least three
+characters; shorter terms never prefix-match.
+
+Relevance aggregates each term's strongest field match in this descending
+order: exact tool-name token, tool-name prefix, exact server-name token, server
+name prefix, exact description token, then description prefix. The strongest
+overall boost applies when the complete normalized query equals the complete
+normalized tool name. This complete-name comparison preserves normalized query
+order, so it may distinguish otherwise equivalent query-term permutations.
+Equal relevance is resolved by configured server name, then tool name.
+Empty-query results retain alphabetical server-then-tool order. Search uses a
+bounded top-five selection structure rather than sorting all matches, then
+clones/serializes schemas only for those selected results.
 
 #### `mcp_call`
 
@@ -244,6 +290,15 @@ preservation of earlier state, and body withholding on failure.
 - [x] Activation of one declared server never connects, inventories, or reveals
   tools from another configured server that has not been activated for this
   agent.
+- [x] A successful activation builds a replacement immutable catalog-and-index
+  snapshot before atomically swapping it into the agent session; searches never
+  observe a partially indexed inventory.
+- [x] A later successful activation replaces the session snapshot with one that
+  contains both earlier and newly committed server inventories and index
+  entries, without invalidating earlier search-publications.
+- [x] A failed activation leaves the prior snapshot byte-for-byte observable
+  through search, and repeated activation of a committed server adds no
+  duplicate inventory or index entries.
 
 ### Catalog search and dispatch
 
@@ -289,6 +344,39 @@ result length; ordinary-tool output remains unchanged.
   isolated by agent session: concurrent agents may activate and search the
   same configured server independently, and a publication or activation in one
   agent cannot make a tool callable or discoverable in another.
+- [x] Catalog indexing lowercases server names, tool names, descriptions, and
+  queries and splits each at non-alphanumeric boundaries.
+- [x] Every distinct normalized query term must match somewhere in a returned
+  tool's indexed server name, tool name, or description; reordering query terms
+  does not change matches, eligibility, base per-term relevance, or tie
+  behavior; duplicate query terms do not change the result, and a tool missing
+  any term is excluded.
+- [x] A query term matches an indexed token exactly or by prefix only when the
+  query term contains at least three characters; one- and two-character terms
+  do not prefix-match.
+- [x] Per-term relevance orders matches by exact tool-name token, tool-name
+  prefix, exact server-name token, server-name prefix, exact description token,
+  then description prefix.
+- [x] A complete normalized query equal to the complete normalized tool name
+  receives the strongest relevance boost and ranks ahead of tools that match
+  the same terms only through individual tokens or lower-weight fields. This
+  ordered complete-name boost may distinguish reordered query-term
+  permutations.
+- [x] Equal-ranked matches are ordered deterministically by configured server
+  name and then tool name; an empty query returns the alphabetically first five
+  tools using that same server-then-tool ordering.
+- [x] Search selects at most five winners with bounded top-k selection rather
+  than sorting every match, and only winning results clone or serialize their
+  full input schemas.
+- [x] Indexed lookup prunes candidates for a selective non-empty query so the
+  number of candidates considered is smaller than the number of activated
+  catalog tools while preserving the correct ranked results.
+- [x] Search ranks against an immutable session snapshot after releasing
+  mutable catalog state, and concurrent agents never share snapshots, index
+  entries, candidates, or publications.
+- [x] A successful `mcp_search` records its safe journal entry before publishing
+  or returning the selected results, preserving the existing publication and
+  journal-before-return ordering.
 
 ### Capability attenuation and lifecycle
 
@@ -348,6 +436,10 @@ the model-facing tool message.
 - [x] `mcp_search` emits trace/log evidence of query length, result count, and
   only non-secret server/tool identifiers; it does not record the raw query,
   arguments, credentials, or inactive-server inventory.
+- [x] `mcp_search` trace/log evidence also records activated catalog-tool count
+  and indexed candidate count. A selective query demonstrates a candidate count
+  lower than catalog-tool count, while traces, logs, metrics, journals,
+  activities, and SSE expose neither raw nor normalized query terms.
 - [x] Every dispatched `mcp_call` retains S008 observability: an
   `execute_tool` span, `simulacra.tool.name`, `simulacra.tool.source =
   mcp:<server>`, MCP call metric labels, and `gen_ai.tool.message` input-metadata
@@ -401,3 +493,17 @@ cached reactivation avoids reconnection and duplicate indexing.
 - [x] An Aniani-backed integration test validates activation and MCP-call
   traces, metrics, logs, and journal entries through TraceQL, PromQL, and
   LogQL using a local deterministic MCP fixture.
+- [x] Behavioral search tests cover case and boundary normalization, reordered
+  and duplicate multi-term queries, rejection when any term is unmatched,
+  exact-name precedence, the two-character/three-character prefix boundary,
+  deterministic ties, and alphabetical empty-query results.
+- [x] A catalog with more than five matching tools proves bounded five-result
+  selection and publication: only the returned five become callable.
+- [x] Activation tests prove a later atomic snapshot swap adds searchable tools,
+  a failed activation preserves the earlier indexed results, and repeated
+  activation creates neither duplicate results nor duplicate index entries.
+- [x] Concurrent catalog tests prove the immutable index snapshot and search
+  publications remain isolated per agent session.
+- [x] Captured telemetry and local Aniani evidence prove a selective query has
+  candidate count below catalog-tool count and that no raw or normalized query
+  term appears in telemetry or audit surfaces.
