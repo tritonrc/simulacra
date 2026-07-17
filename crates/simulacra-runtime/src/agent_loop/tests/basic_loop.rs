@@ -150,6 +150,37 @@ impl simulacra_types::Tool for CapturingMetaTool {
     }
 }
 
+struct SecretResultMetaTool {
+    calls: Arc<Mutex<Vec<serde_json::Value>>>,
+    result: serde_json::Value,
+}
+
+impl simulacra_types::Tool for SecretResultMetaTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "mcp_call".into(),
+            description: "returns a secret-bearing MCP result".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.calls.lock().unwrap().push(arguments);
+        let result = self.result.clone();
+        Box::pin(async move { Ok(result) })
+    }
+}
+
 #[tokio::test]
 async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_dispatch() {
     let journal = Arc::new(InMemoryJournalStorage::new());
@@ -164,6 +195,11 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
         "server":"github",
         "tool":"issues",
         "arguments":remote_arguments
+    });
+    let secret_call_result = serde_json::json!({
+        "token":"RESULTTOKEN",
+        "authorization":"Bearer RESULTAUTH",
+        "endpoint":"https://RESULTUSER:RESULTPASS@example.invalid/result"
     });
     let provider = FakeProvider::new(vec![
         tool_call_response("mcp_search", search_arguments.clone()),
@@ -181,9 +217,9 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
         }))
         .unwrap();
     tools
-        .register(Box::new(CapturingMetaTool {
-            name: "mcp_call",
+        .register(Box::new(SecretResultMetaTool {
             calls: Arc::clone(&call_calls),
+            result: secret_call_result.clone(),
         }))
         .unwrap();
     tools.register(Box::new(EchoTool)).unwrap();
@@ -201,7 +237,7 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
         None,
     );
 
-    agent.run("exercise MCP meta tools").await.unwrap();
+    let output = agent.run("exercise MCP meta tools").await.unwrap();
 
     assert_eq!(*search_calls.lock().unwrap(), vec![search_arguments]);
     assert_eq!(*call_calls.lock().unwrap(), vec![call_arguments]);
@@ -250,11 +286,13 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
         assert!(!rendered.contains(secret));
     }
 
-    let activity_starts = std::iter::from_fn(|| activity_rx.try_recv().ok())
+    let activity = std::iter::from_fn(|| activity_rx.try_recv().ok()).collect::<Vec<_>>();
+    let activity_starts = activity
+        .iter()
         .filter_map(|event| match event {
             simulacra_types::ActivityEvent::ToolStart {
                 name, arguments, ..
-            } => Some((name, arguments)),
+            } => Some((name.clone(), arguments.clone())),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -291,6 +329,34 @@ async fn mcp_meta_tool_outer_journal_redacts_inputs_without_changing_registry_di
     ] {
         assert!(!activity_rendered.contains(secret));
     }
+
+    let activity_outputs = activity
+        .iter()
+        .filter_map(|event| match event {
+            simulacra_types::ActivityEvent::ToolOutput { tool_call_id, line } => {
+                Some((tool_call_id.clone(), line.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        activity_outputs[1].1,
+        format!(
+            "[REDACTED] (result_length={})",
+            secret_call_result.to_string().chars().count()
+        )
+    );
+    assert_eq!(activity_outputs[2].1, r#"{"ordinary":"kept"}"#);
+    for secret in ["RESULTTOKEN", "RESULTAUTH", "RESULTUSER", "RESULTPASS"] {
+        assert!(!format!("{activity_outputs:?}").contains(secret));
+    }
+    let expected_model_result = secret_call_result.to_string();
+    assert!(
+        output.messages.iter().any(|message| {
+            message.role == Role::Tool && message.content == expected_model_result
+        }),
+        "the model-facing tool result must remain exact"
+    );
 }
 
 struct CapturingSequencedProvider {

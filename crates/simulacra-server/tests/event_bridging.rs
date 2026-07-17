@@ -179,6 +179,29 @@ async fn tool_output_events_translate_to_tool_output_with_seq() {
 }
 
 #[tokio::test]
+async fn redacted_mcp_output_remains_secret_safe_through_server_translation_and_sse_json() {
+    let (tx, mut rx) = make_channel(16);
+    let sink = EngineActivitySink::new("task-mcp-output".to_string(), tx);
+    let safe_line = "[REDACTED] (result_length=137)";
+
+    sink.emit(ActivityEvent::ToolOutput {
+        tool_call_id: "mcp-call-1".to_string(),
+        line: safe_line.to_string(),
+    });
+
+    let event = recv_event(&mut rx).await;
+    assert_eq!(event["event"], "tool.output");
+    assert_eq!(event["tool_call_id"], "mcp-call-1");
+    assert_eq!(event["line"], safe_line);
+    let sse_json =
+        serde_json::to_string(&event).expect("translated event should encode as SSE JSON");
+    assert!(sse_json.contains("result_length=137"));
+    for secret in ["RESULTTOKEN", "RESULTAUTH", "RESULTUSER", "RESULTPASS"] {
+        assert!(!sse_json.contains(secret));
+    }
+}
+
+#[tokio::test]
 async fn tool_finish_events_translate_to_tool_result_with_duration_and_error_state() {
     let (tx, mut rx) = make_channel(16);
     let sink = EngineActivitySink::new("task-4".to_string(), tx);

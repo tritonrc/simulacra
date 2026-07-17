@@ -123,7 +123,9 @@
                 && event.fields.contains_key("gen_ai.tool.result_length")
         }).expect("mcp_call result event");
         assert_eq!(result_event.fields.get("gen_ai.tool.message"), Some(&"[REDACTED]".into()));
-        assert!(result_event.fields.get("gen_ai.tool.result_length").is_some());
+        assert!(result_event
+            .fields
+            .contains_key("gen_ai.tool.result_length"));
         let rendered = format!("{result_event:?}");
         for secret in ["RESULTUSER", "RESULTPASS", "RESULTTOKEN", "RESULTAUTH", "RESULTMODULE"] {
             assert!(!rendered.contains(secret));
