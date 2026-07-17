@@ -179,6 +179,8 @@ impl McpManager {
             Err(_error) => {
                 tracing::warn!(
                     server = %key,
+                    transport = "sse",
+                    stage = "validate_url",
                     error = "invalid URL (details redacted)",
                     "MCP SSE handshake failure: invalid URL"
                 );
@@ -192,7 +194,9 @@ impl McpManager {
         if parsed.scheme() == "https" {
             tracing::warn!(
                 server = %key,
-                url = %sse_url,
+                transport = "sse",
+                stage = "validate_transport",
+                error = "unsupported HTTPS scheme (details redacted)",
                 "MCP SSE handshake failure: legacy SSE transport does not support HTTPS — \
                  use streamable HTTP transport (transport = \"http\") instead"
             );
@@ -254,6 +258,9 @@ impl McpManager {
             None => {
                 tracing::warn!(
                     server = %key,
+                    transport = "sse",
+                    stage = "discover_endpoint",
+                    error = "endpoint discovery failed (details redacted)",
                     "MCP SSE handshake failure: endpoint discovery produced no result"
                 );
                 return;
@@ -268,6 +275,8 @@ impl McpManager {
             Err(_error) => {
                 tracing::warn!(
                     server = %key,
+                    transport = "sse",
+                    stage = "initialize",
                     error = "transport failure (details redacted)",
                     "MCP SSE handshake failure"
                 );
@@ -288,6 +297,9 @@ impl McpManager {
                     if s.write_all(request.as_bytes()).await.is_err() {
                         tracing::warn!(
                             server = %key,
+                            transport = "sse",
+                            stage = "open_keepalive",
+                            error = "transport failure (details redacted)",
                             "MCP SSE handshake failure: could not write keepalive request"
                         );
                         return;
@@ -297,6 +309,8 @@ impl McpManager {
                 Err(_error) => {
                     tracing::warn!(
                         server = %key,
+                        transport = "sse",
+                        stage = "open_keepalive",
                         error = "transport failure (details redacted)",
                         "MCP SSE handshake failure: could not open keepalive TCP stream"
                     );

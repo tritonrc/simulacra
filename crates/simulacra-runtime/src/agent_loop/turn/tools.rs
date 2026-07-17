@@ -171,7 +171,15 @@ impl AgentLoop {
 
         let tool_duration_ms = started.elapsed().as_millis() as u64;
 
-        for line in result.content.lines() {
+        let activity_output = if tc.name == "mcp_call" {
+            format!(
+                "[REDACTED] (result_length={})",
+                result.content.chars().count()
+            )
+        } else {
+            result.content.clone()
+        };
+        for line in activity_output.lines() {
             self.sink.emit(ActivityEvent::ToolOutput {
                 tool_call_id: tc.id.clone(),
                 line: line.to_string(),

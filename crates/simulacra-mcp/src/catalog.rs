@@ -491,6 +491,12 @@ impl Tool for McpCallTool {
                 .await
         })
     }
+
+    fn output_from_value(&self, value: Value) -> simulacra_types::ToolOutput {
+        let mut output = simulacra_types::ToolOutput::from_value(value);
+        output.log_preview = "[REDACTED]".into();
+        output
+    }
 }
 
 #[cfg(test)]
@@ -1200,6 +1206,49 @@ mod tests {
                 && !rendered.contains(secret_endpoint),
             "activation logs must redact endpoint credentials and URLs, got: {rendered}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_sse_activation_failure_redacts_endpoint_secrets_but_retains_safe_context() {
+        let _guard = catalog_test_guard().await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry::Registry::default().with(EventCapture {
+            events: Arc::clone(&events),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+        let endpoint = "http://sse-user:SSEPASS@127.0.0.1:not-a-port/sse?authorization=SSEAUTH&module_path=/tmp/SECRET-MODULE.wasm";
+        let catalog = McpCatalog::new(vec![McpServerDescriptor::network(
+            "legacy".into(),
+            endpoint.into(),
+            Some("sse".into()),
+        )])
+        .expect("catalog should construct without connecting");
+
+        let error = catalog
+            .activate("legacy-skill", &["legacy".into()], &mcp_capability())
+            .await
+            .expect_err("malformed legacy SSE endpoint should fail activation")
+            .to_string();
+        let rendered = format!("{error} {:?}", events.lock().expect("event capture mutex"));
+        for secret in [
+            endpoint,
+            "sse-user",
+            "SSEPASS",
+            "SSEAUTH",
+            "SECRET-MODULE.wasm",
+            "authorization",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "legacy SSE failure leaked {secret:?}: {rendered}"
+            );
+        }
+        for safe in ["legacy", "sse", "connect"] {
+            assert!(
+                rendered.to_ascii_lowercase().contains(safe),
+                "legacy SSE failure must retain safe context {safe:?}: {rendered}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

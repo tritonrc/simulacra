@@ -57,7 +57,15 @@ fn tool_message_event_payload(output: &ToolOutput) -> (String, usize, bool) {
 }
 
 fn emit_tool_result_event(name: &str, output: &ToolOutput) {
-    let (result_message, result_len, truncated) = tool_message_event_payload(output);
+    let (result_message, result_len, truncated) = if name == "mcp_call" {
+        (
+            "[REDACTED]".to_string(),
+            output.content.chars().count(),
+            false,
+        )
+    } else {
+        tool_message_event_payload(output)
+    };
     tracing::info!(
         gen_ai.tool.name = name,
         gen_ai.tool.message = result_message,

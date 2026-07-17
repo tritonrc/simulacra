@@ -14,11 +14,11 @@ impl McpManager {
     /// (via `list_tools` or `call_tool`).
     pub async fn connect_sse(&mut self, url: &str) -> Result<(), McpError> {
         let parsed = url::Url::parse(url).map_err(|e| {
-            let server = url;
-            let error = e.to_string();
             tracing::warn!(
-                server = server,
-                error = %error,
+                server = "unknown",
+                transport = "sse",
+                stage = "validate_url",
+                error = "invalid URL (details redacted)",
                 "WARN: MCP connection failure"
             );
             McpError::ConnectionFailed(format!("sse connection to {url} failed: {e}"))
@@ -46,11 +46,11 @@ impl McpManager {
     /// first use via `list_tools` or `call_tool`.
     pub async fn connect_http(&mut self, url: &str) -> Result<(), McpError> {
         let parsed = url::Url::parse(url).map_err(|e| {
-            let server = url;
-            let error = e.to_string();
             tracing::warn!(
-                server = server,
-                error = %error,
+                server = "unknown",
+                transport = "http",
+                stage = "validate_url",
+                error = "invalid URL (details redacted)",
                 "WARN: MCP connection failure"
             );
             McpError::ConnectionFailed(format!("http connection to {url} failed: {e}"))
@@ -86,8 +86,13 @@ impl McpManager {
         let transport = normalize_transport(transport)?;
 
         let parsed = url::Url::parse(url).map_err(|e| {
-            let error = e.to_string();
-            tracing::warn!(server = url, error = %error, "WARN: MCP connection failure");
+            tracing::warn!(
+                server = "unknown",
+                transport = transport.as_deref().unwrap_or("auto"),
+                stage = "validate_url",
+                error = "invalid URL (details redacted)",
+                "WARN: MCP connection failure"
+            );
             McpError::ConnectionFailed(format!("connection to {url} failed: {e}"))
         })?;
 
@@ -220,6 +225,8 @@ impl McpManager {
         let _parsed = url::Url::parse(url).map_err(|e| {
             tracing::warn!(
                 server = name,
+                transport = transport.as_deref().unwrap_or("auto"),
+                stage = "validate_url",
                 error = "invalid URL (details redacted)",
                 "WARN: MCP connection failure"
             );
