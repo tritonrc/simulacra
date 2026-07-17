@@ -71,6 +71,65 @@
         );
     }
 
+    struct SecretMcpResultTool;
+
+    impl simulacra_types::Tool for SecretMcpResultTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "mcp_call".into(),
+                description: "secret MCP result fixture".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        fn call(
+            &self,
+            _arguments: serde_json::Value,
+            _capability: &CapabilityToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>> + Send + '_>> {
+            Box::pin(async {
+                Ok(simulacra_types::ToolOutput::success(
+                    "https://RESULTUSER:RESULTPASS@example.invalid/mcp?token=RESULTTOKEN Authorization: Bearer RESULTAUTH /private/RESULTMODULE.wasm",
+                ).to_value())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_call_result_reaches_model_unchanged_but_registry_event_logs_only_safe_metadata() {
+        let (subscriber, _spans, captured_events) = setup_capture();
+        let provider = FakeProvider::new(vec![
+            tool_call_response("mcp_call", serde_json::json!({"server":"github","tool":"issues","arguments":{}})),
+            text_response("Done"),
+        ]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(SecretMcpResultTool)).unwrap();
+        let mut agent = build_loop(
+            provider,
+            tools,
+            Box::new(PassthroughContext),
+            Arc::new(InMemoryJournalStorage::new()),
+            default_budget(),
+        );
+        let (_capture_guard, _guard) = install_capture(subscriber).await;
+        let output = agent.run("call MCP").await.unwrap();
+        let model_tool_message = output.messages.iter().find(|message| message.role == Role::Tool).expect("model tool message");
+        assert!(model_tool_message.content.contains("RESULTUSER"));
+        assert!(model_tool_message.content.contains("RESULTAUTH"));
+
+        let events = captured_events.lock().unwrap();
+        let result_event = events.iter().find(|event| {
+            event.fields.get("gen_ai.tool.name") == Some(&"mcp_call".into())
+                && event.fields.contains_key("gen_ai.tool.result_length")
+        }).expect("mcp_call result event");
+        assert_eq!(result_event.fields.get("gen_ai.tool.message"), Some(&"[REDACTED]".into()));
+        assert!(result_event.fields.get("gen_ai.tool.result_length").is_some());
+        let rendered = format!("{result_event:?}");
+        for secret in ["RESULTUSER", "RESULTPASS", "RESULTTOKEN", "RESULTAUTH", "RESULTMODULE"] {
+            assert!(!rendered.contains(secret));
+        }
+    }
+
     #[tokio::test]
     async fn journal_append_span_records_entry_kind_and_live_mode() {
         let (subscriber, captured_spans, _events) = setup_capture();
