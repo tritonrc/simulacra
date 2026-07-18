@@ -707,6 +707,7 @@ fn s054_child_orchestration_tool_descriptions_provide_model_visible_guidance() {
         "inspect",
         "running",
         "ready",
+        "terminal status variants contain the child's result",
         "without waiting for or consuming the terminal result",
     ] {
         assert!(
@@ -723,6 +724,7 @@ fn s054_child_orchestration_tool_descriptions_provide_model_visible_guidance() {
         "currently tracked by this supervisor",
         "live children",
         "terminal children that have not been closed",
+        "terminal status variants contain each child's result",
     ] {
         assert!(
             list.description.contains(expected),
@@ -927,7 +929,7 @@ async fn child_status_tool_sends_command_and_returns_status_json() {
                     .send(Ok(simulacra_runtime::ChildStatus {
                         child_id,
                         agent_type: "researcher".into(),
-                        status: "running".into(),
+                        status: ChildAgentStatus::Running,
                         ready: false,
                         elapsed_ms: 12,
                     }))
@@ -968,7 +970,7 @@ async fn list_child_agents_tool_sends_command_and_returns_roster_json() {
                         child_id: "child-1".into(),
                         agent_type: "researcher".into(),
                         task: "inspect lifecycle".into(),
-                        status: "running".into(),
+                        status: ChildAgentStatus::Running,
                         ready: false,
                         elapsed_ms: 12,
                     }]))

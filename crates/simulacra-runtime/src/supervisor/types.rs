@@ -103,6 +103,15 @@ pub struct ChildTerminalResult {
     pub result: Result<AgentLoopOutput, String>,
 }
 
+pub(crate) fn final_assistant_message(output: &AgentLoopOutput) -> Option<String> {
+    output
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == simulacra_types::Role::Assistant)
+        .map(|message| message.content.clone())
+}
+
 /// Stable metadata retained for each accepted child handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildMetadata {
@@ -114,12 +123,22 @@ pub struct ChildMetadata {
     pub finished_at_ms: Option<u64>,
 }
 
+/// Shared model-visible child lifecycle status used by status and roster probes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildAgentStatus {
+    Running,
+    Completed(Option<String>),
+    Failed(Option<String>),
+    Cancelled(Option<String>),
+}
+
 /// Lightweight child status returned by child_status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildStatus {
     pub child_id: AgentId,
     pub agent_type: String,
-    pub status: String,
+    pub status: ChildAgentStatus,
     pub ready: bool,
     pub elapsed_ms: u64,
 }
@@ -130,7 +149,7 @@ pub struct ChildRosterEntry {
     pub child_id: String,
     pub agent_type: String,
     pub task: String,
-    pub status: String,
+    pub status: ChildAgentStatus,
     pub ready: bool,
     pub elapsed_ms: u64,
 }

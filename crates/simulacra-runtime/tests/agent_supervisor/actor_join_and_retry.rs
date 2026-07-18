@@ -15,6 +15,384 @@ async fn request_child_roster(
         .expect("list children should succeed")
 }
 
+#[test]
+fn child_agent_status_failed_without_content_uses_an_explicit_null_wire_value() {
+    assert_eq!(
+        serde_json::to_value(ChildAgentStatus::Failed(None))
+            .expect("child status should serialize"),
+        serde_json::json!({ "failed": null })
+    );
+}
+
+#[cfg(feature = "spawn")]
+async fn call_child_status_json(
+    tx: &tokio::sync::mpsc::Sender<SupervisorMessage>,
+    child_id: &str,
+) -> Result<serde_json::Value, ToolError> {
+    ChildStatusTool { sender: tx.clone() }
+        .call(
+            serde_json::json!({ "child_id": child_id }),
+            &CapabilityToken::default(),
+        )
+        .await
+}
+
+#[cfg(feature = "spawn")]
+async fn call_child_roster_json(
+    tx: &tokio::sync::mpsc::Sender<SupervisorMessage>,
+) -> Result<serde_json::Value, ToolError> {
+    ListChildAgentTool { sender: tx.clone() }
+        .call(serde_json::json!({}), &CapabilityToken::default())
+        .await
+}
+
+#[cfg(feature = "spawn")]
+fn output_with_assistant(content: Option<&str>, exit_reason: ExitReason) -> AgentLoopOutput {
+    AgentLoopOutput {
+        exit_reason,
+        messages: content
+            .map(|content| Message {
+                role: Role::Assistant,
+                content: content.into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            })
+            .into_iter()
+            .collect(),
+        token_usage: TokenUsage::default(),
+        reported_tool_uses: None,
+        used_turns: 1,
+        used_cost: Decimal::ZERO,
+    }
+}
+
+#[tokio::test]
+#[cfg(feature = "spawn")]
+async fn status_and_roster_expose_cached_terminal_content_without_consuming_it() {
+    let factory = FakeTaskFactory::new();
+    let running_release = Arc::new(Notify::new());
+    factory.push_plan(
+        "z-running",
+        FakeTaskPlan::Complete {
+            release: Some(Arc::clone(&running_release)),
+            output: output_with_assistant(Some("later"), ExitReason::Complete),
+        },
+    );
+    factory.push_plan(
+        "a-completed",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: output_with_assistant(Some("real finding"), ExitReason::Complete),
+        },
+    );
+    factory.push_plan(
+        "b-null",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: output_with_assistant(None, ExitReason::Complete),
+        },
+    );
+    factory.push_plan(
+        "c-empty",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: output_with_assistant(Some(""), ExitReason::Complete),
+        },
+    );
+    factory.push_plan(
+        "d-failed",
+        FakeTaskPlan::Fail {
+            error: RuntimeError::Session("supervisor boom".into()),
+        },
+    );
+    factory.push_plan(
+        "e-cancelled",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: output_with_assistant(Some("cancel reason"), ExitReason::Cancelled),
+        },
+    );
+    factory.push_plan(
+        "f-cancelled-null",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: output_with_assistant(None, ExitReason::Cancelled),
+        },
+    );
+    factory.push_plan(
+        "g-partial",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: AgentLoopOutput {
+                exit_reason: ExitReason::BudgetExhausted,
+                messages: vec![
+                    Message { role: Role::Assistant, content: "partial finding".into(), tool_calls: vec![], tool_call_id: None, provider_content: vec![] },
+                    Message { role: Role::Tool, content: "late tool result".into(), tool_calls: vec![], tool_call_id: Some("tool-call-1".into()), provider_content: vec![] },
+                ],
+                token_usage: TokenUsage::default(),
+                reported_tool_uses: None,
+                used_turns: 1,
+                used_cost: Decimal::ZERO,
+            },
+        },
+    );
+    factory.push_plan(
+        "h-error-output",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: output_with_assistant(
+                Some("partial answer before provider failure"),
+                ExitReason::Error("provider timeout".into()),
+            ),
+        },
+    );
+
+    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        ResourceBudget::new(1_000_000, 100, Decimal::new(1_000, 0), 10),
+        Arc::new(factory.clone()),
+    ));
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(rx).await })
+    };
+
+    for child_id in [
+        "z-running",
+        "a-completed",
+        "b-null",
+        "c-empty",
+        "d-failed",
+        "e-cancelled",
+        "f-cancelled-null",
+        "g-partial",
+        "h-error-output",
+    ] {
+        let mut config = spawn_config(
+            child_id,
+            "parent-agent",
+            CapabilityToken::default(),
+            ResourceBudget::new(100, 1, Decimal::ZERO, 0),
+            RestartStrategy::LetCrash,
+        );
+        config.agent_type = Some("researcher".into());
+        config.task = format!("task for {child_id}");
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(SupervisorMessage {
+            priority: MessagePriority::Command,
+            agent_id: AgentId("parent-agent".into()),
+            payload: SupervisorPayload::Spawn(Box::new(config), ack_tx),
+        })
+        .await
+        .expect("spawn message should send");
+        ack_rx
+            .await
+            .expect("spawn response channel should stay open")
+            .expect("spawn should be accepted");
+    }
+    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_started_agents(9))
+        .await
+        .expect("all child tasks should start");
+    for child_id in [
+        "a-completed",
+        "b-null",
+        "c-empty",
+        "d-failed",
+        "e-cancelled",
+        "f-cancelled-null",
+        "g-partial",
+        "h-error-output",
+    ] {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if call_child_status_json(&tx, child_id)
+                    .await
+                    .expect("terminal status probe should succeed")["ready"]
+                    == true
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+            .await
+            .expect("terminal child should finish");
+    }
+
+    assert_eq!(
+        call_child_status_json(&tx, "z-running")
+            .await
+            .expect("running status should succeed")["status"],
+        serde_json::json!("running")
+    );
+
+    let expected_terminal_statuses = [
+        ("g-partial", serde_json::json!({ "completed": "partial finding" })),
+        ("a-completed", serde_json::json!({ "completed": "real finding" })),
+        ("b-null", serde_json::json!({ "completed": null })),
+        ("c-empty", serde_json::json!({ "completed": "" })),
+        ("d-failed", serde_json::json!({ "failed": "session error: supervisor boom" })),
+        ("e-cancelled", serde_json::json!({ "cancelled": "cancel reason" })),
+        ("f-cancelled-null", serde_json::json!({ "cancelled": null })),
+        ("h-error-output", serde_json::json!({ "failed": "provider timeout" })),
+    ];
+    for (child_id, expected_status) in &expected_terminal_statuses {
+        let first = call_child_status_json(&tx, child_id)
+            .await
+            .expect("first status peek should succeed");
+        let second = call_child_status_json(&tx, child_id)
+            .await
+            .expect("repeat status peek should succeed");
+        assert_eq!(first["status"], *expected_status, "wrong status for {child_id}");
+        assert_eq!(second, first, "status peeks must clone cached content");
+        assert_eq!(first["child_id"], *child_id);
+        assert_eq!(first["agent_type"], "researcher");
+        assert_eq!(first["ready"], true);
+        assert!(first["elapsed_ms"].is_u64(), "elapsed_ms must remain present");
+    }
+
+    let first_roster = call_child_roster_json(&tx)
+        .await
+        .expect("first roster peek should succeed");
+    let second_roster = call_child_roster_json(&tx)
+        .await
+        .expect("repeat roster peek should succeed");
+    let roster = first_roster.as_array().expect("roster should be an array");
+    let repeated_roster = second_roster.as_array().expect("repeat roster should be an array");
+    let ordered_ids = roster
+        .iter()
+        .map(|entry| entry["child_id"].as_str().expect("child id"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered_ids,
+        vec![
+            "a-completed",
+            "b-null",
+            "c-empty",
+            "d-failed",
+            "e-cancelled",
+            "f-cancelled-null",
+            "g-partial",
+            "h-error-output",
+            "z-running",
+        ]
+    );
+    for (index, entry) in roster.iter().enumerate() {
+        assert_eq!(entry["agent_type"], "researcher");
+        assert_eq!(entry["task"], format!("task for {}", ordered_ids[index]));
+        assert!(entry["elapsed_ms"].is_u64(), "elapsed_ms must remain present");
+        assert_eq!(repeated_roster[index]["child_id"], entry["child_id"]);
+        assert_eq!(repeated_roster[index]["status"], entry["status"]);
+    }
+    assert_eq!(roster[0]["ready"], true);
+    assert_eq!(roster[0]["status"], serde_json::json!({ "completed": "real finding" }));
+    assert_eq!(roster[5]["status"], serde_json::json!({ "cancelled": null }));
+    assert_eq!(roster[6]["status"], serde_json::json!({ "completed": "partial finding" }));
+    assert_eq!(roster[7]["status"], serde_json::json!({ "failed": "provider timeout" }));
+    assert_eq!(roster[8]["status"], "running");
+    assert_eq!(roster[8]["ready"], false);
+
+    let join_tool = JoinChildAgentTool { sender: tx.clone() };
+    let joined = join_tool
+        .call(
+            serde_json::json!({ "child_id": "a-completed" }),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("join after peeks should still succeed");
+    let joined_again = join_tool
+        .call(
+            serde_json::json!({ "child_id": "a-completed" }),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("repeat join should clone the same cached terminal result");
+    assert_eq!(joined_again, joined, "status/list peeks and joins must not consume or alter the summary");
+    assert_eq!(joined["child_id"], "a-completed");
+    assert_eq!(joined["agent_type"], "researcher");
+    assert_eq!(joined["status"], "completed");
+    assert_eq!(joined["ready"], true);
+    assert_eq!(joined["exit_reason"], "completed");
+    assert_eq!(joined["message"], "real finding");
+    assert!(joined["elapsed_ms"].is_u64());
+    assert!(joined["tool_uses"].is_u64());
+    assert!(joined["token_usage"].is_object());
+    assert_eq!(joined["artifacts"], serde_json::json!([]));
+    assert_eq!(joined["vfs_changes"], serde_json::json!([]));
+    assert_eq!(
+        call_child_status_json(&tx, "a-completed")
+            .await
+            .expect("status after join should retain content")["status"],
+        serde_json::json!({ "completed": "real finding" })
+    );
+
+    let partial_join = join_tool
+        .call(
+            serde_json::json!({ "child_id": "g-partial" }),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("partial child join should succeed");
+    assert_eq!(partial_join["message"], "partial finding");
+
+    let error_output_join = join_tool
+        .call(
+            serde_json::json!({ "child_id": "h-error-output" }),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("error-output child join should still return its canonical summary");
+    assert_eq!(error_output_join["status"], "failed");
+    assert_eq!(error_output_join["message"], "partial answer before provider failure");
+
+    CloseChildAgentTool { sender: tx.clone() }
+        .call(
+            serde_json::json!({ "child_id": "a-completed" }),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("close should remove completed child");
+    assert!(
+        call_child_status_json(&tx, "a-completed").await.is_err(),
+        "closed child should be absent from status"
+    );
+    let after_close = call_child_roster_json(&tx)
+        .await
+        .expect("roster after close should succeed");
+    assert!(
+        after_close
+            .as_array()
+            .expect("roster should be an array")
+            .iter()
+            .all(|entry| entry["child_id"] != "a-completed"),
+        "closed child should be absent from roster"
+    );
+
+    drop(join_tool);
+    running_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if call_child_status_json(&tx, "z-running")
+                .await
+                .expect("released running child status should succeed")["ready"]
+                == true
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("released running child should finish before actor teardown");
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(1), actor)
+        .await
+        .expect("actor should stop after channel closes")
+        .expect("actor task should shut down cleanly");
+}
+
 #[tokio::test]
 async fn actor_join_journals_completion_before_terminal_result_resolves() {
     let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
@@ -287,7 +665,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
         .expect("running child should have status");
     assert_eq!(status.child_id.0, "child-orchestrated");
     assert_eq!(status.agent_type, "researcher");
-    assert_eq!(status.status, "running");
+    assert_eq!(status.status, ChildAgentStatus::Running);
     assert!(!status.ready);
 
     let running_roster = request_child_roster(&tx).await;
@@ -296,7 +674,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
     assert_eq!(running_child.child_id, "child-orchestrated");
     assert_eq!(running_child.agent_type, "researcher");
     assert_eq!(running_child.task, "inspect lifecycle");
-    assert_eq!(running_child.status, "running");
+    assert_eq!(running_child.status, ChildAgentStatus::Running);
     assert!(!running_child.ready);
 
     let (poll_tx, poll_rx) = tokio::sync::oneshot::channel();
@@ -428,7 +806,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
     assert_eq!(joined_child.child_id, "child-orchestrated");
     assert_eq!(joined_child.agent_type, "researcher");
     assert_eq!(joined_child.task, "inspect lifecycle");
-    assert_eq!(joined_child.status, "completed");
+    assert_eq!(joined_child.status, ChildAgentStatus::Completed(None));
     assert!(joined_child.ready);
 
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();

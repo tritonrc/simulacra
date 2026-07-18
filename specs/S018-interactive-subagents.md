@@ -180,7 +180,11 @@ InteractiveSession (S015)
 
 12. When the parent model emits `spawn_agent`, the parent `AgentLoop` journals the normal `ToolCall` entry first, as required by S012/S005.
 13. The `spawn_agent` tool MUST return the accepted child handle without waiting for the child's terminal outcome.
-14. The parent model sees the child outcome only through `join_child_agent`. The child's internal conversation history is NOT appended to the parent's message list.
+14. The parent model may observe a cached terminal outcome through
+    `child_status` or `list_child_agents` without consuming it.
+    `join_child_agent` remains the canonical indefinite wait and full terminal
+    summary API. The child's internal conversation history is NOT appended to
+    the parent's message list.
 15. The `join_child_agent` result content sent to the parent MUST contain only the child's terminal summary (`message`), structured status metadata, aggregate `token_usage`, `elapsed_ms`, `tool_uses`, and artifact/change summary fields. Intermediate child tool results, internal reasoning, and child journal internals remain host-local unless the child includes them in its final assistant message.
 16. If the child exits without a final assistant message, the joined `message` field MUST be an empty string rather than fabricating a summary.
 

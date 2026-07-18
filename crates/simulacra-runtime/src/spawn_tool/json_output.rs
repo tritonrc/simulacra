@@ -10,12 +10,7 @@ use super::*;
 
 fn child_success_json(terminal: ChildTerminalResult, output: AgentLoopOutput) -> serde_json::Value {
     let exit_reason_str = exit_reason_to_snake_case(&output.exit_reason);
-    let message = output
-        .messages
-        .last()
-        .filter(|m| m.role == simulacra_types::Role::Assistant)
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
+    let message = crate::supervisor::final_assistant_message(&output).unwrap_or_default();
 
     serde_json::json!({
         "child_id": terminal.child_id.0,

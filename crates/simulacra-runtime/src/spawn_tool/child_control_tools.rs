@@ -20,11 +20,13 @@ the final child outcome after spawn_agent has returned a live handle.";
 const CHILD_STATUS_DESCRIPTION: &str = "\
 Cheap nonblocking probe for a child handle. Use child_status to inspect \
 whether a live or completed child is running, ready, completed, failed, or \
-cancelled without waiting for or consuming the terminal result.";
+cancelled without waiting for or consuming the terminal result; terminal status \
+variants contain the child's result.";
 
 const LIST_CHILD_AGENTS_DESCRIPTION: &str = "\
 List all child handles currently tracked by this supervisor, including live \
-children and terminal children that have not been closed.";
+children and terminal children that have not been closed; terminal status \
+variants contain each child's result.";
 
 const WAIT_CHILD_AGENT_DESCRIPTION: &str = "\
 Bounded, non-consuming wait for one child or for any child in child_ids to \

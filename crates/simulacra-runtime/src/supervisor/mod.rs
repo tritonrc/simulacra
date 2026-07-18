@@ -6,10 +6,12 @@ mod results;
 mod spawn;
 mod types;
 
+pub(crate) use types::final_assistant_message;
 pub use types::{
-    BoxTaskFuture, CancellationToken, ChildMetadata, ChildRosterEntry, ChildStatus,
-    ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck, SpawnConfig, SpawnResult,
-    SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult, WaitChildrenResult,
+    BoxTaskFuture, CancellationToken, ChildAgentStatus, ChildMetadata, ChildRosterEntry,
+    ChildStatus, ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck, SpawnConfig,
+    SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
+    WaitChildrenResult,
 };
 
 use std::collections::HashMap;

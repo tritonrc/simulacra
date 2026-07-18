@@ -35,7 +35,8 @@ semantics.
   use `join_child_agent` when the terminal result is needed; and use
   `close_child_agent` only for terminal cleanup.
 - [x] `child_status` description identifies it as a cheap nonblocking
-  handle/status probe.
+  handle/status probe and states that terminal status variants contain the
+  child's result.
 - [x] `wait_child_agent` description identifies it as a bounded,
   non-consuming wait; states that `timeout_ms = 0` is a poll; states that
   `child_ids` performs wait-any; and states that a running timeout is a
@@ -53,10 +54,21 @@ semantics.
 - [x] The supervisor tracks stable child metadata for each accepted child:
   `child_id`, `agent_type`, original `task`, `parent_id`, `started_at_ms`,
   optional `finished_at_ms`, and terminal result state.
+- [x] `ChildStatus` and `ChildRosterEntry` share a public `ChildAgentStatus`
+  sum type with wire variants `"running"`, `{ "completed": string|null }`,
+  `{ "failed": string|null }`, and `{ "cancelled": string|null }`.
 - [x] Running children report status `"running"` and `ready: false`.
-- [x] Successful terminal children report status `"completed"` and `ready: true`.
-- [x] Failed terminal children report status `"failed"` and `ready: true`.
-- [x] Cancelled terminal children report status `"cancelled"` and `ready: true`.
+- [x] Successful terminal children report
+  `{ "completed": <final assistant message> }` and `ready: true`.
+- [x] A successful child with no final assistant message reports
+  `{ "completed": null }`; an authored empty final assistant message reports
+  `{ "completed": "" }`.
+- [x] Failed and cancelled terminal children report `{ "failed": <error> }`
+  and `{ "cancelled": <error> }`, respectively, with `ready: true`; absent
+  terminal content is represented by `null`.
+- [x] Status and roster probes clone cached terminal results and never consume
+  them. Repeated probes return the same content, and a later
+  `join_child_agent` returns a summary from the same cached terminal result.
 - [x] Signal-priority cancellation is processed ahead of command-priority
   status, wait, and close requests when messages are queued together.
 
@@ -142,6 +154,18 @@ semantics.
   `join_child_agent`, `cancel_child_agent`, `steer_child_agent`,
   `child_status`, `wait_child_agent`, and `close_child_agent`.
 - [x] Generic leaf child registries still exclude all child-control tools.
+
+### `list_child_agents`
+
+- [x] `list_child_agents` preserves `child_id`, `agent_type`, `task`, `ready`,
+  and `elapsed_ms`, and uses the shared `ChildAgentStatus` wire contract for
+  `status`.
+- [x] Mixed running and terminal rosters are sorted deterministically by
+  `child_id` and include cached terminal content without consuming it.
+- [x] `list_child_agents` description states that terminal status variants
+  contain each child's result.
+- [x] Closing a terminal child removes it from subsequent status and roster
+  probes without changing close semantics.
 
 ## Non-Goals
 

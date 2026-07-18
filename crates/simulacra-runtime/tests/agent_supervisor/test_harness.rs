@@ -1,8 +1,12 @@
 use rust_decimal::Decimal;
 use simulacra_runtime::{
     AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, BoxTaskFuture, CancellationToken,
-    InMemoryJournalStorage, MessagePriority, RestartStrategy, RuntimeError, SpawnConfig,
-    SupervisorMessage, SupervisorPayload, TaskFactory,
+    ChildAgentStatus, InMemoryJournalStorage, MessagePriority, RestartStrategy, RuntimeError,
+    SpawnConfig, SupervisorMessage, SupervisorPayload, TaskFactory,
+};
+#[cfg(feature = "spawn")]
+use simulacra_runtime::{
+    ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool, ListChildAgentTool,
 };
 use simulacra_tool::ToolRegistry;
 use simulacra_types::{

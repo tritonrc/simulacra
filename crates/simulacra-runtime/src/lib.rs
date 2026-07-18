@@ -51,9 +51,9 @@ pub use spawn_tool::{
     SteerChildAgentTool, WaitChildAgentTool,
 };
 pub use supervisor::{
-    AgentSupervisor, BoxTaskFuture, CancellationToken, ChildMetadata, ChildRosterEntry,
-    ChildStatus, ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck, SpawnConfig,
-    SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
+    AgentSupervisor, BoxTaskFuture, CancellationToken, ChildAgentStatus, ChildMetadata,
+    ChildRosterEntry, ChildStatus, ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck,
+    SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
     WaitChildrenResult,
 };
 #[cfg(feature = "spawn")]

@@ -266,13 +266,40 @@ fn status_from_terminal(terminal: &ChildTerminalResult) -> String {
     terminal.status.clone()
 }
 
+fn agent_status_from_terminal(terminal: &ChildTerminalResult) -> ChildAgentStatus {
+    match terminal.status.as_str() {
+        "completed" => ChildAgentStatus::Completed(
+            terminal
+                .result
+                .as_ref()
+                .ok()
+                .and_then(final_assistant_message),
+        ),
+        "failed" => ChildAgentStatus::Failed(match &terminal.result {
+            Err(error) => Some(error.clone()),
+            Ok(output) => match &output.exit_reason {
+                simulacra_types::ExitReason::Error(error) => Some(error.clone()),
+                _ => final_assistant_message(output),
+            },
+        }),
+        "cancelled" => ChildAgentStatus::Cancelled(match &terminal.result {
+            Ok(output) => final_assistant_message(output),
+            Err(error) => Some(error.clone()),
+        }),
+        _ => ChildAgentStatus::Failed(Some(format!(
+            "unknown cached child terminal status: {}",
+            terminal.status
+        ))),
+    }
+}
+
 fn status_from_state(state: &ChildRunState) -> ChildStatus {
     let ready = state.result.is_some();
     let status = state
         .result
         .as_ref()
-        .map(status_from_terminal)
-        .unwrap_or_else(|| "running".to_string());
+        .map(agent_status_from_terminal)
+        .unwrap_or(ChildAgentStatus::Running);
     let end_ms = state.metadata.finished_at_ms.unwrap_or_else(now_ms);
     ChildStatus {
         child_id: state.metadata.child_id.clone(),
