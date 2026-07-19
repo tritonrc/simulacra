@@ -11,7 +11,7 @@ simulacra-provider.workspace = true
 simulacra-context.workspace = true
 simulacra-sandbox = { workspace = true, optional = true }
 simulacra-http.workspace = true
-simulacra-mcp.workspace = true
+simulacra-mcp = { path = "../simulacra-mcp", default-features = false }
 simulacra-tool.workspace = true
 simulacra-hooks.workspace = true
 simulacra-vfs = { workspace = true, optional = true }
@@ -26,6 +26,7 @@ rust_decimal.workspace = true
 
 [features]
 spawn = ["dep:simulacra-vfs", "dep:simulacra-sandbox", "simulacra-tool/sandbox"]
+wasm = ["simulacra-mcp/wasm"]
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

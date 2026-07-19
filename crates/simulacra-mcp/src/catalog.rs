@@ -342,6 +342,7 @@ impl McpCatalog {
                             .connect_named(&descriptor.name, url, transport.as_deref())
                             .await
                     }
+                    #[cfg(feature = "wasm")]
                     McpServerKind::Wasm(descriptor) => {
                         let mut module = crate::load_wasm_mcp_module(&descriptor.module_path)
                             .map_err(|_| {
@@ -358,6 +359,10 @@ impl McpCatalog {
                         }
                         manager.connect_wasm_module(server, module).await
                     }
+                    #[cfg(not(feature = "wasm"))]
+                    McpServerKind::Wasm(_) => Err(crate::McpError::ConnectionFailed(
+                        "WASM MCP support is disabled at compile time".to_string(),
+                    )),
                 }
                 .map_err(|_| sanitized_activation_error(skill, server, "connect"))?;
                 let tools = manager
@@ -681,9 +686,10 @@ mod tests {
     use std::sync::{Arc, Mutex, OnceLock};
 
     use simulacra_types::{
-        AgentId, CheckpointData, JOURNAL_SCHEMA_VERSION, JournalEntry, JournalEntryKind,
-        JournalError, JournalStorage, TokenUsage,
+        AgentId, CheckpointData, JournalEntry, JournalError, JournalStorage, TokenUsage,
     };
+    #[cfg(feature = "wasm")]
+    use simulacra_types::{JOURNAL_SCHEMA_VERSION, JournalEntryKind};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -695,6 +701,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct CapturedEvent {
         fields: HashMap<String, String>,
+        #[cfg(feature = "wasm")]
         current_span: Option<String>,
     }
 
@@ -709,7 +716,7 @@ mod tests {
         fn on_event(
             &self,
             event: &tracing::Event<'_>,
-            ctx: tracing_subscriber::layer::Context<'_, S>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
             let mut fields = HashMap::new();
             event.record(&mut FieldVisitor(&mut fields));
@@ -718,7 +725,8 @@ mod tests {
                 .expect("event capture mutex")
                 .push(CapturedEvent {
                     fields,
-                    current_span: ctx.lookup_current().map(|span| span.name().to_string()),
+                    #[cfg(feature = "wasm")]
+                    current_span: _ctx.lookup_current().map(|span| span.name().to_string()),
                 });
         }
     }
@@ -990,6 +998,7 @@ mod tests {
         (!request.is_empty()).then(|| String::from_utf8_lossy(&request).into_owned())
     }
 
+    #[cfg(feature = "wasm")]
     fn echo_descriptor(name: &str, agent: &str) -> McpServerDescriptor {
         McpServerDescriptor::wasm(
             name.into(),
@@ -1006,6 +1015,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "wasm")]
     #[tokio::test]
     async fn meta_tool_definitions_are_byte_stable_across_catalog_changes() {
         let _guard = catalog_test_guard().await;
@@ -1112,6 +1122,7 @@ mod tests {
         assert_eq!(server.tool_call_requests.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(feature = "wasm")]
     #[tokio::test]
     async fn failed_later_activation_preserves_earlier_inventory_and_publication() {
         let _guard = catalog_test_guard().await;
@@ -1164,6 +1175,7 @@ mod tests {
         .expect("earlier publication should remain callable");
     }
 
+    #[cfg(feature = "wasm")]
     #[tokio::test]
     async fn separate_catalogs_isolate_activation_and_publication() {
         let _guard = catalog_test_guard().await;
@@ -1434,6 +1446,44 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "wasm"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn wasm_activation_without_feature_returns_sanitized_typed_failure() {
+        let module_path = std::path::PathBuf::from("/private/SECRET-MCP-MODULE.wasm");
+        let catalog = McpCatalog::new(vec![McpServerDescriptor::wasm(
+            "github".into(),
+            WasmMcpServerDescriptor {
+                module_path: module_path.clone(),
+                network_allowlist: Vec::new(),
+                hooks: None,
+                journal: None,
+                agent_id: AgentId("no-wasm-agent".into()),
+            },
+        )])
+        .expect("WASM descriptor should remain valid when support is disabled");
+
+        let error = catalog
+            .activate("repo-work", &["github".into()], &mcp_capability())
+            .await
+            .expect_err("WASM activation should fail when support is disabled");
+
+        match error {
+            ToolError::ExecutionFailed(message) => {
+                assert_eq!(
+                    message,
+                    "skill \"repo-work\" could not activate MCP server \"github\" during connect"
+                );
+                assert!(
+                    !message.contains(module_path.to_string_lossy().as_ref())
+                        && !message.contains("SECRET-MCP-MODULE.wasm"),
+                    "public activation failure leaked the configured module path: {message}"
+                );
+            }
+            other => panic!("expected typed execution failure, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "wasm")]
     #[tokio::test(flavor = "current_thread")]
     async fn activation_telemetry_reports_committed_and_cached_success_with_declared_set() {
         let _guard = catalog_test_guard().await;
@@ -1487,6 +1537,7 @@ mod tests {
         assert!(!rendered.to_ascii_lowercase().contains("authorization"));
     }
 
+    #[cfg(feature = "wasm")]
     #[tokio::test(flavor = "current_thread")]
     async fn model_skill_activation_telemetry_is_attributed_to_triggering_tool_span() {
         let _guard = catalog_test_guard().await;
@@ -1600,6 +1651,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "wasm")]
     #[tokio::test]
     async fn activation_and_search_are_journaled_with_agent_attribution_before_catalog_visibility()
     {

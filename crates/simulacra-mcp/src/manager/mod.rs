@@ -10,7 +10,9 @@ mod wasm_dispatch;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "wasm")]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use simulacra_types::{AgentId, JournalStorage};
 
@@ -33,6 +35,7 @@ pub struct McpManager {
     /// Base delay in milliseconds for reconnection exponential backoff.
     pub(crate) reconnect_base_delay_ms: u64,
     pub(crate) agent_fuel_remaining: Option<Arc<AtomicU64>>,
+    #[cfg(feature = "wasm")]
     pub(crate) instantiation_recorder: Option<Arc<AtomicUsize>>,
     #[cfg(feature = "wasm")]
     pub(crate) wasm_modules: HashMap<String, WasmMcpModule>,
@@ -47,6 +50,7 @@ impl McpManager {
             agent_id: AgentId(String::new()),
             reconnect_base_delay_ms: 1000,
             agent_fuel_remaining: None,
+            #[cfg(feature = "wasm")]
             instantiation_recorder: None,
             #[cfg(feature = "wasm")]
             wasm_modules: HashMap::new(),
@@ -62,6 +66,7 @@ impl McpManager {
             agent_id,
             reconnect_base_delay_ms: 1000,
             agent_fuel_remaining: None,
+            #[cfg(feature = "wasm")]
             instantiation_recorder: None,
             #[cfg(feature = "wasm")]
             wasm_modules: HashMap::new(),

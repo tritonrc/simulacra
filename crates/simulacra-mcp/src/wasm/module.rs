@@ -1,5 +1,7 @@
+#[cfg(feature = "wasm")]
 use std::sync::Arc;
 
+#[cfg(feature = "wasm")]
 use simulacra_types::{AgentId, JournalStorage};
 
 use crate::error::McpError;

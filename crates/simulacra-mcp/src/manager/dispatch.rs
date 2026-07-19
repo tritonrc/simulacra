@@ -20,6 +20,9 @@ impl McpManager {
         tool: &str,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
+        #[cfg(not(feature = "wasm"))]
+        let _ = agent_id;
+
         let conn = self.connections.get(server).ok_or_else(|| {
             McpError::ConnectionFailed(format!("no connection to server {server}"))
         })?;

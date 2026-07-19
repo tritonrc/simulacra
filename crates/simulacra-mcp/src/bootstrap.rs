@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::manager::McpManager;
 use crate::tool::McpTool;
+#[cfg(feature = "wasm")]
 use crate::wasm::load_wasm_mcp_module;
 
 /// Connect to MCP servers and return `Tool` wrappers for all discovered tools.

@@ -24,6 +24,22 @@ wasmtime-wasi = { version = "43", optional = true }
 default = ["wasm"]
 wasm = ["dep:simulacra-wasm", "dep:wasmtime", "dep:wasmtime-wasi"]
 
+[[test]]
+name = "wasm_mcp_config"
+required-features = ["wasm"]
+
+[[test]]
+name = "wasm_mcp_e2e_fetch"
+required-features = ["wasm"]
+
+[[test]]
+name = "wasm_mcp_observability"
+required-features = ["wasm"]
+
+[[test]]
+name = "wasm_mcp_transport"
+required-features = ["wasm"]
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
 simulacra-config.workspace = true
