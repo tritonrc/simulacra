@@ -218,6 +218,11 @@ pub enum SupervisorPayload {
     ),
     /// List every live or terminal-unclosed child handle.
     ListChildren(tokio::sync::oneshot::Sender<Result<Vec<ChildRosterEntry>, String>>),
+    /// Host-only roster inspection: the same entries as ListChildren but
+    /// without acknowledging any terminal-result handoff. Housekeeping sweeps
+    /// (e.g. end-of-turn supervisor teardown) must use this so they never
+    /// disarm a pending delivery to the parent model.
+    InspectChildren(tokio::sync::oneshot::Sender<Result<Vec<ChildRosterEntry>, String>>),
     /// Wait for a child up to a bounded timeout without consuming the result.
     WaitChild(
         AgentId,

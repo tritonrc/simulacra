@@ -78,6 +78,23 @@ impl AgentSupervisor {
         }
     }
 
+    /// Host-only roster snapshot: identical entries to `send_child_roster`
+    /// but never marks a terminal result delivered. Host housekeeping (e.g.
+    /// end-of-turn teardown checks) must not acknowledge a handoff the
+    /// parent model never saw.
+    pub(super) fn send_child_roster_inspection(
+        &self,
+        result_tx: tokio::sync::oneshot::Sender<Result<Vec<ChildRosterEntry>, String>>,
+    ) {
+        let results = lock_mutex(&self.child_results, "child_results");
+        let mut entries = results
+            .values()
+            .map(roster_entry_from_state)
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.child_id.cmp(&right.child_id));
+        let _ = result_tx.send(Ok(entries));
+    }
+
     pub(super) fn wait_child(
         &self,
         child_id: AgentId,

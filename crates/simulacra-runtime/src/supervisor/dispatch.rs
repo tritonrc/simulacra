@@ -51,6 +51,9 @@ impl AgentSupervisor {
             SupervisorPayload::ListChildren(result_tx) => {
                 self.send_child_roster(result_tx);
             }
+            SupervisorPayload::InspectChildren(result_tx) => {
+                self.send_child_roster_inspection(result_tx);
+            }
             SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
                 self.wait_child(child_id, timeout, result_tx);
             }

@@ -101,6 +101,11 @@ semantics.
   `ChildTerminalResult` and the current `result_delivered` value.
   `SupervisorPayload::InspectChildResult` returns this inspection without
   changing delivery state and is not registered as a model-visible tool.
+- [x] `SupervisorPayload::InspectChildren` is a public host-only roster
+  inspection. It returns the same complete `ChildRosterEntry` snapshot as
+  `ListChildren`, including deterministic `child_id` ordering, without changing
+  any child's `result_delivered` value, and is not registered as a model-visible
+  tool or included in any model tool catalog.
 - [x] Repeated host inspection is stable and non-mutating. It reports `false`
   until a parent-facing operation successfully returns terminal content and
   reports `true` afterward, until explicit close removes the child.

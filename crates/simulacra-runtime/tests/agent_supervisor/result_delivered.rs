@@ -910,3 +910,109 @@ async fn result_delivered_model_visible_json_remains_unchanged() {
 
     stop_delivered_test_supervisor(tx, actor).await;
 }
+
+async fn inspect_delivered_test_roster(
+    tx: &tokio::sync::mpsc::Sender<SupervisorMessage>,
+) -> Vec<simulacra_runtime::ChildRosterEntry> {
+    let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+    tx.send(SupervisorMessage {
+        priority: MessagePriority::Command,
+        agent_id: AgentId("host-control-plane".into()),
+        payload: SupervisorPayload::InspectChildren(list_tx),
+    })
+    .await
+    .expect("host roster inspection request should send");
+    list_rx
+        .await
+        .expect("host roster inspection response channel should stay open")
+        .expect("host roster inspection should succeed")
+}
+
+#[tokio::test]
+async fn result_delivered_host_roster_inspection_never_marks_delivery() {
+    let running_release = Arc::new(Notify::new());
+    let factory = FakeTaskFactory::new();
+    factory.push_plan(
+        "a-terminal",
+        FakeTaskPlan::Complete {
+            release: None,
+            output: delivered_test_output(Some("terminal"), ExitReason::Complete),
+        },
+    );
+    factory.push_plan(
+        "b-running",
+        FakeTaskPlan::Complete {
+            release: Some(Arc::clone(&running_release)),
+            output: delivered_test_output(Some("later"), ExitReason::Complete),
+        },
+    );
+    let (tx, actor) = delivered_test_supervisor(factory);
+    spawn_delivered_test_child(&tx, "a-terminal").await;
+    spawn_delivered_test_child(&tx, "b-running").await;
+    assert!(
+        !await_delivered_test_terminal(&tx, "a-terminal")
+            .await
+            .result_delivered
+    );
+
+    // Host-only roster inspection sees the same entries a model-facing list
+    // would, but never acknowledges the handoff: a host housekeeping sweep
+    // (e.g. end-of-turn supervisor teardown) must not disarm a pending
+    // terminal-result delivery to the parent model.
+    let inspected = inspect_delivered_test_roster(&tx).await;
+    assert_eq!(
+        inspected
+            .iter()
+            .map(|entry| entry.child_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-terminal", "b-running"],
+        "host inspection must use the model roster's deterministic child_id order"
+    );
+    assert!(
+        !inspect_delivered_test_child(&tx, "a-terminal")
+            .await
+            .expect("terminal inspection")
+            .result_delivered,
+        "host roster inspection must not mark a terminal result delivered"
+    );
+
+    // Repeated host inspections stay non-consuming.
+    let _ = inspect_delivered_test_roster(&tx).await;
+    assert!(
+        !inspect_delivered_test_child(&tx, "a-terminal")
+            .await
+            .expect("terminal inspection after repeat")
+            .result_delivered
+    );
+
+    // The model-facing roster keeps its delivery-acknowledging behavior.
+    let roster = request_child_roster(&tx).await;
+    assert_eq!(inspected.len(), roster.len());
+    for (inspected_entry, model_entry) in inspected.iter().zip(&roster) {
+        assert_eq!(inspected_entry.child_id, model_entry.child_id);
+        assert_eq!(inspected_entry.agent_type, model_entry.agent_type);
+        assert_eq!(inspected_entry.task, model_entry.task);
+        assert_eq!(inspected_entry.status, model_entry.status);
+        assert_eq!(inspected_entry.ready, model_entry.ready);
+        assert!(
+            model_entry.elapsed_ms >= inspected_entry.elapsed_ms,
+            "the later model roster snapshot must not report an earlier elapsed time"
+        );
+    }
+    assert!(
+        inspect_delivered_test_child(&tx, "a-terminal")
+            .await
+            .expect("terminal inspection after model list")
+            .result_delivered,
+        "model-facing list_children must still mark terminal results delivered"
+    );
+
+    running_release.notify_waiters();
+    let released = await_delivered_test_terminal(&tx, "b-running").await;
+    assert!(
+        !released.result_delivered,
+        "a running entry inspected by the host must not pre-deliver its eventual result"
+    );
+
+    stop_delivered_test_supervisor(tx, actor).await;
+}
