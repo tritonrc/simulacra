@@ -8,9 +8,9 @@ mod types;
 
 pub(crate) use types::final_assistant_message;
 pub use types::{
-    BoxTaskFuture, CancellationToken, ChildAgentStatus, ChildMetadata, ChildRosterEntry,
-    ChildStatus, ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck, SpawnConfig,
-    SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
+    BoxTaskFuture, CancellationToken, ChildAgentStatus, ChildMetadata, ChildResultInspection,
+    ChildRosterEntry, ChildStatus, ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck,
+    SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
     WaitChildrenResult,
 };
 
@@ -38,6 +38,7 @@ type ChildrenWaitSender = tokio::sync::oneshot::Sender<Result<WaitChildrenResult
 struct ChildRunState {
     metadata: ChildMetadata,
     result: Option<ChildTerminalResult>,
+    result_delivered: bool,
     join_waiters: Vec<ChildJoinSender>,
     wait_waiters: Vec<ChildWaiter>,
 }

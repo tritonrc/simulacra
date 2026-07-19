@@ -42,12 +42,14 @@ impl AgentSupervisor {
             SupervisorPayload::JoinChild(child_id, result_tx) => {
                 self.join_child(child_id, result_tx);
             }
+            SupervisorPayload::InspectChildResult(child_id, result_tx) => {
+                let _ = result_tx.send(self.inspect_child_result(&child_id));
+            }
             SupervisorPayload::ChildStatus(child_id, result_tx) => {
-                let result = self.child_status(&child_id);
-                let _ = result_tx.send(result);
+                self.send_child_status(&child_id, result_tx);
             }
             SupervisorPayload::ListChildren(result_tx) => {
-                let _ = result_tx.send(Ok(self.list_children()));
+                self.send_child_roster(result_tx);
             }
             SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
                 self.wait_child(child_id, timeout, result_tx);

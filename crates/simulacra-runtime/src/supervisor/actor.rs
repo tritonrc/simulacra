@@ -132,6 +132,7 @@ impl AgentSupervisor {
             ChildRunState {
                 metadata: child_metadata(&config, started_at_ms),
                 result: None,
+                result_delivered: false,
                 join_waiters: Vec::new(),
                 wait_waiters: Vec::new(),
             },

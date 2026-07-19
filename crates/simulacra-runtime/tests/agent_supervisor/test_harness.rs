@@ -7,6 +7,7 @@ use simulacra_runtime::{
 #[cfg(feature = "spawn")]
 use simulacra_runtime::{
     ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool, ListChildAgentTool,
+    WaitChildAgentTool,
 };
 use simulacra_tool::ToolRegistry;
 use simulacra_types::{

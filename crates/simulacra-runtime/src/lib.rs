@@ -52,9 +52,9 @@ pub use spawn_tool::{
 };
 pub use supervisor::{
     AgentSupervisor, BoxTaskFuture, CancellationToken, ChildAgentStatus, ChildMetadata,
-    ChildRosterEntry, ChildStatus, ChildTerminalResult, MessagePriority, RestartStrategy, SpawnAck,
-    SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload, TaskFactory, WaitChildResult,
-    WaitChildrenResult,
+    ChildResultInspection, ChildRosterEntry, ChildStatus, ChildTerminalResult, MessagePriority,
+    RestartStrategy, SpawnAck, SpawnConfig, SpawnResult, SupervisorMessage, SupervisorPayload,
+    TaskFactory, WaitChildResult, WaitChildrenResult,
 };
 #[cfg(feature = "spawn")]
 pub use vfs_hook::HookedVfsLayer;

@@ -72,6 +72,42 @@ semantics.
 - [x] Signal-priority cancellation is processed ahead of command-priority
   status, wait, and close requests when messages are queued together.
 
+### Terminal result delivery tracking
+
+- [x] Each accepted child tracks a private, monotonic `result_delivered` flag
+  alongside its cached terminal result. The flag starts `false`, changes only
+  from `false` to `true`, and does not consume or alter the cached result.
+- [x] `result_delivered` means that a terminal outcome was successfully returned
+  through a parent-facing result-bearing supervisor operation. It does not
+  claim that the parent model reasoned about, narrated, or otherwise acted on
+  the result.
+- [x] Successfully returning terminal content through `child_status`,
+  `list_child_agents`, single-child or wait-any `wait_child_agent`, or
+  `join_child_agent` sets `result_delivered: true`. This includes completed,
+  failed, and cancelled outcomes, absent content represented by `null`, and an
+  authored empty string.
+- [x] Running status/list entries, running wait results, failed response-channel
+  sends, host-only inspection, and `close_child_agent` do not set
+  `result_delivered`.
+- [x] A successful `list_child_agents` response marks every terminal child whose
+  body it contains and does not mark running children. A wait-any response marks
+  only the terminal child selected for that response.
+- [x] Delivery is linearized with terminal-result access: once a receiver
+  observes a successful terminal response, host inspection already reports
+  `result_delivered: true`; concurrent result-bearing operations cannot regress
+  the flag or alter the cached result; and a failed response-channel send leaves
+  a later successful delivery able to make the monotonic transition.
+- [x] A public host-only `ChildResultInspection` contains the cached
+  `ChildTerminalResult` and the current `result_delivered` value.
+  `SupervisorPayload::InspectChildResult` returns this inspection without
+  changing delivery state and is not registered as a model-visible tool.
+- [x] Repeated host inspection is stable and non-mutating. It reports `false`
+  until a parent-facing operation successfully returns terminal content and
+  reports `true` afterward, until explicit close removes the child.
+- [x] The existing model-visible JSON shapes for `child_status`,
+  `list_child_agents`, `wait_child_agent`, and `join_child_agent` remain
+  unchanged; `result_delivered` is exposed on the host inspection result only.
+
 ### `child_status`
 
 - [x] `child_status` accepts `{ "child_id": string }`.

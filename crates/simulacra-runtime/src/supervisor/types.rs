@@ -103,6 +103,13 @@ pub struct ChildTerminalResult {
     pub result: Result<AgentLoopOutput, String>,
 }
 
+/// Host-only snapshot of a cached terminal result and its delivery state.
+#[derive(Debug, Clone)]
+pub struct ChildResultInspection {
+    pub terminal: ChildTerminalResult,
+    pub result_delivered: bool,
+}
+
 pub(crate) fn final_assistant_message(output: &AgentLoopOutput) -> Option<String> {
     output
         .messages
@@ -190,6 +197,11 @@ pub enum SupervisorPayload {
     JoinChild(
         AgentId,
         tokio::sync::oneshot::Sender<Result<ChildTerminalResult, String>>,
+    ),
+    /// Inspect cached terminal state without delivering it to the parent model.
+    InspectChildResult(
+        AgentId,
+        tokio::sync::oneshot::Sender<Result<ChildResultInspection, String>>,
     ),
     /// Cancel a live child agent by id.
     CancelChild(AgentId, tokio::sync::oneshot::Sender<Result<(), String>>),

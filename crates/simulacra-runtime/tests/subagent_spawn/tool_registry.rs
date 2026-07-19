@@ -210,6 +210,12 @@ fn configured_spawn_capable_child_registry_includes_all_child_control_tools() {
             "spawn-capable configured child should include {expected}; tools were: {tool_names:?}"
         );
     }
+    for host_only_name in ["inspect_child_result", "InspectChildResult"] {
+        assert!(
+            !tool_names.contains(host_only_name),
+            "host-only inspection must not be registered in the child model tool catalog: {tool_names:?}"
+        );
+    }
 }
 
 fn configured_child_catalog_config(

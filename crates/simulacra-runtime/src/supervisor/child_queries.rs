@@ -18,28 +18,64 @@ impl AgentSupervisor {
             return;
         };
         if let Some(result) = state.result.clone() {
-            let _ = result_tx.send(Ok(result));
+            if result_tx.send(Ok(result)).is_ok() {
+                state.result_delivered = true;
+            }
         } else {
             state.join_waiters.push(result_tx);
         }
     }
 
-    pub(super) fn child_status(&self, child_id: &AgentId) -> Result<ChildStatus, String> {
+    pub(super) fn inspect_child_result(
+        &self,
+        child_id: &AgentId,
+    ) -> Result<ChildResultInspection, String> {
         let results = lock_mutex(&self.child_results, "child_results");
         let Some(state) = results.get(child_id) else {
             return Err(format!("unknown or closed child_id: {}", child_id.0));
         };
-        Ok(status_from_state(state))
+        let Some(terminal) = state.result.clone() else {
+            return Err(format!("child_id is still running: {}", child_id.0));
+        };
+        Ok(ChildResultInspection {
+            terminal,
+            result_delivered: state.result_delivered,
+        })
     }
 
-    pub(super) fn list_children(&self) -> Vec<ChildRosterEntry> {
-        let results = lock_mutex(&self.child_results, "child_results");
+    pub(super) fn send_child_status(
+        &self,
+        child_id: &AgentId,
+        result_tx: tokio::sync::oneshot::Sender<Result<ChildStatus, String>>,
+    ) {
+        let mut results = lock_mutex(&self.child_results, "child_results");
+        let Some(state) = results.get_mut(child_id) else {
+            let _ = result_tx.send(Err(format!("unknown or closed child_id: {}", child_id.0)));
+            return;
+        };
+        let status = status_from_state(state);
+        if result_tx.send(Ok(status)).is_ok() && state.result.is_some() {
+            state.result_delivered = true;
+        }
+    }
+
+    pub(super) fn send_child_roster(
+        &self,
+        result_tx: tokio::sync::oneshot::Sender<Result<Vec<ChildRosterEntry>, String>>,
+    ) {
+        let mut results = lock_mutex(&self.child_results, "child_results");
         let mut entries = results
             .values()
             .map(roster_entry_from_state)
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.child_id.cmp(&right.child_id));
-        entries
+        if result_tx.send(Ok(entries)).is_ok() {
+            for state in results.values_mut() {
+                if state.result.is_some() {
+                    state.result_delivered = true;
+                }
+            }
+        }
     }
 
     pub(super) fn wait_child(
@@ -54,7 +90,9 @@ impl AgentSupervisor {
             return;
         };
         if let Some(terminal) = state.result.clone() {
-            let _ = result_tx.send(Ok(wait_result_terminal(terminal)));
+            if result_tx.send(Ok(wait_result_terminal(terminal))).is_ok() {
+                state.result_delivered = true;
+            }
             return;
         }
         if timeout.is_zero() {
@@ -123,11 +161,22 @@ impl AgentSupervisor {
         }
 
         for child_id in &child_ids {
-            let state = results
+            let terminal = results
                 .get(child_id)
-                .expect("child existence checked before terminal scan");
-            if let Some(terminal) = state.result.clone() {
-                let _ = result_tx.send(Ok(wait_children_result_terminal(child_ids, terminal)));
+                .expect("child existence checked before terminal scan")
+                .result
+                .clone();
+            if let Some(terminal) = terminal {
+                let selected_child_id = child_id.clone();
+                if result_tx
+                    .send(Ok(wait_children_result_terminal(child_ids, terminal)))
+                    .is_ok()
+                {
+                    results
+                        .get_mut(&selected_child_id)
+                        .expect("selected child exists while results lock is held")
+                        .result_delivered = true;
+                }
                 return;
             }
         }
@@ -192,49 +241,49 @@ impl AgentSupervisor {
         child_results: &Arc<Mutex<HashMap<AgentId, ChildRunState>>>,
         mut terminal: ChildTerminalResult,
     ) {
-        let (join_waiters, wait_waiters) = {
-            let mut results = lock_mutex(child_results, "child_results");
-            let finished_at_ms = now_ms();
-            let fallback_metadata = ChildMetadata {
-                child_id: terminal.child_id.clone(),
-                agent_type: terminal.agent_type.clone(),
-                task: String::new(),
-                parent_id: AgentId(String::new()),
-                started_at_ms: finished_at_ms,
-                finished_at_ms: None,
-            };
-            let had_state = results.contains_key(&terminal.child_id);
-            let state = results
-                .entry(terminal.child_id.clone())
-                .or_insert_with(|| ChildRunState {
-                    metadata: fallback_metadata,
-                    result: None,
-                    join_waiters: Vec::new(),
-                    wait_waiters: Vec::new(),
-                });
-            state.metadata.finished_at_ms = Some(finished_at_ms);
-            if had_state {
-                terminal.elapsed_ms = finished_at_ms.saturating_sub(state.metadata.started_at_ms);
-            }
-            state.result = Some(terminal.clone());
-            let join_waiters = std::mem::take(&mut state.join_waiters);
-            let wait_waiters = std::mem::take(&mut state.wait_waiters);
-            for waiter in &wait_waiters {
-                for waited_child_id in &waiter.child_ids {
-                    if waited_child_id == &terminal.child_id {
-                        continue;
-                    }
-                    if let Some(waited_state) = results.get_mut(waited_child_id) {
-                        waited_state
-                            .wait_waiters
-                            .retain(|candidate| candidate.id != waiter.id);
-                    }
+        let mut results = lock_mutex(child_results, "child_results");
+        let finished_at_ms = now_ms();
+        let fallback_metadata = ChildMetadata {
+            child_id: terminal.child_id.clone(),
+            agent_type: terminal.agent_type.clone(),
+            task: String::new(),
+            parent_id: AgentId(String::new()),
+            started_at_ms: finished_at_ms,
+            finished_at_ms: None,
+        };
+        let had_state = results.contains_key(&terminal.child_id);
+        let state = results
+            .entry(terminal.child_id.clone())
+            .or_insert_with(|| ChildRunState {
+                metadata: fallback_metadata,
+                result: None,
+                result_delivered: false,
+                join_waiters: Vec::new(),
+                wait_waiters: Vec::new(),
+            });
+        state.metadata.finished_at_ms = Some(finished_at_ms);
+        if had_state {
+            terminal.elapsed_ms = finished_at_ms.saturating_sub(state.metadata.started_at_ms);
+        }
+        state.result = Some(terminal.clone());
+        let join_waiters = std::mem::take(&mut state.join_waiters);
+        let wait_waiters = std::mem::take(&mut state.wait_waiters);
+        for waiter in &wait_waiters {
+            for waited_child_id in &waiter.child_ids {
+                if waited_child_id == &terminal.child_id {
+                    continue;
+                }
+                if let Some(waited_state) = results.get_mut(waited_child_id) {
+                    waited_state
+                        .wait_waiters
+                        .retain(|candidate| candidate.id != waiter.id);
                 }
             }
-            (join_waiters, wait_waiters)
-        };
+        }
+
+        let mut delivered = false;
         for waiter in join_waiters {
-            let _ = waiter.send(Ok(terminal.clone()));
+            delivered |= waiter.send(Ok(terminal.clone())).is_ok();
         }
         for waiter in wait_waiters {
             let sender = waiter
@@ -244,16 +293,26 @@ impl AgentSupervisor {
                 .take();
             match sender {
                 Some(ChildWaiterSender::Single(sender)) => {
-                    let _ = sender.send(Ok(wait_result_terminal(terminal.clone())));
+                    delivered |= sender
+                        .send(Ok(wait_result_terminal(terminal.clone())))
+                        .is_ok();
                 }
                 Some(ChildWaiterSender::Any(sender)) => {
-                    let _ = sender.send(Ok(wait_children_result_terminal(
-                        waiter.child_ids,
-                        terminal.clone(),
-                    )));
+                    delivered |= sender
+                        .send(Ok(wait_children_result_terminal(
+                            waiter.child_ids,
+                            terminal.clone(),
+                        )))
+                        .is_ok();
                 }
                 None => {}
             }
+        }
+        if delivered {
+            results
+                .get_mut(&terminal.child_id)
+                .expect("terminal child remains cached while results lock is held")
+                .result_delivered = true;
         }
     }
 }
