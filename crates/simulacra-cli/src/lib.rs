@@ -28,7 +28,7 @@ use simulacra_memory::{
     Embedder, HitIdCache, MarkdownSectionChunker, MemoryStore, RecentWritesBuffer,
     SqliteMemoryStore, SqliteVectorIndex, VectorIndex,
 };
-use simulacra_provider::{AnthropicProvider, OpenAiProvider};
+use simulacra_provider::{AnthropicProvider, BedrockProvider, OpenAiProvider};
 use simulacra_runtime::{
     AgentLoop, AgentLoopConfig, CountingJournalStorage, InMemoryJournalStorage,
     SqliteJournalStorage,
@@ -543,6 +543,8 @@ pub fn infer_provider_kind(model: &str) -> Result<ProviderKind> {
         Ok(ProviderKind::Anthropic)
     } else if model.starts_with("ollama:") {
         Ok(ProviderKind::Ollama)
+    } else if model.starts_with("bedrock:") {
+        Ok(ProviderKind::Bedrock)
     } else {
         // Everything else goes through the OpenAI-compatible endpoint.
         // This covers gpt-*, o1-*, o3-*, and also Groq/Together/OpenRouter
@@ -2185,6 +2187,15 @@ fn build_provider(boot: &CliBootstrap) -> Result<Box<dyn Provider>> {
         ProviderKind::Ollama => {
             // Ollama uses OpenAI-compatible API with no auth
             Ok(Box::new(OpenAiProvider::new("ollama", &boot.model)))
+        }
+        ProviderKind::Bedrock => {
+            let region = std::env::var("AWS_REGION")
+                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                .context(
+                    "AWS_REGION or AWS_DEFAULT_REGION not set. Required for bedrock: models.",
+                )?;
+            let model_id = boot.model.strip_prefix("bedrock:").unwrap_or(&boot.model);
+            Ok(Box::new(BedrockProvider::new(region, model_id)))
         }
     }
 }

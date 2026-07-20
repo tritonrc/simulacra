@@ -30,6 +30,7 @@ pub enum ProviderKind {
     Anthropic,
     OpenAI,
     Ollama,
+    Bedrock,
 }
 
 // ---------------------------------------------------------------------------

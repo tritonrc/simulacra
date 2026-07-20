@@ -19,3 +19,9 @@ mod openai;
 
 #[cfg(feature = "openai")]
 pub use openai::OpenAiProvider;
+
+#[cfg(feature = "bedrock")]
+mod bedrock;
+
+#[cfg(feature = "bedrock")]
+pub use bedrock::BedrockProvider;
