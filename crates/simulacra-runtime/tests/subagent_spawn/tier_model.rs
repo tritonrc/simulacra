@@ -231,6 +231,7 @@ async fn generic_spawn_with_unknown_tier_errors() {
         tiers,
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
 
     let result = tool
@@ -393,6 +394,7 @@ async fn generic_spawn_empty_agent_type_string_errors() {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
 
     let result = tool

@@ -1725,6 +1725,7 @@ impl SimulacraEngine {
                             tiers: config_for_worker.tiers.clone(),
                             parent_budget: Arc::clone(&budget_arc),
                             parent_model: model_clone.clone(),
+                            guidance: None,
                         }))
                         .map_err(|e| format!("failed to register spawn_agent tool: {e}"))?;
                     registry

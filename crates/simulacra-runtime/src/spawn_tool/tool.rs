@@ -13,6 +13,14 @@ is needed, and close_child_agent only to clean up a terminal child handle.";
 // SpawnAgentTool
 // ---------------------------------------------------------------------------
 
+/// Host-provided, model-visible guidance for the `spawn_agent` contract.
+pub struct SpawnAgentGuidance {
+    /// Tool description shown to the model in `definition()`.
+    pub description: String,
+    /// Appended to the spawn acknowledgement JSON as a `note` field.
+    pub result_note: Option<String>,
+}
+
 /// Tool that spawns a supervised child agent via the supervisor's mpsc channel.
 ///
 /// When the LLM calls `spawn_agent`, this tool sends a `SupervisorPayload::Spawn`
@@ -39,6 +47,8 @@ pub struct SpawnAgentTool {
     /// Parent model, used to derive the inherited tier label for generic
     /// children without changing their model-selection fallback.
     pub parent_model: String,
+    /// Optional host policy for the model-visible spawn contract.
+    pub guidance: Option<SpawnAgentGuidance>,
 }
 
 impl simulacra_types::Tool for SpawnAgentTool {
@@ -66,7 +76,10 @@ impl simulacra_types::Tool for SpawnAgentTool {
         };
         ToolDefinition {
             name: "spawn_agent".to_string(),
-            description: SPAWN_AGENT_DESCRIPTION.to_string(),
+            description: self.guidance.as_ref().map_or_else(
+                || SPAWN_AGENT_DESCRIPTION.to_string(),
+                |guidance| guidance.description.clone(),
+            ),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -354,11 +367,22 @@ impl simulacra_types::Tool for SpawnAgentTool {
             })?;
 
             match result_rx.await {
-                Ok(Ok(ack)) => Ok(serde_json::json!({
-                    "child_id": ack.child_id.0,
-                    "agent_type": ack.agent_type,
-                    "status": "running"
-                })),
+                Ok(Ok(ack)) => {
+                    let mut acknowledgement = serde_json::json!({
+                        "child_id": ack.child_id.0,
+                        "agent_type": ack.agent_type,
+                        "status": "running"
+                    });
+                    if let (Some(object), Some(note)) = (
+                        acknowledgement.as_object_mut(),
+                        self.guidance
+                            .as_ref()
+                            .and_then(|guidance| guidance.result_note.as_ref()),
+                    ) {
+                        object.insert("note".to_string(), serde_json::Value::String(note.clone()));
+                    }
+                    Ok(acknowledgement)
+                }
                 Ok(Err(err)) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
                     "child {child_id} (agent_type={agent_type_label}) failed: {err}"
                 ))),

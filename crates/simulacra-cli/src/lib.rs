@@ -1240,6 +1240,7 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
                 tiers: config.tiers.clone(),
                 parent_budget: Arc::clone(&budget_arc),
                 parent_model: model.clone(),
+                guidance: None,
             }))
             .context("failed to register spawn_agent tool")?;
         registry

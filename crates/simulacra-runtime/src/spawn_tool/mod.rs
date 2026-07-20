@@ -24,7 +24,7 @@ pub use child_control_tools::{
 };
 pub use factory::AgentTaskFactory;
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
-pub use tool::SpawnAgentTool;
+pub use tool::{SpawnAgentGuidance, SpawnAgentTool};
 pub use types::{
     ChildCellConfigurator, ChildProviderFactory, ChildToolRegistrar, NoopContextStrategy,
     ProviderKind,

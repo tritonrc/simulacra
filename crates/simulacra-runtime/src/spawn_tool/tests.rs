@@ -12,6 +12,126 @@ use simulacra_types::{
 };
 use simulacra_vfs::MemoryFs;
 
+const STOCK_SPAWN_AGENT_DESCRIPTION: &str = "\
+Spawn a supervised child agent for a concrete, bounded, independent subtask. \
+Do not delegate immediate critical-path blockers when the parent cannot make \
+progress until the answer returns. This tool returns a live child handle, not \
+a final answer. After spawning, continue non-overlapping parent work; use \
+child_status for cheap nonblocking inspection, wait_child_agent for bounded \
+polling or wait-any orchestration, join_child_agent when the terminal result \
+is needed, and close_child_agent only to clean up a terminal child handle.";
+
+fn spawn_tool_with_guidance(
+    guidance: Option<SpawnAgentGuidance>,
+) -> (
+    SpawnAgentTool,
+    tokio::sync::mpsc::Receiver<SupervisorMessage>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    (
+        SpawnAgentTool {
+            sender,
+            can_spawn: vec!["reviewer".into()],
+            activity_sink: Arc::new(NoopActivitySink),
+            parent_id: AgentId("parent-agent".into()),
+            tiers: TierMap::new(),
+            parent_budget: Arc::new(Mutex::new(ResourceBudget::new(100, 10, Decimal::ZERO, 1))),
+            parent_model: "parent-model".into(),
+            guidance,
+        },
+        receiver,
+    )
+}
+
+async fn call_spawn_tool_with_ack(
+    tool: &SpawnAgentTool,
+    mut receiver: tokio::sync::mpsc::Receiver<SupervisorMessage>,
+) -> serde_json::Value {
+    let arguments = serde_json::json!({
+        "agent_type": "reviewer",
+        "task": "review the focused change",
+        "budget": {
+            "max_tokens": 10,
+            "max_turns": 1,
+            "max_cost": "0",
+            "max_sub_agents": 0
+        }
+    });
+    let capability = CapabilityToken::default();
+    let call = tool.call(arguments, &capability);
+    let acknowledge = async move {
+        let message = receiver
+            .recv()
+            .await
+            .expect("spawn tool should send a supervisor request");
+        match message.payload {
+            SupervisorPayload::Spawn(_, result_tx) => result_tx
+                .send(Ok(crate::supervisor::SpawnAck {
+                    child_id: AgentId("child-fixed".into()),
+                    agent_type: "reviewer".into(),
+                }))
+                .expect("spawn tool should await the acknowledgement"),
+            other => panic!("expected spawn request, got {other:?}"),
+        }
+    };
+    let (result, ()) = tokio::join!(call, acknowledge);
+    result.expect("spawn should return its acknowledgement")
+}
+
+#[tokio::test]
+async fn absent_spawn_guidance_preserves_stock_definition_and_acknowledgement_bytes() {
+    let (tool, receiver) = spawn_tool_with_guidance(None);
+
+    assert_eq!(tool.definition().description, STOCK_SPAWN_AGENT_DESCRIPTION);
+    let acknowledgement = call_spawn_tool_with_ack(&tool, receiver).await;
+    assert_eq!(
+        serde_json::to_vec(&acknowledgement).expect("acknowledgement should encode"),
+        br#"{"agent_type":"reviewer","child_id":"child-fixed","status":"running"}"#
+    );
+    assert!(acknowledgement.get("note").is_none());
+}
+
+#[tokio::test]
+async fn spawn_guidance_overrides_description_and_appends_verbatim_result_note() {
+    let description = "Host lifecycle guidance.\nWait for a wake before harvesting.";
+    let result_note = "Child accepted; keep working until the host wakes you.\nDo not poll.";
+    let (tool, receiver) = spawn_tool_with_guidance(Some(SpawnAgentGuidance {
+        description: description.into(),
+        result_note: Some(result_note.into()),
+    }));
+
+    assert_eq!(tool.definition().description, description);
+    let acknowledgement = call_spawn_tool_with_ack(&tool, receiver).await;
+    assert_eq!(
+        acknowledgement.get("note").and_then(|note| note.as_str()),
+        Some(result_note)
+    );
+}
+
+#[tokio::test]
+async fn spawn_guidance_with_authored_empty_result_note_keeps_present_note_key() {
+    let (tool, receiver) = spawn_tool_with_guidance(Some(SpawnAgentGuidance {
+        description: "Host lifecycle guidance.".into(),
+        result_note: Some(String::new()),
+    }));
+
+    let acknowledgement = call_spawn_tool_with_ack(&tool, receiver).await;
+    assert_eq!(acknowledgement.get("note"), Some(&serde_json::json!("")));
+}
+
+#[tokio::test]
+async fn spawn_guidance_without_result_note_overrides_description_and_omits_note() {
+    let description = "Use the host-managed child lifecycle verbatim.";
+    let (tool, receiver) = spawn_tool_with_guidance(Some(SpawnAgentGuidance {
+        description: description.into(),
+        result_note: None,
+    }));
+
+    assert_eq!(tool.definition().description, description);
+    let acknowledgement = call_spawn_tool_with_ack(&tool, receiver).await;
+    assert!(acknowledgement.get("note").is_none());
+}
+
 fn parent_with_memory() -> CapabilityToken {
     CapabilityToken {
         paths_read: vec![PathPattern("/**".into())],
@@ -1031,6 +1151,7 @@ async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_pro
             4,
         ))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
     let join_tool = JoinChildAgentTool {
         sender: supervisor_tx.clone(),

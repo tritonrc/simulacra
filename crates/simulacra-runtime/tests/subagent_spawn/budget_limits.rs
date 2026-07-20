@@ -438,6 +438,7 @@ async fn spawn_agent_tool_rejects_agent_type_not_in_call_site_spawn_types() {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
     let capability = CapabilityToken {
         spawn_types: vec!["reviewer".into()],

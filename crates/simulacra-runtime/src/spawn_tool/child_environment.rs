@@ -111,6 +111,7 @@ fn build_child_registry(
             tiers: spawn_tool.tiers.clone(),
             parent_budget: child_budget,
             parent_model: spawn_tool.parent_model.clone(),
+            guidance: None,
         }))?;
         registry.register(Box::new(JoinChildAgentTool {
             sender: sender.clone(),

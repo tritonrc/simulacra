@@ -380,6 +380,7 @@ async fn run_spawn_tool_call(
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
     let call_future = tool.call(arguments, &CapabilityToken::default());
     let receive_future = async move {

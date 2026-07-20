@@ -48,6 +48,22 @@ semantics.
 - [x] These description changes do not change supervisor behavior, tool names,
   input schemas, registry exposure, child lifecycle semantics, or provider
   `ToolDefinition` shape.
+- [x] `SpawnAgentTool` accepts an optional coherent `SpawnAgentGuidance` host
+  policy containing a model-visible `description` and an optional
+  `result_note`; hosts set the complete spawn contract together rather than
+  toggling wake support with a boolean or independent loose fields.
+- [x] With no host guidance, `spawn_agent` keeps the stock polling description
+  and its successful acknowledgement remains byte-for-byte
+  `{\"agent_type\":...,\"child_id\":...,\"status\":\"running\"}` with no
+  `note` field.
+- [x] With host guidance, `definition()` uses the configured description
+  verbatim and a configured result note is appended verbatim as `note` on the
+  successful spawn acknowledgement.
+- [x] Host guidance with no result note still overrides the description and
+  omits the `note` key from the successful spawn acknowledgement.
+- [x] Existing CLI and server construction paths use no host guidance and keep
+  the stock polling contract; host-specific wake guidance is supplied by the
+  incorporating host rather than embedded in Simulacra's default text.
 
 ### Supervisor state
 

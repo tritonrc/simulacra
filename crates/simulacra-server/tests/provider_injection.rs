@@ -1166,6 +1166,16 @@ async fn catalog_spawn_capability_registers_spawn_agent_for_server_runs() {
             "server-launched agents with spawn capability must receive {expected}; tools were: {first_call_tool_names:?}"
         );
     }
+
+    let spawn_definition = first_call_tools
+        .iter()
+        .find(|tool| tool.name == "spawn_agent")
+        .expect("server should register spawn_agent");
+    assert_eq!(
+        spawn_definition.description,
+        "Spawn a supervised child agent for a concrete, bounded, independent subtask. Do not delegate immediate critical-path blockers when the parent cannot make progress until the answer returns. This tool returns a live child handle, not a final answer. After spawning, continue non-overlapping parent work; use child_status for cheap nonblocking inspection, wait_child_agent for bounded polling or wait-any orchestration, join_child_agent when the terminal result is needed, and close_child_agent only to clean up a terminal child handle.",
+        "server construction must use no host override and retain the stock spawn guidance"
+    );
 }
 
 #[tokio::test]

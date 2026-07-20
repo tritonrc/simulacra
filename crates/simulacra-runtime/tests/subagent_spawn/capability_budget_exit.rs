@@ -407,6 +407,7 @@ async fn spawn_agent_tool_returns_error_when_supervisor_drops_result_channel() {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
 
     let call_future = tool.call(
@@ -461,6 +462,7 @@ fn make_real_spawn_agent_tool() -> SpawnAgentTool {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     }
 }
 

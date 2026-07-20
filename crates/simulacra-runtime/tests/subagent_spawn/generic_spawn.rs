@@ -186,6 +186,7 @@ async fn generic_spawn_with_both_agent_type_and_system_prompt_errors() {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
 
     let result = tool
@@ -230,6 +231,7 @@ async fn generic_spawn_with_neither_agent_type_nor_system_prompt_errors() {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
 
     let result = tool
@@ -272,6 +274,7 @@ async fn generic_spawn_system_prompt_exceeds_8kb_errors() {
         tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-model".into(),
+        guidance: None,
     };
 
     let oversized_prompt = "x".repeat(9000);

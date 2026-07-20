@@ -755,6 +755,7 @@ async fn generic_spawn_without_tier_reverse_looks_up_parent_model_for_resolved_t
         tiers,
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
         parent_model: "parent-reasoning-model".into(),
+        guidance: None,
     };
 
     let call_future = tool.call(

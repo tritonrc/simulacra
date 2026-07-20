@@ -212,6 +212,12 @@ fn interactive_sessions_register_spawn_agent_and_list_it_in_tools_output() {
 
     let view = session.dispatch_command("/tools");
 
+    let stock_spawn_description = "Spawn a supervised child agent for a concrete, bounded, independent subtask. Do not delegate immediate critical-path blockers when the parent cannot make progress until the answer returns. This tool returns a live child handle, not a final answer. After spawning, continue non-overlapping parent work; use child_status for cheap nonblocking inspection, wait_child_agent for bounded polling or wait-any orchestration, join_child_agent when the terminal result is needed, and close_child_agent only to clean up a terminal child handle.";
+    assert!(
+        contains_text(&view.visible_output, stock_spawn_description),
+        "CLI bootstrap must register spawn_agent with the complete stock description"
+    );
+
     for tool_name in [
         "spawn_agent",
         "join_child_agent",
