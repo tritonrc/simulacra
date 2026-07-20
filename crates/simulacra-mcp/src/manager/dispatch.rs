@@ -102,10 +102,8 @@ impl McpManager {
         }
 
         // General HTTP error check — don't fall through to JSON parsing on error.
-        if status >= 400 {
-            return Err(McpError::TransportError(format!(
-                "server returned HTTP {status}"
-            )));
+        if let Some(err) = http_status_error(status) {
+            return Err(err);
         }
 
         // S024: Branch on Content-Type for streamable HTTP responses.
@@ -148,5 +146,53 @@ impl McpManager {
             )
         })?;
         Ok(result)
+    }
+}
+
+/// Classifies an HTTP status >= 400 into a retriable [`McpError`]. 401/403 are
+/// auth failures (e.g. an expired credential) -> [`McpError::ConnectionFailed`],
+/// matching the handshake path (`streamable_http.rs`) so the reconnect log's
+/// `error_kind` distinguishes a token/auth problem from a transport/route
+/// failure. Any other >= 400 status is a [`McpError::TransportError`]. Returns
+/// `None` for < 400. Both error variants are retriable (`is_transport_error`),
+/// so this affects classification only, not reconnect behavior.
+fn http_status_error(status: u16) -> Option<McpError> {
+    let detail = format!("server returned HTTP {status}");
+    match status {
+        401 | 403 => Some(McpError::ConnectionFailed(detail)),
+        s if s >= 400 => Some(McpError::TransportError(detail)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod dispatch_status_tests {
+    use super::http_status_error;
+    use crate::error::McpError;
+
+    #[test]
+    fn auth_statuses_classify_as_connection_failed_others_as_transport() {
+        // 401/403 must be ConnectionFailed so a dispatch-path token expiry is
+        // distinguishable in the reconnect log (error_kind=connection_failed),
+        // matching the handshake path — the gap that made the outage
+        // undiagnosable when every >=400 dispatch error was TransportError.
+        assert!(matches!(
+            http_status_error(401),
+            Some(McpError::ConnectionFailed(_))
+        ));
+        assert!(matches!(
+            http_status_error(403),
+            Some(McpError::ConnectionFailed(_))
+        ));
+        assert!(matches!(
+            http_status_error(404),
+            Some(McpError::TransportError(_))
+        ));
+        assert!(matches!(
+            http_status_error(500),
+            Some(McpError::TransportError(_))
+        ));
+        assert!(http_status_error(200).is_none());
+        assert!(http_status_error(399).is_none());
     }
 }
