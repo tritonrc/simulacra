@@ -76,7 +76,7 @@ impl McpManager {
 
         tracing::warn!(
             server = %server,
-            error = "transport failure (details redacted)",
+            error_kind = %first_err.kind(),
             "MCP connection lost, attempting reconnection"
         );
 
@@ -114,7 +114,7 @@ impl McpManager {
                 tracing::warn!(
                     server = %server,
                     attempt = attempt + 1,
-                    error = "handshake failure (details redacted)",
+                    error_kind = %err.kind(),
                     "MCP reconnection handshake failed"
                 );
                 last_err = err;
@@ -134,7 +134,7 @@ impl McpManager {
                     tracing::warn!(
                         server = %server,
                         attempt = attempt + 1,
-                        error = "transport failure (details redacted)",
+                        error_kind = %e.kind(),
                         "MCP reconnection attempt failed"
                     );
                     last_err = e;
@@ -142,6 +142,12 @@ impl McpManager {
             }
         }
 
+        tracing::warn!(
+            server = %server,
+            attempts = MAX_RETRIES,
+            error_kind = %last_err.kind(),
+            "MCP reconnection exhausted; giving up"
+        );
         Err(last_err)
     }
 
