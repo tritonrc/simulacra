@@ -167,6 +167,7 @@ pub(crate) fn parse_json_response(
             content,
             tool_calls,
             tool_call_id: None,
+            provider_content: vec![],
         },
         token_usage: TokenUsage {
             input_tokens,
@@ -272,12 +273,16 @@ impl<'a> ConverseStreamAccumulator<'a> {
         &mut self,
         frame: &ParsedFrame,
     ) -> Result<(), simulacra_types::ProviderError> {
-        if frame.message_type.as_deref() == Some("error") {
+        if matches!(
+            frame.message_type.as_deref(),
+            Some("error") | Some("exception")
+        ) {
             let message = frame
                 .payload
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("bedrock stream error")
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or("response contained no error message")
                 .to_string();
             return Err(simulacra_types::ProviderError::Other(format!(
                 "bedrock stream error: {message}"
@@ -412,6 +417,7 @@ impl<'a> ConverseStreamAccumulator<'a> {
                 content: self.content,
                 tool_calls: self.tool_calls,
                 tool_call_id: None,
+                provider_content: vec![],
             },
             token_usage: TokenUsage {
                 input_tokens: self.input_tokens,
@@ -435,6 +441,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -451,6 +458,7 @@ mod tests {
                 })
                 .collect(),
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -460,6 +468,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -469,6 +478,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: Some(id.into()),
+            provider_content: vec![],
         }
     }
 
@@ -560,6 +570,10 @@ mod tests {
         let resp = parse_json_response(&body, "default", Some("req-1".into())).unwrap();
         assert_eq!(resp.message.content, "Hello!");
         assert!(resp.message.tool_calls.is_empty());
+        assert!(
+            resp.message.provider_content.is_empty(),
+            "Bedrock text responses must initialize shared provider content"
+        );
         assert_eq!(resp.token_usage.input_tokens, 10);
         assert_eq!(resp.token_usage.output_tokens, 5);
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
@@ -596,5 +610,60 @@ mod tests {
             json!({"location":"SF"})
         );
         assert_eq!(resp.finish_reason, FinishReason::ToolUse);
+        assert!(
+            resp.message.provider_content.is_empty(),
+            "Bedrock tool-use responses must initialize shared provider content"
+        );
+    }
+
+    #[test]
+    fn exception_frames_surface_representative_bedrock_messages() {
+        for (exception_type, message) in [
+            (
+                "validationException",
+                "The requested model identifier is invalid",
+            ),
+            ("throttlingException", "Too many requests; retry later"),
+            (
+                "modelStreamErrorException",
+                "The model stream terminated unexpectedly",
+            ),
+        ] {
+            let mut accumulator = ConverseStreamAccumulator::new("model", None, None);
+            let frame = ParsedFrame {
+                message_type: Some("exception".into()),
+                event_type: Some(exception_type.into()),
+                payload: json!({ "message": message }),
+            };
+
+            let error = accumulator
+                .process_frame(&frame)
+                .expect_err("Bedrock exception frames must fail the stream");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(message),
+                "{exception_type} lost Bedrock message {message:?}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn exception_frames_without_nonempty_message_use_safe_fallback() {
+        for payload in [json!({}), json!({ "message": "" })] {
+            let mut accumulator = ConverseStreamAccumulator::new("model", None, None);
+            let frame = ParsedFrame {
+                message_type: Some("exception".into()),
+                event_type: Some("modelStreamErrorException".into()),
+                payload,
+            };
+
+            let error = accumulator
+                .process_frame(&frame)
+                .expect_err("exception frame must never become a successful stream");
+            assert!(
+                error.to_string().contains("bedrock stream error"),
+                "missing or empty Bedrock exception messages need a safe fallback: {error}"
+            );
+        }
     }
 }

@@ -964,6 +964,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -973,6 +974,7 @@ mod tests {
             content: content.into(),
             tool_calls: vec![],
             tool_call_id: None,
+            provider_content: vec![],
         }
     }
 
@@ -1124,6 +1126,17 @@ mod tests {
         body
     }
 
+    fn streaming_exception_body(message: &str) -> Vec<u8> {
+        frame(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "throttlingException"),
+                (":content-type", "application/json"),
+            ],
+            &serde_json::to_vec(&json!({ "message": message })).unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn budget_exhausted_returns_error_without_http_call() {
         let fake = FakeHttpClient {
@@ -1157,6 +1170,7 @@ mod tests {
         assert_eq!(resp.message.role, Role::Assistant);
         assert_eq!(resp.message.content, "Hello, world!");
         assert!(resp.message.tool_calls.is_empty());
+        assert!(resp.message.provider_content.is_empty());
         assert_eq!(resp.token_usage.input_tokens, 10);
         assert_eq!(resp.token_usage.output_tokens, 25);
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
@@ -1183,6 +1197,7 @@ mod tests {
         assert_eq!(resp.message.tool_calls.len(), 1);
         assert_eq!(resp.message.tool_calls[0].id, "tu_1");
         assert_eq!(resp.message.tool_calls[0].name, "get_weather");
+        assert!(resp.message.provider_content.is_empty());
         assert_eq!(
             resp.message.tool_calls[0].arguments,
             json!({"location":"SF"})
@@ -1416,9 +1431,44 @@ mod tests {
         assert_eq!(resp.message.role, Role::Assistant);
         assert_eq!(resp.message.content, "Hello");
         assert!(resp.message.tool_calls.is_empty());
+        assert!(resp.message.provider_content.is_empty());
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.token_usage.input_tokens, 11);
         assert_eq!(resp.token_usage.output_tokens, 7);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_propagates_encoded_exception_frame_message_as_error() {
+        let mut headers = response_headers();
+        headers.insert(
+            "content-type".to_owned(),
+            "application/vnd.amazon.eventstream".to_owned(),
+        );
+        let message = "Bedrock throttled the model stream";
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &streaming_exception_body(message),
+            headers,
+        );
+        let provider = provider(Box::new(fake));
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let error = StreamingProvider::chat_stream(
+            &provider,
+            &[user("stream this")],
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect_err("encoded exception frame must not return partial or empty success");
+
+        assert!(
+            error.to_string().contains(message),
+            "streaming error lost Bedrock payload message: {error}"
+        );
+        assert!(sink.events().is_empty());
     }
 
     #[tokio::test]
@@ -1466,13 +1516,15 @@ mod tests {
                 },
             ]
         );
+        assert!(resp.message.content.is_empty());
         assert_eq!(resp.message.tool_calls.len(), 1);
         assert_eq!(resp.message.tool_calls[0].id, "tu_1");
         assert_eq!(resp.message.tool_calls[0].name, "get_weather");
         assert_eq!(
             resp.message.tool_calls[0].arguments,
-            json!({"location":"SF"}),
+            json!({"location":"SF"})
         );
+        assert!(resp.message.provider_content.is_empty());
         assert_eq!(resp.finish_reason, FinishReason::ToolUse);
     }
 }

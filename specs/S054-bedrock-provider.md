@@ -110,9 +110,18 @@ The SSE event stream is parsed incrementally. Recognized events:
 ### Streaming
 - [x] `chat_stream` emits `TextDelta` events in arrival order and assembles a final `ProviderResponse`.
 - [x] `chat_stream` emits `ToolCallDelta` events and assembles a final tool-call `ProviderResponse` from `converse-stream`.
+- [x] Non-streaming and streaming Bedrock responses initialize the shared
+  `Message.provider_content` field without losing the ordinary text/tool-call
+  response shape.
+- [x] Event-stream frames whose `:message-type` is `exception` fail the stream
+  with the Bedrock error message rather than being ignored as unknown events or
+  returning an empty/partial success.
 
 ### Selection
 - [x] `ProviderKind::Bedrock` is wired through runtime, server, and CLI provider construction, inferable from a `bedrock:` model prefix.
+- [x] Spawned-agent Bedrock provider construction strips the routing-only
+  `bedrock:` prefix before creating `BedrockProvider`, matching CLI and server
+  parent construction while leaving native model ids unchanged.
 
 ## Observability (see S010)
 

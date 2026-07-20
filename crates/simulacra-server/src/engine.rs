@@ -2073,6 +2073,7 @@ fn engine_provider_kind(kind: &simulacra_runtime::ProviderKind) -> ProviderKind 
         simulacra_runtime::ProviderKind::Anthropic => ProviderKind::Anthropic,
         simulacra_runtime::ProviderKind::OpenAI => ProviderKind::OpenAI,
         simulacra_runtime::ProviderKind::Ollama => ProviderKind::Ollama,
+        simulacra_runtime::ProviderKind::Bedrock => ProviderKind::Bedrock,
     }
 }
 
