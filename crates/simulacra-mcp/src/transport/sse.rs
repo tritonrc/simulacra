@@ -15,6 +15,7 @@ impl McpManager {
         server: &str,
     ) -> Result<serde_json::Value, McpError> {
         let mut accumulated = String::new();
+        let mut received_bytes = 0usize;
         let idle_timeout = std::time::Duration::from_secs(60);
         let mut deadline = tokio::time::Instant::now() + idle_timeout;
 
@@ -28,6 +29,12 @@ impl McpManager {
 
             match tokio::time::timeout(remaining, response.chunk()).await {
                 Ok(Ok(Some(chunk))) => {
+                    received_bytes = received_bytes.saturating_add(chunk.len());
+                    if let Some(limit_bytes) = self.max_response_bytes
+                        && received_bytes > limit_bytes
+                    {
+                        return Err(McpError::ResponseTooLarge { limit_bytes });
+                    }
                     // Reset idle timeout on each received chunk.
                     deadline = tokio::time::Instant::now() + idle_timeout;
                     accumulated.push_str(&String::from_utf8_lossy(&chunk));

@@ -137,6 +137,9 @@ impl McpManager {
                         error_kind = %e.kind(),
                         "MCP reconnection attempt failed"
                     );
+                    if matches!(e, McpError::AuthFailed(_)) {
+                        return Err(e);
+                    }
                     last_err = e;
                 }
             }
