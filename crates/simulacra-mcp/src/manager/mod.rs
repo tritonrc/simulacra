@@ -34,6 +34,8 @@ pub struct McpManager {
     pub(crate) agent_id: AgentId,
     /// Base delay in milliseconds for reconnection exponential backoff.
     pub(crate) reconnect_base_delay_ms: u64,
+    /// Maximum response bytes read from a tool dispatch. `None` is unbounded.
+    pub(crate) max_response_bytes: Option<usize>,
     pub(crate) agent_fuel_remaining: Option<Arc<AtomicU64>>,
     #[cfg(feature = "wasm")]
     pub(crate) instantiation_recorder: Option<Arc<AtomicUsize>>,
@@ -49,6 +51,7 @@ impl McpManager {
             journal: None,
             agent_id: AgentId(String::new()),
             reconnect_base_delay_ms: 1000,
+            max_response_bytes: None,
             agent_fuel_remaining: None,
             #[cfg(feature = "wasm")]
             instantiation_recorder: None,
@@ -65,6 +68,7 @@ impl McpManager {
             journal: Some(journal),
             agent_id,
             reconnect_base_delay_ms: 1000,
+            max_response_bytes: None,
             agent_fuel_remaining: None,
             #[cfg(feature = "wasm")]
             instantiation_recorder: None,
@@ -76,6 +80,11 @@ impl McpManager {
     /// Override the base delay for reconnection backoff (milliseconds).
     pub fn set_reconnect_base_delay_ms(&mut self, ms: u64) {
         self.reconnect_base_delay_ms = ms;
+    }
+
+    /// Set an optional cumulative byte cap for HTTP tool responses.
+    pub fn set_max_response_bytes(&mut self, cap: Option<usize>) {
+        self.max_response_bytes = cap;
     }
 
     /// Set the agent-level fuel budget for WASM MCP calls.

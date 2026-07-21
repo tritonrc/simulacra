@@ -124,10 +124,28 @@ impl McpManager {
             }
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| McpError::ProtocolError(e.to_string()))?;
+        let body: serde_json::Value = if let Some(limit_bytes) = self.max_response_bytes {
+            let mut response = response;
+            let mut received_bytes = 0usize;
+            let mut body = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| McpError::TransportError(e.to_string()))?
+            {
+                received_bytes = received_bytes.saturating_add(chunk.len());
+                if received_bytes > limit_bytes {
+                    return Err(McpError::ResponseTooLarge { limit_bytes });
+                }
+                body.extend_from_slice(&chunk);
+            }
+            serde_json::from_slice(&body).map_err(|e| McpError::ProtocolError(e.to_string()))?
+        } else {
+            response
+                .json()
+                .await
+                .map_err(|e| McpError::ProtocolError(e.to_string()))?
+        };
 
         // WARNING 1: JSON-RPC error envelopes must NOT be returned as Ok.
         // If the response contains an `error` object, surface it as an error.
@@ -149,17 +167,12 @@ impl McpManager {
     }
 }
 
-/// Classifies an HTTP status >= 400 into a retriable [`McpError`]. 401/403 are
-/// auth failures (e.g. an expired credential) -> [`McpError::ConnectionFailed`],
-/// matching the handshake path (`streamable_http.rs`) so the reconnect log's
-/// `error_kind` distinguishes a token/auth problem from a transport/route
-/// failure. Any other >= 400 status is a [`McpError::TransportError`]. Returns
-/// `None` for < 400. Both error variants are retriable (`is_transport_error`),
-/// so this affects classification only, not reconnect behavior.
+/// Classifies dispatch HTTP auth failures separately from retriable transport
+/// failures. Handshake-path status handling is intentionally unchanged.
 fn http_status_error(status: u16) -> Option<McpError> {
     let detail = format!("server returned HTTP {status}");
     match status {
-        401 | 403 => Some(McpError::ConnectionFailed(detail)),
+        401 | 403 => Some(McpError::AuthFailed(detail)),
         s if s >= 400 => Some(McpError::TransportError(detail)),
         _ => None,
     }
@@ -171,18 +184,14 @@ mod dispatch_status_tests {
     use crate::error::McpError;
 
     #[test]
-    fn auth_statuses_classify_as_connection_failed_others_as_transport() {
-        // 401/403 must be ConnectionFailed so a dispatch-path token expiry is
-        // distinguishable in the reconnect log (error_kind=connection_failed),
-        // matching the handshake path — the gap that made the outage
-        // undiagnosable when every >=400 dispatch error was TransportError.
+    fn auth_statuses_classify_as_auth_failed_others_as_transport() {
         assert!(matches!(
             http_status_error(401),
-            Some(McpError::ConnectionFailed(_))
+            Some(McpError::AuthFailed(_))
         ));
         assert!(matches!(
             http_status_error(403),
-            Some(McpError::ConnectionFailed(_))
+            Some(McpError::AuthFailed(_))
         ));
         assert!(matches!(
             http_status_error(404),
