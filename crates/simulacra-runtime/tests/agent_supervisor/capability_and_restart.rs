@@ -164,6 +164,112 @@ fn child_budget_does_not_exceed_parent_budget() {
     );
 }
 
+struct SuspendedTracingTaskFactory {
+    background_polled: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    resume: Arc<Notify>,
+    child_event_emitted: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl TaskFactory for SuspendedTracingTaskFactory {
+    fn create_task(&self, _config: SpawnConfig, _token: CancellationToken) -> BoxTaskFuture {
+        let background_polled = self
+            .background_polled
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the tracing test should create exactly one child task");
+        let resume = Arc::clone(&self.resume);
+        let child_event_emitted = self
+            .child_event_emitted
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the tracing test should create exactly one child task");
+
+        Box::pin(async move {
+            // spawn_agent polls each child future once synchronously. Yielding
+            // here makes the signal below prove that the detached Tokio task
+            // has performed its own poll before the test emits an unrelated
+            // event on the same current-thread executor.
+            tokio::task::yield_now().await;
+            let _ = background_polled.send(());
+
+            resume.notified().await;
+            tracing::info!(
+                regression_event = "detached_child_after_await",
+                "detached child resumed"
+            );
+            let _ = child_event_emitted.send(());
+
+            Ok(completed_output())
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn detached_child_dispatcher_does_not_leak_across_await() {
+    let (subscriber, _captured_spans, captured_events) = setup_capture();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let (background_polled_tx, background_polled_rx) = tokio::sync::oneshot::channel();
+    let (child_event_emitted_tx, child_event_emitted_rx) = tokio::sync::oneshot::channel();
+    let resume = Arc::new(Notify::new());
+    let factory = Arc::new(SuspendedTracingTaskFactory {
+        background_polled: Mutex::new(Some(background_polled_tx)),
+        resume: Arc::clone(&resume),
+        child_event_emitted: Mutex::new(Some(child_event_emitted_tx)),
+    });
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        CapabilityToken::default(),
+        default_budget(),
+        factory,
+    );
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        supervisor
+            .spawn_agent(spawn_config(
+                "traced-child",
+                "parent-agent",
+                CapabilityToken::default(),
+                default_budget(),
+                RestartStrategy::LetCrash,
+            ))
+            .expect("spawning the suspended child should succeed");
+    });
+
+    background_polled_rx
+        .await
+        .expect("the detached child should be polled and suspend");
+
+    tracing::info!(
+        regression_event = "unrelated_executor_event",
+        "event outside the child dispatch scope"
+    );
+
+    resume.notify_one();
+    child_event_emitted_rx
+        .await
+        .expect("the resumed child should emit its tracing event");
+
+    let events = captured_events.lock().unwrap();
+    let captured_markers = events
+        .iter()
+        .filter_map(|event| event.fields.get("regression_event"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        !captured_markers
+            .iter()
+            .any(|marker| marker.as_str() == "unrelated_executor_event"),
+        "the detached child's tracing dispatcher leaked onto the executor thread across an await"
+    );
+    assert!(
+        captured_markers
+            .iter()
+            .any(|marker| marker.as_str() == "detached_child_after_await"),
+        "the detached child should retain its tracing dispatcher after resuming"
+    );
+}
+
 // S009 O11y Assertion: Agent spawn produces a create_agent span with gen_ai.agent.name.
 #[test]
 fn agent_spawn_produces_create_agent_span_with_agent_name() {

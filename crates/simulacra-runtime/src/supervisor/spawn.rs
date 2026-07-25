@@ -1,4 +1,5 @@
 use super::*;
+use tracing::instrument::WithSubscriber;
 
 #[cfg(not(feature = "spawn"))]
 const FALLBACK_GENERIC_AGENT_SYSTEM_PROMPT: &str =
@@ -302,29 +303,31 @@ impl AgentSupervisor {
         let child_results = Arc::clone(&self.child_results);
         let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
         let child_inputs = Arc::clone(&self.child_inputs);
-        let handle: JoinHandle<()> = tokio::spawn(async move {
-            let _guard = tracing::dispatcher::set_default(&dispatch);
-            let result = super::restart::run_task_with_retries(
-                factory,
-                retry_config,
-                task_future,
-                retry_counts,
-            )
-            .await;
-            let result = Self::process_child_result(result, &result_context);
-            let terminal = ChildTerminalResult {
-                child_id: result_context.agent_id.clone(),
-                agent_type: result_context.agent_type.clone(),
-                status: status_from_spawn_result(&result),
-                elapsed_ms: result_context.spawn_start.elapsed().as_millis() as u64,
-                tool_uses: result.as_ref().map(count_tool_uses).unwrap_or(0),
-                result: result.map_err(|err| err.to_string()),
-            };
-            Self::record_child_terminal_result(&child_results, terminal);
-            lock_mutex(&cancellation_tokens, "cancellation_tokens")
-                .remove(&result_context.agent_id);
-            lock_mutex(&child_inputs, "child_inputs").remove(&result_context.agent_id);
-        });
+        let handle: JoinHandle<()> = tokio::spawn(
+            async move {
+                let result = super::restart::run_task_with_retries(
+                    factory,
+                    retry_config,
+                    task_future,
+                    retry_counts,
+                )
+                .await;
+                let result = Self::process_child_result(result, &result_context);
+                let terminal = ChildTerminalResult {
+                    child_id: result_context.agent_id.clone(),
+                    agent_type: result_context.agent_type.clone(),
+                    status: status_from_spawn_result(&result),
+                    elapsed_ms: result_context.spawn_start.elapsed().as_millis() as u64,
+                    tool_uses: result.as_ref().map(count_tool_uses).unwrap_or(0),
+                    result: result.map_err(|err| err.to_string()),
+                };
+                Self::record_child_terminal_result(&child_results, terminal);
+                lock_mutex(&cancellation_tokens, "cancellation_tokens")
+                    .remove(&result_context.agent_id);
+                lock_mutex(&child_inputs, "child_inputs").remove(&result_context.agent_id);
+            }
+            .with_subscriber(dispatch),
+        );
         lock_mutex(&self.children, "children").insert(agent_id_for_map, handle);
 
         Ok(token)
