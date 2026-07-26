@@ -9,6 +9,7 @@ use simulacra_types::{
     CapabilityToken, TOOL_PREVIEW_MAX_CHARS, Tool, ToolDefinition, ToolError, ToolOutput,
     truncate_chars,
 };
+use tracing::Instrument;
 
 /// Model/provider exposure level for a registered tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,8 +226,6 @@ impl ToolRegistry {
         let span = tracing::info_span!("tool_invoke", gen_ai.tool.name = name);
 
         async move {
-            let _guard = span.enter();
-
             let tool = match self
                 .tools
                 .iter()
@@ -327,6 +326,7 @@ impl ToolRegistry {
                 }
             }
         }
+        .instrument(span)
     }
 }
 
