@@ -91,6 +91,11 @@ checks remain the sole security boundary. This is honesty-of-advertisement, UX o
    Same filters as their existing counterparts, plus `advertised_to(capability)`. No
    registry state is read or written beyond the immutable tool list — same token in,
    same view out; a different token gets a different view from the same registry.
+   For advertisement honesty, the caller must supply a token with the same effective
+   capabilities as the token the tool's execution host or cell will enforce. If those
+   tokens differ, the derived view can under-advertise usable tools or over-advertise
+   tools that execution will deny. The mismatch cannot bypass execution-time
+   enforcement, which remains authoritative.
 
 3. Builtin overrides — only the *statically decidable, coarse* signal:
    - `shell_exec` → `capability.check_shell().is_ok()`
@@ -123,7 +128,10 @@ pub fn register_exec_tools(registry: &mut ToolRegistry, cell: Arc<AgentCell>) ->
 `register_builtins` composes the same registrations while preserving its legacy
 `definitions()` order: `file_read`, `file_write`, `apply_patch`, `shell_exec`, `js_exec`,
 `list_dir`. This fixes the all-or-nothing problem even for hosts that never adopt
-`definitions_for`.
+`definitions_for`. All three registration functions construct their tool batch first,
+validate every actual tool name against both the registry and the rest of the batch,
+then mutate the registry in order. A duplicate therefore leaves the registry unchanged,
+and duplicate preflight cannot drift from a separately maintained name list.
 
 ## Acceptance
 
@@ -142,8 +150,14 @@ pub fn register_exec_tools(registry: &mut ToolRegistry, cell: Arc<AgentCell>) ->
       (backward compatibility pin).
 - [x] `register_file_tools` alone advertises no `shell_exec`/`js_exec`; `register_builtins`
       still registers all six in its legacy `definitions()` order.
-- [x] Doc comment on `advertised_to` + `definitions_for` states explicitly that this is
-      advertisement, not enforcement, and that the Golden Rule chain is unchanged.
+- [x] A duplicate name anywhere in a granular or full builtin registration batch fails
+      before any tool is registered; preflight names derive from the constructed tool
+      batch rather than a separately maintained name list.
+- [x] Doc comments on `advertised_to` + `definitions_for` state explicitly that this is
+      advertisement, not enforcement, that honest advertisement requires the same
+      effective token used by the execution host or cell, and that a mismatch may
+      under- or over-advertise without bypassing the unchanged Golden Rule enforcement
+      chain.
 
 ## Out of scope
 

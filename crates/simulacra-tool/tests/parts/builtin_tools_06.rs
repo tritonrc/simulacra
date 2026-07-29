@@ -393,6 +393,100 @@ fn granular_registration_separates_file_and_exec_tools_and_builtins_remain_compl
 }
 
 #[test]
+fn register_file_tools_detects_late_duplicate_before_partial_registration() {
+    let cell = make_cell(full_capability());
+    let mut registry = ToolRegistry::new();
+    registry
+        .try_register_deferred(Box::new(RegistryProbeTool::new(
+            "list_dir",
+            "pre-existing deferred list tool",
+        )))
+        .expect("conflicting deferred registration should succeed");
+
+    let result = register_file_tools(&mut registry, cell);
+
+    match result {
+        Err(ToolError::ExecutionFailed(message)) => {
+            assert!(
+                message.contains("duplicate tool registration") && message.contains("list_dir"),
+                "duplicate error should name list_dir, got {message:?}"
+            );
+        }
+        other => panic!("expected duplicate registration failure, got {other:?}"),
+    }
+
+    assert!(
+        registry.definitions().is_empty(),
+        "file tools must not be partially registered before the late duplicate is reported"
+    );
+    assert_eq!(
+        definition_names(registry.search_deferred("")),
+        vec!["list_dir".to_string()],
+        "the pre-existing registry contents must remain unchanged"
+    );
+    assert_eq!(
+        registry
+            .metadata("list_dir")
+            .expect("pre-existing list_dir should remain registered")
+            .exposure,
+        simulacra_tool::ToolExposure::Deferred,
+        "the pre-existing tool exposure must remain unchanged"
+    );
+    for name in ["file_read", "file_write", "apply_patch"] {
+        assert!(
+            registry.metadata(name).is_none(),
+            "{name} must not be registered before the late duplicate is reported"
+        );
+    }
+}
+
+#[test]
+fn register_exec_tools_detects_late_duplicate_before_partial_registration() {
+    let cell = make_cell(full_capability());
+    let mut registry = ToolRegistry::new();
+    registry
+        .try_register_deferred(Box::new(RegistryProbeTool::new(
+            "js_exec",
+            "pre-existing deferred JavaScript tool",
+        )))
+        .expect("conflicting deferred registration should succeed");
+
+    let result = register_exec_tools(&mut registry, cell);
+
+    match result {
+        Err(ToolError::ExecutionFailed(message)) => {
+            assert!(
+                message.contains("duplicate tool registration") && message.contains("js_exec"),
+                "duplicate error should name js_exec, got {message:?}"
+            );
+        }
+        other => panic!("expected duplicate registration failure, got {other:?}"),
+    }
+
+    assert!(
+        registry.definitions().is_empty(),
+        "shell_exec must not be partially registered before the late duplicate is reported"
+    );
+    assert_eq!(
+        definition_names(registry.search_deferred("")),
+        vec!["js_exec".to_string()],
+        "the pre-existing registry contents must remain unchanged"
+    );
+    assert_eq!(
+        registry
+            .metadata("js_exec")
+            .expect("pre-existing js_exec should remain registered")
+            .exposure,
+        simulacra_tool::ToolExposure::Deferred,
+        "the pre-existing tool exposure must remain unchanged"
+    );
+    assert!(
+        registry.metadata("shell_exec").is_none(),
+        "shell_exec must not be registered before the late duplicate is reported"
+    );
+}
+
+#[test]
 fn register_builtins_preserves_legacy_definition_order() {
     let cell = make_cell(full_capability());
     let mut registry = ToolRegistry::new();

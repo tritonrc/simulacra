@@ -453,38 +453,50 @@ impl Tool for ListDirTool {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "sandbox")]
-fn ensure_names_available(registry: &ToolRegistry, names: &[&str]) -> Result<(), ToolError> {
-    for name in names {
-        if registry.metadata(name).is_some() {
+fn register_tool_batch(
+    registry: &mut ToolRegistry,
+    tools: Vec<Box<dyn Tool>>,
+) -> Result<(), ToolError> {
+    let mut names = Vec::with_capacity(tools.len());
+    for tool in &tools {
+        let name = tool.definition().name;
+        if registry.metadata(&name).is_some() || names.contains(&name) {
             return Err(ToolError::ExecutionFailed(format!(
                 "duplicate tool registration: {name}"
             )));
         }
+        names.push(name);
+    }
+
+    for tool in tools {
+        registry.register(tool)?;
     }
     Ok(())
 }
 
-fn register_file_core(registry: &mut ToolRegistry, cell: Arc<AgentCell>) -> Result<(), ToolError> {
-    registry.register(Box::new(FileReadTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(FileWriteTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(ApplyPatchTool { cell }))?;
-    Ok(())
+fn file_core_tool_batch(cell: Arc<AgentCell>) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(FileReadTool {
+            cell: Arc::clone(&cell),
+        }),
+        Box::new(FileWriteTool {
+            cell: Arc::clone(&cell),
+        }),
+        Box::new(ApplyPatchTool { cell }),
+    ]
 }
 
-fn register_list_dir(registry: &mut ToolRegistry, cell: Arc<AgentCell>) -> Result<(), ToolError> {
-    registry.register(Box::new(ListDirTool { cell }))
+fn exec_tool_batch(cell: Arc<AgentCell>) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(ShellExecTool {
+            cell: Arc::clone(&cell),
+        }),
+        Box::new(JsExecTool { cell }),
+    ]
 }
 
-fn register_exec_core(registry: &mut ToolRegistry, cell: Arc<AgentCell>) -> Result<(), ToolError> {
-    registry.register(Box::new(ShellExecTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(JsExecTool { cell }))?;
-    Ok(())
+fn list_dir_tool(cell: Arc<AgentCell>) -> Box<dyn Tool> {
+    Box::new(ListDirTool { cell })
 }
 
 /// Register the four sandbox file tools into the given registry.
@@ -493,13 +505,9 @@ pub fn register_file_tools(
     registry: &mut ToolRegistry,
     cell: Arc<AgentCell>,
 ) -> Result<(), ToolError> {
-    ensure_names_available(
-        registry,
-        &["file_read", "file_write", "apply_patch", "list_dir"],
-    )?;
-    register_file_core(registry, Arc::clone(&cell))?;
-    register_list_dir(registry, cell)?;
-    Ok(())
+    let mut tools = file_core_tool_batch(Arc::clone(&cell));
+    tools.push(list_dir_tool(cell));
+    register_tool_batch(registry, tools)
 }
 
 /// Register the two sandbox execution tools into the given registry.
@@ -508,9 +516,7 @@ pub fn register_exec_tools(
     registry: &mut ToolRegistry,
     cell: Arc<AgentCell>,
 ) -> Result<(), ToolError> {
-    ensure_names_available(registry, &["shell_exec", "js_exec"])?;
-    register_exec_core(registry, cell)?;
-    Ok(())
+    register_tool_batch(registry, exec_tool_batch(cell))
 }
 
 /// Register all six built-in tools into the given registry.
@@ -519,19 +525,8 @@ pub fn register_builtins(
     registry: &mut ToolRegistry,
     cell: Arc<AgentCell>,
 ) -> Result<(), ToolError> {
-    ensure_names_available(
-        registry,
-        &[
-            "file_read",
-            "file_write",
-            "apply_patch",
-            "shell_exec",
-            "js_exec",
-            "list_dir",
-        ],
-    )?;
-    register_file_core(registry, Arc::clone(&cell))?;
-    register_exec_core(registry, Arc::clone(&cell))?;
-    register_list_dir(registry, cell)?;
-    Ok(())
+    let mut tools = file_core_tool_batch(Arc::clone(&cell));
+    tools.extend(exec_tool_batch(Arc::clone(&cell)));
+    tools.push(list_dir_tool(cell));
+    register_tool_batch(registry, tools)
 }

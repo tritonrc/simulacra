@@ -159,7 +159,10 @@ impl ToolRegistry {
     ///
     /// This derives an immutable advertisement view only; it does not enforce
     /// authorization or mutate registry exposure. Execution-time checks in the
-    /// Golden Rule host chain remain authoritative.
+    /// Golden Rule host chain remain authoritative. For an honest view, callers
+    /// must supply a token with the same effective capabilities as the token
+    /// enforced by the tool's execution host or cell. A mismatch can under- or
+    /// over-advertise tools but cannot bypass execution-time enforcement.
     pub fn definitions_for(&self, capability: &CapabilityToken) -> Vec<ToolDefinition> {
         self.tools
             .iter()
@@ -202,7 +205,8 @@ impl ToolRegistry {
     /// Search deferred tools advertised to `capability`.
     ///
     /// Like [`Self::definitions_for`], this is a derived advertisement view,
-    /// not an execution-time authorization check.
+    /// not an execution-time authorization check. Its token-alignment contract
+    /// is the same as [`Self::definitions_for`].
     pub fn search_deferred_for(
         &self,
         query: &str,
