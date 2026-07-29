@@ -36,6 +36,10 @@ impl Tool for PyExecTool {
         }
     }
 
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        capability.check_python().is_ok()
+    }
+
     fn call(
         &self,
         args: Value,

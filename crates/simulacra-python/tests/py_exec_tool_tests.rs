@@ -106,6 +106,22 @@ fn make_tool(budget: Arc<Mutex<ResourceBudget>>, journal: Arc<FakeJournalStorage
     PyExecTool::new(cell)
 }
 
+#[test]
+fn py_exec_is_advertised_only_when_python_capability_is_granted() {
+    let budget = Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0)));
+    let journal = Arc::new(FakeJournalStorage::default());
+    let tool = make_tool(budget, journal);
+
+    assert!(
+        !tool.advertised_to(&CapabilityToken::default()),
+        "py_exec must not be advertised without python capability"
+    );
+    assert!(
+        tool.advertised_to(&py_capability()),
+        "py_exec must be advertised with python capability"
+    );
+}
+
 #[tokio::test]
 async fn py_exec_reserves_turn_and_journals_code_execution_before_returning() {
     let budget = Arc::new(Mutex::new(ResourceBudget::new(0, 1, Decimal::ZERO, 0)));

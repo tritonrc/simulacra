@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use simulacra_sandbox::{AgentCell, SandboxError, VfsMutation, VfsWritePrecondition};
 use simulacra_types::{CapabilityToken, Tool, ToolDefinition, ToolError, ToolOutput};
 
-use super::{map_sandbox_error, require_str};
+use super::{has_write_grant, map_sandbox_error, require_str};
 
 pub(crate) struct ApplyPatchTool {
     pub(crate) cell: Arc<AgentCell>,
@@ -30,6 +30,10 @@ impl Tool for ApplyPatchTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        has_write_grant(capability)
     }
 
     fn call(

@@ -155,6 +155,20 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Return definitions for directly exposed tools advertised to `capability`.
+    ///
+    /// This derives an immutable advertisement view only; it does not enforce
+    /// authorization or mutate registry exposure. Execution-time checks in the
+    /// Golden Rule host chain remain authoritative.
+    pub fn definitions_for(&self, capability: &CapabilityToken) -> Vec<ToolDefinition> {
+        self.tools
+            .iter()
+            .filter(|registered| registered.exposure == ToolExposure::Direct)
+            .filter(|registered| registered.tool.advertised_to(capability))
+            .map(RegisteredTool::definition)
+            .collect()
+    }
+
     /// Return registry metadata for a tool.
     pub fn metadata(&self, name: &str) -> Option<ToolMetadata> {
         self.tools
@@ -169,6 +183,36 @@ impl ToolRegistry {
         self.tools
             .iter()
             .filter(|registered| registered.exposure == ToolExposure::Deferred)
+            .filter_map(|registered| {
+                let definition = registered.definition();
+                let haystack = format!(
+                    "{}\n{}",
+                    definition.name.to_ascii_lowercase(),
+                    definition.description.to_ascii_lowercase()
+                );
+                if query.is_empty() || haystack.contains(&query) {
+                    Some(definition)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Search deferred tools advertised to `capability`.
+    ///
+    /// Like [`Self::definitions_for`], this is a derived advertisement view,
+    /// not an execution-time authorization check.
+    pub fn search_deferred_for(
+        &self,
+        query: &str,
+        capability: &CapabilityToken,
+    ) -> Vec<ToolDefinition> {
+        let query = query.to_ascii_lowercase();
+        self.tools
+            .iter()
+            .filter(|registered| registered.exposure == ToolExposure::Deferred)
+            .filter(|registered| registered.tool.advertised_to(capability))
             .filter_map(|registered| {
                 let definition = registered.definition();
                 let haystack = format!(

@@ -17,7 +17,7 @@ pub use memory::{
 };
 pub use registry::{ToolExposure, ToolMetadata, ToolRegistry};
 #[cfg(feature = "sandbox")]
-pub use sandbox_tools::register_builtins;
+pub use sandbox_tools::{register_builtins, register_exec_tools, register_file_tools};
 pub use simulacra_types::{
     CapabilityToken, Tool, ToolDefinition, ToolError, ToolOutput, ToolSchema,
 };
