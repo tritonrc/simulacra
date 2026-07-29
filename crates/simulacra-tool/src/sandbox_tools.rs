@@ -17,6 +17,20 @@ mod apply_patch;
 #[cfg(feature = "sandbox")]
 use apply_patch::ApplyPatchTool;
 
+// File-tool advertisement can only use the coarse, statically decidable
+// signal that some matching grant exists. It does not imply that the path in a
+// future call is allowed; AgentCell performs the authoritative per-path check.
+
+fn has_read_grant(capability: &CapabilityToken) -> bool {
+    !capability.paths_read.is_empty()
+        || (capability.memory.enabled && !capability.memory.search_scopes.is_empty())
+}
+
+fn has_write_grant(capability: &CapabilityToken) -> bool {
+    !capability.paths_write.is_empty()
+        || (capability.memory.enabled && !capability.memory.write_scopes.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
@@ -112,6 +126,10 @@ impl Tool for FileReadTool {
         }
     }
 
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        has_read_grant(capability)
+    }
+
     fn call(
         &self,
         args: Value,
@@ -164,6 +182,10 @@ impl Tool for FileWriteTool {
         }
     }
 
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        has_write_grant(capability)
+    }
+
     fn call(
         &self,
         args: Value,
@@ -213,6 +235,10 @@ impl Tool for ShellExecTool {
                 "additionalProperties": false
             }),
         }
+    }
+
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        capability.check_shell().is_ok()
     }
 
     fn call(
@@ -321,6 +347,10 @@ impl Tool for JsExecTool {
         }
     }
 
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        capability.check_javascript().is_ok()
+    }
+
     fn call(
         &self,
         args: Value,
@@ -366,6 +396,10 @@ impl Tool for ListDirTool {
                 "required": ["path"]
             }),
         }
+    }
+
+    fn advertised_to(&self, capability: &CapabilityToken) -> bool {
+        has_read_grant(capability)
     }
 
     fn call(
@@ -415,45 +449,84 @@ impl Tool for ListDirTool {
 }
 
 // ---------------------------------------------------------------------------
-// register_builtins
+// Builtin registration
 // ---------------------------------------------------------------------------
 
-/// Register all built-in tools into the given registry.
+#[cfg(feature = "sandbox")]
+fn register_tool_batch(
+    registry: &mut ToolRegistry,
+    tools: Vec<Box<dyn Tool>>,
+) -> Result<(), ToolError> {
+    let mut names = Vec::with_capacity(tools.len());
+    for tool in &tools {
+        let name = tool.definition().name;
+        if registry.metadata(&name).is_some() || names.contains(&name) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "duplicate tool registration: {name}"
+            )));
+        }
+        names.push(name);
+    }
+
+    for tool in tools {
+        registry.register(tool)?;
+    }
+    Ok(())
+}
+
+fn file_core_tool_batch(cell: Arc<AgentCell>) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(FileReadTool {
+            cell: Arc::clone(&cell),
+        }),
+        Box::new(FileWriteTool {
+            cell: Arc::clone(&cell),
+        }),
+        Box::new(ApplyPatchTool { cell }),
+    ]
+}
+
+fn exec_tool_batch(cell: Arc<AgentCell>) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(ShellExecTool {
+            cell: Arc::clone(&cell),
+        }),
+        Box::new(JsExecTool { cell }),
+    ]
+}
+
+fn list_dir_tool(cell: Arc<AgentCell>) -> Box<dyn Tool> {
+    Box::new(ListDirTool { cell })
+}
+
+/// Register the four sandbox file tools into the given registry.
+#[cfg(feature = "sandbox")]
+pub fn register_file_tools(
+    registry: &mut ToolRegistry,
+    cell: Arc<AgentCell>,
+) -> Result<(), ToolError> {
+    let mut tools = file_core_tool_batch(Arc::clone(&cell));
+    tools.push(list_dir_tool(cell));
+    register_tool_batch(registry, tools)
+}
+
+/// Register the two sandbox execution tools into the given registry.
+#[cfg(feature = "sandbox")]
+pub fn register_exec_tools(
+    registry: &mut ToolRegistry,
+    cell: Arc<AgentCell>,
+) -> Result<(), ToolError> {
+    register_tool_batch(registry, exec_tool_batch(cell))
+}
+
+/// Register all six built-in tools into the given registry.
 #[cfg(feature = "sandbox")]
 pub fn register_builtins(
     registry: &mut ToolRegistry,
     cell: Arc<AgentCell>,
 ) -> Result<(), ToolError> {
-    for name in [
-        "file_read",
-        "file_write",
-        "apply_patch",
-        "shell_exec",
-        "js_exec",
-        "list_dir",
-    ] {
-        if registry.metadata(name).is_some() {
-            return Err(ToolError::ExecutionFailed(format!(
-                "duplicate tool registration: {name}"
-            )));
-        }
-    }
-
-    registry.register(Box::new(FileReadTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(FileWriteTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(ApplyPatchTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(ShellExecTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(JsExecTool {
-        cell: Arc::clone(&cell),
-    }))?;
-    registry.register(Box::new(ListDirTool { cell }))?;
-    Ok(())
+    let mut tools = file_core_tool_batch(Arc::clone(&cell));
+    tools.extend(exec_tool_batch(Arc::clone(&cell)));
+    tools.push(list_dir_tool(cell));
+    register_tool_batch(registry, tools)
 }

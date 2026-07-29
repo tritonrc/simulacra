@@ -1,11 +1,13 @@
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
-use simulacra_tool::{ToolError, ToolRegistry, register_builtins};
+use simulacra_tool::{
+    ToolError, ToolRegistry, register_builtins, register_exec_tools, register_file_tools,
+};
 use simulacra_types::{
     AgentId, CapabilityToken, CheckpointData, JOURNAL_SCHEMA_VERSION, JournalEntry,
-    JournalEntryKind, JournalError, JournalStorage, PathPattern, ResourceBudget, TokenUsage,
-    VirtualFs,
+    JournalEntryKind, JournalError, JournalStorage, MemoryCapability, MemoryPath, PathPattern,
+    ResourceBudget, TokenUsage, VirtualFs,
 };
 use simulacra_vfs::MemoryFs;
 use std::collections::HashMap;

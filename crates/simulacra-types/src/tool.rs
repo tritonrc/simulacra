@@ -204,6 +204,19 @@ pub fn truncate_chars(content: &str, max_chars: usize) -> (String, bool) {
 pub trait Tool: Send + Sync + 'static {
     fn definition(&self) -> ToolDefinition;
 
+    /// Whether this tool should be advertised to a model operating under
+    /// `capability`.
+    ///
+    /// This is an advertisement hint, not an enforcement boundary. The
+    /// execution-time capability checks in the Golden Rule host chain remain
+    /// authoritative. Implementations should be side-effect-free and
+    /// deterministic for fixed tool state and capability token. The default
+    /// keeps tools without a static capability signal visible for backward
+    /// compatibility.
+    fn advertised_to(&self, _capability: &CapabilityToken) -> bool {
+        true
+    }
+
     fn call(
         &self,
         arguments: serde_json::Value,
