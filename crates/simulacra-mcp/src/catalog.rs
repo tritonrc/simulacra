@@ -1044,6 +1044,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_publishes_only_the_bounded_five_returned_pairs() {
+        let _guard = catalog_test_guard().await;
         let catalog = McpCatalog::new(Vec::new()).expect("catalog should construct");
         catalog.state.lock().await.activated.insert(
             "github".into(),
@@ -1449,6 +1450,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[tokio::test(flavor = "current_thread")]
     async fn wasm_activation_without_feature_returns_sanitized_typed_failure() {
+        let _guard = catalog_test_guard().await;
         let module_path = std::path::PathBuf::from("/private/SECRET-MCP-MODULE.wasm");
         let catalog = McpCatalog::new(vec![McpServerDescriptor::wasm(
             "github".into(),
@@ -1917,6 +1919,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_search_normalizes_boundaries_and_requires_every_distinct_term() {
+        let _guard = catalog_test_guard().await;
         let enterprise = JsonRpcServer::with_tools(vec![indexed_tool(
             "Repo_Search",
             "Find pull requests by CODE owner and language",
@@ -1973,6 +1976,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_search_honors_prefix_boundary_and_relevance_order() {
+        let _guard = catalog_test_guard().await;
         let zeta = JsonRpcServer::with_tools(vec![
             indexed_tool("a", "one-character exact token"),
             indexed_tool("al", "two-character exact token"),
@@ -2018,6 +2022,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_search_applies_all_six_field_weights_in_order() {
+        let _guard = catalog_test_guard().await;
         let exact_tool = JsonRpcServer::with_tools(vec![indexed_tool("needle", "other")]).await;
         let tool_prefix =
             JsonRpcServer::with_tools(vec![indexed_tool("needlework", "other")]).await;
@@ -2063,6 +2068,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_search_complete_tool_name_boost_is_separate_from_token_weights() {
+        let _guard = catalog_test_guard().await;
         let server = JsonRpcServer::with_tools(vec![
             indexed_tool("search-repo", "same"),
             indexed_tool("repo-search", "same"),
@@ -2094,6 +2100,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_search_ties_empty_query_and_publication_are_bounded_and_deterministic() {
+        let _guard = catalog_test_guard().await;
         let alpha = JsonRpcServer::with_tools(vec![
             indexed_tool("gamma", "same tie"),
             indexed_tool("alpha", "same tie"),
@@ -2161,6 +2168,7 @@ mod tests {
 
     #[tokio::test]
     async fn indexed_snapshot_replaces_atomically_after_later_success_without_losing_publication() {
+        let _guard = catalog_test_guard().await;
         let first = JsonRpcServer::with_tools(vec![indexed_tool("first_tool", "first")]).await;
         let later = JsonRpcServer::with_tools(vec![indexed_tool("later_tool", "later")]).await;
         let catalog = McpCatalog::new(vec![
