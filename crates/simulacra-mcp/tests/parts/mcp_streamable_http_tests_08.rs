@@ -47,19 +47,20 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
         while !stop_t.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                    while let Some(request) = read_http_request(&mut stream) {
+                    if let Some(request) = read_http_request(&mut stream) {
                         if !request.starts_with("POST ") {
                             let response = http_response_status(405, "Method Not Allowed");
                             let _ = stream.write_all(response.as_bytes());
-                            break;
+                            continue;
                         }
 
                         if request.contains("\"method\":\"initialize\"") {
                             if initialize_status >= 400 {
                                 let response = http_response_status(initialize_status, "init rejected");
                                 let _ = stream.write_all(response.as_bytes());
-                                break;
+                                continue;
                             }
                             let body = json!({
                                 "jsonrpc": "2.0",
@@ -105,7 +106,7 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
                             if status >= 400 {
                                 let response = http_response_status(status, "tool rejected");
                                 let _ = stream.write_all(response.as_bytes());
-                                break;
+                                continue;
                             }
                             let body = json!({
                                 "jsonrpc": "2.0",
@@ -195,12 +196,13 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
         while !stop_t.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                    while let Some(request) = read_http_request(&mut stream) {
+                    if let Some(request) = read_http_request(&mut stream) {
                         if !request.starts_with("POST ") {
                             let response = http_response_status(405, "Method Not Allowed");
                             let _ = stream.write_all(response.as_bytes());
-                            break;
+                            continue;
                         }
 
                         if request.contains("\"method\":\"initialize\"") {
@@ -251,7 +253,6 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                                         let _ = stream.flush();
                                         thread::sleep(Duration::from_millis(20));
                                     }
-                                    break;
                                 }
                                 S067BodyMode::Sse { events, final_result } => {
                                     let body = format!("{}event: message\ndata: {}\n\n", events.join(""), final_result);
@@ -269,7 +270,6 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                                         thread::sleep(Duration::from_millis(20));
                                     }
                                     let _ = stream.write_all(format!("event: message\ndata: {}\n\n", final_result).as_bytes());
-                                    break;
                                 }
                             }
                         } else {
