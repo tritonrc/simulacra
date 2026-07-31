@@ -164,8 +164,16 @@ impl JournalStorage for SqliteJournalStorage {
             if let Ok(JournalEntryKind::LlmResponse { token_usage, .. }) =
                 serde_json::from_str::<JournalEntryKind>(&entry_json)
             {
-                total.input_tokens += token_usage.input_tokens;
-                total.output_tokens += token_usage.output_tokens;
+                total.input_tokens = total.input_tokens.saturating_add(token_usage.input_tokens);
+                total.output_tokens = total
+                    .output_tokens
+                    .saturating_add(token_usage.output_tokens);
+                total.cache_read_input_tokens = total
+                    .cache_read_input_tokens
+                    .saturating_add(token_usage.cache_read_input_tokens);
+                total.cache_write_input_tokens = total
+                    .cache_write_input_tokens
+                    .saturating_add(token_usage.cache_write_input_tokens);
             }
         }
 
@@ -304,6 +312,8 @@ mod tests {
                     token_usage: TokenUsage {
                         input_tokens: 100,
                         output_tokens: 50,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                     },
                     finish_reason: "EndTurn".into(),
                     assistant_message: None,
@@ -318,6 +328,8 @@ mod tests {
                     token_usage: TokenUsage {
                         input_tokens: 200,
                         output_tokens: 75,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                     },
                     finish_reason: "EndTurn".into(),
                     assistant_message: None,

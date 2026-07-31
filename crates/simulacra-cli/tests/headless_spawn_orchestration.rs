@@ -177,6 +177,8 @@ fn tool_response(tool_calls: Vec<ToolCallMessage>) -> ProviderResponse {
         token_usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::ToolUse,
         provider_response_id: Some("resp-tools".into()),
@@ -196,6 +198,8 @@ fn final_response(text: &str) -> ProviderResponse {
         token_usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::EndTurn,
         provider_response_id: Some("resp-final".into()),

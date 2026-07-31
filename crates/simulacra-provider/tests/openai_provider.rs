@@ -7,7 +7,9 @@ use serde_json::json;
 use simulacra_provider::{
     FinishReason, Message, OpenAiProvider, Provider, ProviderError, ResourceBudget,
 };
-use simulacra_types::{Role, ToolDefinition};
+use simulacra_types::{
+    ProviderStreamEvent, ProviderStreamSink, Role, StreamingProvider, ToolDefinition,
+};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -19,10 +21,136 @@ use std::time::Duration;
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    let _ = test_meter_provider();
     TEST_MUTEX
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Clone, Debug)]
+enum RecordedMetricValue {
+    U64(u64),
+    F64(f64),
+}
+
+#[derive(Clone, Debug)]
+struct RecordedMetric {
+    name: String,
+    value: RecordedMetricValue,
+    attributes: Vec<opentelemetry::KeyValue>,
+}
+
+#[derive(Clone, Default)]
+struct TestMeterProvider {
+    observations: Arc<Mutex<Vec<RecordedMetric>>>,
+}
+
+struct TestU64Histogram {
+    name: String,
+    observations: Arc<Mutex<Vec<RecordedMetric>>>,
+}
+
+impl opentelemetry::metrics::SyncInstrument<u64> for TestU64Histogram {
+    fn measure(&self, value: u64, attributes: &[opentelemetry::KeyValue]) {
+        self.observations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(RecordedMetric {
+                name: self.name.clone(),
+                value: RecordedMetricValue::U64(value),
+                attributes: attributes.to_vec(),
+            });
+    }
+}
+
+struct TestF64Histogram {
+    name: String,
+    observations: Arc<Mutex<Vec<RecordedMetric>>>,
+}
+
+impl opentelemetry::metrics::SyncInstrument<f64> for TestF64Histogram {
+    fn measure(&self, value: f64, attributes: &[opentelemetry::KeyValue]) {
+        self.observations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(RecordedMetric {
+                name: self.name.clone(),
+                value: RecordedMetricValue::F64(value),
+                attributes: attributes.to_vec(),
+            });
+    }
+}
+
+impl opentelemetry::metrics::InstrumentProvider for TestMeterProvider {
+    fn u64_histogram(
+        &self,
+        builder: opentelemetry::metrics::HistogramBuilder<
+            '_,
+            opentelemetry::metrics::Histogram<u64>,
+        >,
+    ) -> opentelemetry::metrics::Histogram<u64> {
+        opentelemetry::metrics::Histogram::new(Arc::new(TestU64Histogram {
+            name: builder.name.into_owned(),
+            observations: Arc::clone(&self.observations),
+        }))
+    }
+
+    fn f64_histogram(
+        &self,
+        builder: opentelemetry::metrics::HistogramBuilder<
+            '_,
+            opentelemetry::metrics::Histogram<f64>,
+        >,
+    ) -> opentelemetry::metrics::Histogram<f64> {
+        opentelemetry::metrics::Histogram::new(Arc::new(TestF64Histogram {
+            name: builder.name.into_owned(),
+            observations: Arc::clone(&self.observations),
+        }))
+    }
+}
+
+impl opentelemetry::metrics::MeterProvider for TestMeterProvider {
+    fn meter_with_scope(
+        &self,
+        _scope: opentelemetry::InstrumentationScope,
+    ) -> opentelemetry::metrics::Meter {
+        opentelemetry::metrics::Meter::new(Arc::new(self.clone()))
+    }
+}
+
+fn test_meter_provider() -> &'static TestMeterProvider {
+    static PROVIDER: OnceLock<TestMeterProvider> = OnceLock::new();
+    PROVIDER.get_or_init(|| {
+        let provider = TestMeterProvider::default();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        provider
+    })
+}
+
+fn has_attribute(metric: &RecordedMetric, key: &str, value: &str) -> bool {
+    metric
+        .attributes
+        .iter()
+        .any(|attribute| attribute.key.as_str() == key && attribute.value.to_string() == value)
+}
+
+fn has_u64_metric(observations: &[RecordedMetric], name: &str, value: u64, model: &str) -> bool {
+    observations.iter().any(|metric| {
+        metric.name == name
+            && matches!(metric.value, RecordedMetricValue::U64(actual) if actual == value)
+            && has_attribute(metric, "gen_ai.provider.name", "openai")
+            && has_attribute(metric, "gen_ai.request.model", model)
+    })
+}
+
+fn has_f64_metric(observations: &[RecordedMetric], name: &str, value: f64, model: &str) -> bool {
+    observations.iter().any(|metric| {
+        metric.name == name
+            && matches!(metric.value, RecordedMetricValue::F64(actual) if actual == value)
+            && has_attribute(metric, "gen_ai.provider.name", "openai")
+            && has_attribute(metric, "gen_ai.request.model", model)
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,6 +496,33 @@ fn success_response_json() -> serde_json::Value {
     })
 }
 
+fn cached_success_response_json() -> serde_json::Value {
+    let mut response = success_response_json();
+    response["usage"]["prompt_tokens_details"] = json!({
+        "cached_tokens": 7
+    });
+    response
+}
+
+fn malformed_cached_success_response_json() -> serde_json::Value {
+    let mut response = success_response_json();
+    response["usage"]["prompt_tokens"] = json!(10);
+    response["usage"]["prompt_tokens_details"] = json!({
+        "cached_tokens": 17
+    });
+    response
+}
+
+fn zero_input_success_response_json() -> serde_json::Value {
+    let mut response = success_response_json();
+    response["usage"] = json!({
+        "prompt_tokens": 0,
+        "completion_tokens": 4,
+        "total_tokens": 4
+    });
+    response
+}
+
 fn tool_call_response_json() -> serde_json::Value {
     json!({
         "id": "chatcmpl_tool456",
@@ -414,6 +569,40 @@ fn streaming_response_body() -> Vec<u8> {
     .to_vec()
 }
 
+fn cached_streaming_response_body() -> Vec<u8> {
+    concat!(
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", stream!\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec()
+}
+
+fn malformed_cached_streaming_response_body() -> Vec<u8> {
+    concat!(
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"chatcmpl_stream789\",\"object\":\"chat.completion.chunk\",\"created\":1726000002,\"model\":\"gpt-4o-mini\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18,\"prompt_tokens_details\":{\"cached_tokens\":19}}}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .as_bytes()
+    .to_vec()
+}
+
+#[derive(Default)]
+struct NullStreamSink;
+
+impl ProviderStreamSink for NullStreamSink {
+    fn emit(&self, _event: ProviderStreamEvent) {}
+}
+
+fn token_usage_json(response: &simulacra_types::ProviderResponse) -> serde_json::Value {
+    serde_json::to_value(&response.token_usage).expect("token usage should serialize")
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn budget_exhausted_returns_error_without_http_call() {
     let _test_guard = test_guard();
@@ -457,6 +646,15 @@ async fn successful_text_response_maps_correctly() {
     assert!(resp.message.tool_calls.is_empty());
     assert_eq!(resp.token_usage.input_tokens, 10);
     assert_eq!(resp.token_usage.output_tokens, 25);
+    let usage = token_usage_json(&resp);
+    assert_eq!(
+        usage["cache_read_input_tokens"], 0,
+        "missing OpenAI cache details must default cache reads to zero"
+    );
+    assert_eq!(
+        usage["cache_write_input_tokens"], 0,
+        "OpenAI cache writes must default to zero"
+    );
     assert_eq!(resp.finish_reason, FinishReason::EndTurn);
     assert_eq!(
         resp.provider_response_id,
@@ -476,6 +674,39 @@ async fn successful_text_response_maps_correctly() {
     assert_eq!(body["model"], "gpt-4o-mini");
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"], "Hello");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s059_openai_sync_cached_prompt_tokens_are_input_subset_without_cache_writes() {
+    let _test_guard = test_guard();
+    let fake = FakeHttpClient::new(CannedResponse::json(200, cached_success_response_json()));
+    let _env = OpenAiEndpointGuards::set(&fake.base_url());
+    let provider = OpenAiProvider::new("test-key", "gpt-4o-mini");
+
+    let messages = vec![user_message("Hello")];
+    let mut budget = fresh_budget();
+
+    let resp = provider
+        .chat(&messages, &[], &mut budget)
+        .await
+        .expect("OpenAI cached text response should map into ProviderResponse");
+
+    assert_eq!(resp.token_usage.input_tokens, 10);
+    assert_eq!(resp.token_usage.output_tokens, 25);
+    assert_eq!(resp.token_usage.total(), 35);
+    let usage = token_usage_json(&resp);
+    assert_eq!(
+        usage["cache_read_input_tokens"], 7,
+        "OpenAI prompt_tokens_details.cached_tokens should be reported as cache reads"
+    );
+    assert!(
+        usage["cache_read_input_tokens"].as_u64().unwrap() <= resp.token_usage.input_tokens,
+        "OpenAI cached prompt tokens must be a subset of logical prompt input"
+    );
+    assert_eq!(
+        usage["cache_write_input_tokens"], 0,
+        "OpenAI does not report prompt-cache writes in chat completions usage"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -653,6 +884,15 @@ async fn streaming_event_stream_is_assembled_into_final_provider_response() {
     assert!(resp.message.tool_calls.is_empty());
     assert_eq!(resp.token_usage.input_tokens, 11);
     assert_eq!(resp.token_usage.output_tokens, 7);
+    let usage = token_usage_json(&resp);
+    assert_eq!(
+        usage["cache_read_input_tokens"], 0,
+        "missing terminal stream cache details must default cache reads to zero"
+    );
+    assert_eq!(
+        usage["cache_write_input_tokens"], 0,
+        "OpenAI streaming cache writes must default to zero"
+    );
     assert_eq!(resp.finish_reason, FinishReason::EndTurn);
     assert_eq!(
         resp.provider_response_id,
@@ -664,6 +904,223 @@ async fn streaming_event_stream_is_assembled_into_final_provider_response() {
     let body: serde_json::Value =
         serde_json::from_slice(&request.body).expect("request body should be valid JSON");
     assert_eq!(body["stream"], true);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s059_openai_streaming_terminal_usage_preserves_cached_prompt_tokens() {
+    let _test_guard = test_guard();
+    let fake = FakeHttpClient::new(CannedResponse::sse(cached_streaming_response_body()));
+    let _env = OpenAiEndpointGuards::set(&fake.base_url());
+    let provider = OpenAiProvider::new("test-key", "gpt-4o-mini");
+    let sink = NullStreamSink;
+
+    let mut budget = fresh_budget();
+    let resp = provider
+        .chat_stream(&[user_message("Say hello")], &[], &mut budget, &sink)
+        .await
+        .expect("OpenAI cached SSE responses should assemble into a final ProviderResponse");
+
+    assert_eq!(resp.token_usage.input_tokens, 11);
+    assert_eq!(resp.token_usage.output_tokens, 7);
+    assert_eq!(resp.token_usage.total(), 18);
+    let usage = token_usage_json(&resp);
+    assert_eq!(
+        usage["cache_read_input_tokens"], 6,
+        "OpenAI terminal stream usage cached_tokens should be reported as cache reads"
+    );
+    assert_eq!(
+        usage["cache_write_input_tokens"], 0,
+        "OpenAI stream usage must leave cache writes at zero"
+    );
+    assert!(
+        usage["cache_read_input_tokens"].as_u64().unwrap() <= resp.token_usage.input_tokens,
+        "OpenAI terminal cached tokens must remain a subset of logical prompt input"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s059_openai_malformed_cache_usage_preserves_subset_and_bounded_ratio() {
+    let _test_guard = test_guard();
+    let model = "gpt-4o-mini";
+    let recorder = test_meter_provider();
+    recorder
+        .observations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+
+    let sync_fake = FakeHttpClient::new(CannedResponse::json(
+        200,
+        malformed_cached_success_response_json(),
+    ));
+    let sync_env = OpenAiEndpointGuards::set(&sync_fake.base_url());
+    let sync_provider = OpenAiProvider::new("test-key", model);
+    drop(sync_env);
+
+    let stream_fake = FakeHttpClient::new(CannedResponse::sse(
+        malformed_cached_streaming_response_body(),
+    ));
+    let stream_env = OpenAiEndpointGuards::set(&stream_fake.base_url());
+    let stream_provider = OpenAiProvider::new("test-key", model);
+    drop(stream_env);
+
+    let mut budget = fresh_budget();
+    let sync_response = sync_provider
+        .chat(&[user_message("sync malformed usage")], &[], &mut budget)
+        .await
+        .expect("malformed cached-token accounting must not invalidate a successful response");
+    let stream_response = stream_provider
+        .chat_stream(
+            &[user_message("stream malformed usage")],
+            &[],
+            &mut budget,
+            &NullStreamSink,
+        )
+        .await
+        .expect("malformed terminal stream usage must not invalidate a successful response");
+
+    assert_eq!(sync_response.token_usage.input_tokens, 10);
+    assert_eq!(
+        sync_response.token_usage.cache_read_input_tokens, 10,
+        "OpenAI cache reads must be clamped to their logical-input subset"
+    );
+    assert_eq!(stream_response.token_usage.input_tokens, 11);
+    assert_eq!(
+        stream_response.token_usage.cache_read_input_tokens, 11,
+        "terminal stream cache reads must be clamped to their logical-input subset"
+    );
+
+    let observations = recorder
+        .observations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ratios: Vec<f64> = observations
+        .iter()
+        .filter_map(|metric| {
+            if metric.name == "simulacra.context.cache.hit_ratio"
+                && has_attribute(metric, "gen_ai.provider.name", "openai")
+                && has_attribute(metric, "gen_ai.request.model", model)
+            {
+                match metric.value {
+                    RecordedMetricValue::F64(value) => Some(value),
+                    RecordedMetricValue::U64(_) => None,
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(ratios.len(), 2, "both successful paths must report a ratio");
+    assert!(
+        ratios.iter().all(|ratio| (0.0..=1.0).contains(ratio)),
+        "malformed provider usage must never emit a cache hit ratio above one; got {ratios:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn s059_openai_cache_metrics_use_typed_histograms_for_sync_streaming_and_zero_input() {
+    let _test_guard = test_guard();
+    let model = "gpt-4o-mini";
+    let recorder = test_meter_provider();
+    recorder
+        .observations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+
+    let sync_fake = FakeHttpClient::new(CannedResponse::json(200, cached_success_response_json()));
+    let sync_env = OpenAiEndpointGuards::set(&sync_fake.base_url());
+    let sync_provider = OpenAiProvider::new("test-key", model);
+    drop(sync_env);
+
+    let stream_fake = FakeHttpClient::new(CannedResponse::sse(cached_streaming_response_body()));
+    let stream_env = OpenAiEndpointGuards::set(&stream_fake.base_url());
+    let stream_provider = OpenAiProvider::new("test-key", model);
+    drop(stream_env);
+
+    let zero_fake = FakeHttpClient::new(CannedResponse::json(
+        200,
+        zero_input_success_response_json(),
+    ));
+    let zero_env = OpenAiEndpointGuards::set(&zero_fake.base_url());
+    let zero_provider = OpenAiProvider::new("test-key", model);
+    drop(zero_env);
+
+    let mut budget = fresh_budget();
+    sync_provider
+        .chat(&[user_message("sync")], &[], &mut budget)
+        .await
+        .expect("cached synchronous response should succeed");
+    stream_provider
+        .chat_stream(&[user_message("stream")], &[], &mut budget, &NullStreamSink)
+        .await
+        .expect("cached streaming response should succeed");
+    zero_provider
+        .chat(&[user_message("zero")], &[], &mut budget)
+        .await
+        .expect("zero-input response should succeed");
+
+    let observations = recorder
+        .observations
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        has_u64_metric(
+            &observations,
+            "simulacra.context.cache.read_tokens",
+            7,
+            model,
+        ) && has_u64_metric(
+            &observations,
+            "simulacra.context.cache.write_tokens",
+            0,
+            model,
+        ) && has_f64_metric(
+            &observations,
+            "simulacra.context.cache.hit_ratio",
+            7.0 / 10.0,
+            model,
+        ),
+        "OpenAI sync cache metrics must use u64/u64/f64 histograms with exact labels"
+    );
+    assert!(
+        has_u64_metric(
+            &observations,
+            "simulacra.context.cache.read_tokens",
+            6,
+            model,
+        ) && has_u64_metric(
+            &observations,
+            "simulacra.context.cache.write_tokens",
+            0,
+            model,
+        ) && has_f64_metric(
+            &observations,
+            "simulacra.context.cache.hit_ratio",
+            6.0 / 11.0,
+            model,
+        ),
+        "OpenAI streaming cache metrics must use u64/u64/f64 histograms with exact labels"
+    );
+    assert!(
+        has_u64_metric(
+            &observations,
+            "simulacra.context.cache.read_tokens",
+            0,
+            model,
+        ) && has_u64_metric(
+            &observations,
+            "simulacra.context.cache.write_tokens",
+            0,
+            model,
+        ) && has_f64_metric(
+            &observations,
+            "simulacra.context.cache.hit_ratio",
+            0.0,
+            model,
+        ),
+        "zero logical input must record zero-valued typed cache observations"
+    );
 }
 
 // ── P5/GP3: Streaming tool-call assembly ──────────────────────────

@@ -2260,6 +2260,8 @@ mod budget_regression_tests {
             token_usage: TokenUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
             finish_reason,
             provider_response_id: None,

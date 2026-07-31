@@ -224,6 +224,8 @@ mod tests {
             token_usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
             },
             finish_reason: "stop".into(),
             assistant_message: Some(msg),

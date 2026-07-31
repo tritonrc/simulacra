@@ -285,6 +285,8 @@ impl FakeProvider {
                 token_usage: TokenUsage {
                     input_tokens: 17,
                     output_tokens: 9,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: FinishReason::ToolUse,
                 provider_response_id: Some("resp-tool".into()),
@@ -460,6 +462,8 @@ fn final_response(text: &str) -> ProviderResponse {
         token_usage: TokenUsage {
             input_tokens: 11,
             output_tokens: 7,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::EndTurn,
         provider_response_id: Some("resp-1".into()),

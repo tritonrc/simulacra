@@ -214,6 +214,8 @@
                     token_usage: TokenUsage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                     },
                     finish_reason: "EndTurn".into(),
                     assistant_message: Some(Message {

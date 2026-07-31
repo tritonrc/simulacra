@@ -210,6 +210,8 @@ async fn child_token_usage_is_rolled_up_from_agent_loop_output_not_stale_spawn_b
         token_usage: TokenUsage {
             input_tokens: 19,
             output_tokens: 23,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 0,

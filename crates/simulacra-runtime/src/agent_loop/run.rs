@@ -94,8 +94,18 @@ impl AgentLoop {
         };
         for _turn in 0..effective_max_turns {
             let turn = self.execute_turn(&mut messages, true).await?;
-            total_usage.input_tokens += turn.token_usage.input_tokens;
-            total_usage.output_tokens += turn.token_usage.output_tokens;
+            total_usage.input_tokens = total_usage
+                .input_tokens
+                .saturating_add(turn.token_usage.input_tokens);
+            total_usage.output_tokens = total_usage
+                .output_tokens
+                .saturating_add(turn.token_usage.output_tokens);
+            total_usage.cache_read_input_tokens = total_usage
+                .cache_read_input_tokens
+                .saturating_add(turn.token_usage.cache_read_input_tokens);
+            total_usage.cache_write_input_tokens = total_usage
+                .cache_write_input_tokens
+                .saturating_add(turn.token_usage.cache_write_input_tokens);
 
             match turn.result {
                 TurnResult::Complete(_) => {

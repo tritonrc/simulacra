@@ -31,6 +31,8 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
         token_usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 1,
@@ -414,6 +416,8 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
                 token_usage: TokenUsage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(Message {

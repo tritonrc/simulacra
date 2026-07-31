@@ -315,6 +315,8 @@ fn final_response(text: &str) -> ProviderResponse {
         token_usage: TokenUsage {
             input_tokens: 11,
             output_tokens: 7,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::EndTurn,
         provider_response_id: Some("resp-1".into()),
@@ -1329,6 +1331,8 @@ write_scopes = ["/var/memory/self/"]
                         token_usage: TokenUsage {
                             input_tokens: 20,
                             output_tokens: 10,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
                         },
                         finish_reason: FinishReason::ToolUse,
                         provider_response_id: Some("resp-memory-search".into()),
@@ -1411,6 +1415,8 @@ write_scopes = ["/var/memory/self/"]
                         token_usage: TokenUsage {
                             input_tokens: 20,
                             output_tokens: 10,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
                         },
                         finish_reason: FinishReason::ToolUse,
                         provider_response_id: Some("resp-memory-write".into()),
@@ -1458,6 +1464,8 @@ write_scopes = ["/var/memory/self/"]
                         token_usage: TokenUsage {
                             input_tokens: 20,
                             output_tokens: 10,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
                         },
                         finish_reason: FinishReason::ToolUse,
                         provider_response_id: Some("resp-memory-search".into()),

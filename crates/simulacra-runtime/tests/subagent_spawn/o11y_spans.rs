@@ -39,6 +39,8 @@ fn running_the_child_loop_emits_an_invoke_agent_span() {
         token_usage: TokenUsage {
             input_tokens: 3,
             output_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::EndTurn,
         provider_response_id: Some("resp-1".into()),
@@ -100,6 +102,8 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
         token_usage: TokenUsage {
             input_tokens: 8,
             output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 0,
@@ -398,6 +402,8 @@ async fn spawn_agent_tool_exit_reason_uses_snake_case_format_per_spec() {
         token_usage: TokenUsage {
             input_tokens: 5,
             output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 1,
@@ -428,6 +434,8 @@ async fn spawn_agent_tool_exit_reason_completed_uses_snake_case_format_per_spec(
         token_usage: TokenUsage {
             input_tokens: 5,
             output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 1,

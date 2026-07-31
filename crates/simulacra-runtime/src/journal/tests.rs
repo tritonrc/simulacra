@@ -250,6 +250,8 @@ fn read_from_rejects_schema_mismatch_on_individual_entry() {
                 token_usage: TokenUsage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "EndTurn".into(),
                 assistant_message: None,

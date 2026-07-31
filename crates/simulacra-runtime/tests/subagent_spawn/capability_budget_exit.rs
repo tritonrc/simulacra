@@ -12,6 +12,8 @@ async fn spawn_agent_tool_exit_reason_max_turns_uses_snake_case_format_per_spec(
         token_usage: TokenUsage {
             input_tokens: 5,
             output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 3,
@@ -259,6 +261,8 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_has_no_assista
         token_usage: TokenUsage {
             input_tokens: 5,
             output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 0,
@@ -311,6 +315,8 @@ async fn join_child_agent_returns_structured_terminal_success_metadata() {
         token_usage: TokenUsage {
             input_tokens: 9,
             output_tokens: 4,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 1,
@@ -1131,6 +1137,8 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
                                 token_usage: TokenUsage {
                                     input_tokens: 11,
                                     output_tokens: 7,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
                                 },
             reported_tool_uses: None,
                                 used_turns: 1,

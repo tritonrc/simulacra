@@ -29,6 +29,8 @@ fn hitl_response(
         token_usage: TokenUsage {
             input_tokens: 20,
             output_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::ToolUse,
         provider_response_id: Some("resp-hitl".into()),
@@ -392,6 +394,8 @@ async fn replay_consumes_recorded_hitl_tool_result_without_waiting() {
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(assistant_message),

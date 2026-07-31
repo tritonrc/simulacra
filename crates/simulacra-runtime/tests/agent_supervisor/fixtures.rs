@@ -287,6 +287,8 @@ fn completed_output() -> AgentLoopOutput {
         token_usage: TokenUsage {
             input_tokens: 4,
             output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 2,

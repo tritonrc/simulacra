@@ -861,6 +861,8 @@ async fn s056_acp_factory_delegates_request_without_native_environment() {
                     TokenUsage {
                         input_tokens: 13,
                         output_tokens: 21,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                     },
                     3,
                 ))
@@ -1110,6 +1112,8 @@ async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_pro
                     TokenUsage {
                         input_tokens: 5,
                         output_tokens: 8,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
                     },
                     1,
                 ))

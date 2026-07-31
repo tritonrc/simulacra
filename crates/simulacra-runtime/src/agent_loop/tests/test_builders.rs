@@ -10,6 +10,8 @@ fn text_response(content: &str) -> ProviderResponse {
         token_usage: simulacra_types::TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: simulacra_types::FinishReason::EndTurn,
         provider_response_id: Some("resp-1".into()),
@@ -33,6 +35,8 @@ fn tool_call_response(tool_name: &str, args: serde_json::Value) -> ProviderRespo
         token_usage: simulacra_types::TokenUsage {
             input_tokens: 20,
             output_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: simulacra_types::FinishReason::ToolUse,
         provider_response_id: Some("resp-2".into()),

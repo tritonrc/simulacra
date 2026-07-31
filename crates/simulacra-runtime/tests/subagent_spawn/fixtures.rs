@@ -59,6 +59,8 @@ fn child_success_output() -> AgentLoopOutput {
         token_usage: TokenUsage {
             input_tokens: 3,
             output_tokens: 2,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
             reported_tool_uses: None,
         used_turns: 1,
