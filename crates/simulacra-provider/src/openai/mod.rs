@@ -13,6 +13,8 @@ use simulacra_types::{
 };
 use tracing::Instrument;
 
+use crate::transport::{TransportStage, transport_error};
+
 // ── OTel meters ──────────────────────────────────────────────────
 
 /// Lazily-initialized OTel meter instruments for the OpenAI provider.
@@ -126,7 +128,7 @@ impl HttpClient for ReqwestClient {
                 .body(body)
                 .send()
                 .await
-                .map_err(|e| ProviderError::Other(format!("HTTP request failed: {e}")))?;
+                .map_err(|e| transport_error(TransportStage::SendRequest, &e))?;
 
             let status = resp.status().as_u16();
             let resp_headers: HashMap<String, String> = resp
@@ -170,7 +172,7 @@ impl HttpClient for ReqwestClient {
                 .body(body)
                 .send()
                 .await
-                .map_err(|e| ProviderError::Other(format!("HTTP request failed: {e}")))?;
+                .map_err(|e| transport_error(TransportStage::SendRequest, &e))?;
 
             let status = resp.status().as_u16();
             let resp_headers: HashMap<String, String> = resp
@@ -1030,7 +1032,11 @@ impl StreamingProvider for OpenAiProvider {
 mod tests {
     use super::*;
     use rust_decimal::Decimal;
-    use std::sync::{Arc, Mutex};
+    use std::io::Read;
+    use std::net::{Shutdown, SocketAddr, TcpListener};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
 
     struct FakeHttpClient {
         response: Arc<dyn Fn() -> Result<HttpResponse, ProviderError> + Send + Sync>,
@@ -1122,6 +1128,168 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(event);
         }
+    }
+
+    fn assert_transport_retryable(err: ProviderError) {
+        assert!(
+            matches!(&err, ProviderError::Transport(_)),
+            "transport failures must be classified as ProviderError::Transport, got: {err:?}"
+        );
+        assert!(
+            err.is_retryable(),
+            "ProviderError::Transport must be retryable, got: {err:?}"
+        );
+    }
+
+    struct LocalHttpServer {
+        addr: SocketAddr,
+        release: Option<mpsc::Sender<()>>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl LocalHttpServer {
+        fn abort_connection() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("localhost fixture should bind");
+            let addr = listener
+                .local_addr()
+                .expect("localhost fixture should expose an address");
+            let handle = std::thread::spawn(move || {
+                let (stream, _) = listener
+                    .accept()
+                    .expect("fixture should accept one request");
+                let _ = stream.shutdown(Shutdown::Both);
+            });
+            Self {
+                addr,
+                release: None,
+                handle: Some(handle),
+            }
+        }
+
+        fn stall_before_response() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("localhost fixture should bind");
+            let addr = listener
+                .local_addr()
+                .expect("localhost fixture should expose an address");
+            let (release, released) = mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("fixture should accept one request");
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = released.recv();
+                let _ = stream.shutdown(Shutdown::Both);
+            });
+            Self {
+                addr,
+                release: Some(release),
+                handle: Some(handle),
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/v1/chat/completions", self.addr)
+        }
+    }
+
+    impl Drop for LocalHttpServer {
+        fn drop(&mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            let _ = std::net::TcpStream::connect(self.addr);
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("fixture should join cleanly");
+            }
+        }
+    }
+
+    struct NoopHttpStreamSink;
+
+    impl HttpStreamSink for NoopHttpStreamSink {}
+
+    fn timeout_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()
+            .expect("timeout client should build")
+    }
+
+    async fn assert_stalling_fixture_produces_reqwest_timeout() {
+        let server = LocalHttpServer::stall_before_response();
+        let err = timeout_client()
+            .post(server.url())
+            .body("{}")
+            .send()
+            .await
+            .expect_err("stalling localhost response should time out");
+        assert!(
+            err.is_timeout(),
+            "fixture must produce a reqwest timeout, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reqwest_connection_failure_is_transport_and_retryable() {
+        let server = LocalHttpServer::abort_connection();
+        let client = ReqwestClient::new();
+        let err = match client.post(&server.url(), &[], b"{}").await {
+            Ok(_) => panic!("aborted localhost connection should fail before a response"),
+            Err(err) => err,
+        };
+
+        assert_transport_retryable(err);
+    }
+
+    #[tokio::test]
+    async fn reqwest_request_timeout_is_transport_and_retryable() {
+        assert_stalling_fixture_produces_reqwest_timeout().await;
+        let server = LocalHttpServer::stall_before_response();
+        let client = ReqwestClient {
+            client: timeout_client(),
+        };
+        let err = match client.post(&server.url(), &[], b"{}").await {
+            Ok(_) => panic!("request timeout should return a provider error"),
+            Err(err) => err,
+        };
+
+        assert_transport_retryable(err);
+    }
+
+    #[tokio::test]
+    async fn reqwest_streaming_connection_failure_is_transport_and_retryable() {
+        let server = LocalHttpServer::abort_connection();
+        let client = ReqwestClient::new();
+        let mut sink = NoopHttpStreamSink;
+        let err = match client
+            .post_stream(&server.url(), &[], b"{}", &mut sink)
+            .await
+        {
+            Ok(_) => panic!("aborted localhost connection should fail before a response"),
+            Err(err) => err,
+        };
+
+        assert_transport_retryable(err);
+    }
+
+    #[tokio::test]
+    async fn reqwest_streaming_request_timeout_is_transport_and_retryable() {
+        assert_stalling_fixture_produces_reqwest_timeout().await;
+        let server = LocalHttpServer::stall_before_response();
+        let client = ReqwestClient {
+            client: timeout_client(),
+        };
+        let mut sink = NoopHttpStreamSink;
+        let err = match client
+            .post_stream(&server.url(), &[], b"{}", &mut sink)
+            .await
+        {
+            Ok(_) => panic!("streaming request timeout should return a provider error"),
+            Err(err) => err,
+        };
+
+        assert_transport_retryable(err);
     }
 
     fn streaming_response_body() -> Vec<u8> {

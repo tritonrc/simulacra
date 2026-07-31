@@ -60,6 +60,11 @@ pub enum ProviderError {
     ServerError(String),
     #[error("overloaded: {0}")]
     Overloaded(String),
+    /// Transient network-level failure while connecting, sending, or waiting
+    /// for response headers. No HTTP status was observed, so the provider may
+    /// or may not have processed the request.
+    #[error("transport failure: {0}")]
+    Transport(String),
     #[error("budget exhausted: {0}")]
     BudgetExhausted(#[from] crate::BudgetExhausted),
     #[error("other: {0}")]
@@ -86,7 +91,10 @@ impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::RateLimit { .. } | Self::ServerError(_) | Self::Overloaded(_)
+            Self::RateLimit { .. }
+                | Self::ServerError(_)
+                | Self::Overloaded(_)
+                | Self::Transport(_)
         )
     }
 }

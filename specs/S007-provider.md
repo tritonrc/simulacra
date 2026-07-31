@@ -10,7 +10,7 @@
 3. Budget is checked before making the API call. If budget is exhausted, return error without calling the API.
 4. `ProviderResponse` includes `message`, `token_usage`, `finish_reason`, and `provider_response_id`.
 5. Streaming responses are delivered through the S050 provider streaming contract; final `ProviderResponse` is assembled from the stream.
-6. Provider errors are typed: `RateLimit`, `AuthError`, `BadRequest`, `ServerError`, `BudgetExhausted`.
+6. Provider errors are typed: `RateLimit`, `AuthError`, `BadRequest`, `ServerError`, `Transport`, `BudgetExhausted`.
 7. Provider-native response blocks that are required for continuation (for example Anthropic `thinking` and `redacted_thinking` blocks) are preserved on `Message.provider_content`.
 8. Anthropic signed thinking blocks keep their `signature`; redacted thinking blocks keep their encrypted `data`. Continued tool-use requests send those provider-native blocks back before the assistant tool-use block.
 
@@ -25,6 +25,7 @@
 - [x] Provider trait is object-safe (`Box<dyn Provider>`). **Tested in `provider_trait_is_object_safe` but not listed as spec assertion — adding.**
 - [x] `ServerError` is retryable. **Tested via `Overloaded` (529) but no explicit 500 test.**
 - [x] `BadRequest` is not retryable. **Tested in `bad_request_400_is_not_retryable`.**
+- [x] Reqwest connection/request failures and request timeouts raised while sending buffered or streaming requests are returned as `Transport` and are retryable; local request-builder failures are non-retryable and are not `Transport`. **Tested in the buffered and streaming `reqwest_*_is_transport_and_retryable` cases for both Anthropic and OpenAI plus `reqwest_builder_failure_is_non_retryable_and_not_transport`.**
 - [x] Provider does not mutate budget — caller is responsible for updating usage. **Tested in `provider_returns_usage_without_mutating_budget`.**
 - [x] Multiple provider backends can be selected by configuration (Anthropic, OpenAI, etc.). **Stub OpenAiProvider added. Tested in `crate_exposes_multiple_backends_for_configuration_selection`.**
 - [x] Anthropic `thinking` and `redacted_thinking` response blocks are parsed into provider-native message content without becoming visible assistant text. **Tested in `thinking_response_blocks_do_not_break_text_mapping` and `thinking_response_blocks_do_not_break_tool_use_mapping`.**

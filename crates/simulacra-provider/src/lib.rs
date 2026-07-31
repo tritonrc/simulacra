@@ -8,6 +8,9 @@ pub use simulacra_types::{
     ToolDefinition,
 };
 
+#[cfg(any(feature = "anthropic", feature = "openai"))]
+mod transport;
+
 #[cfg(feature = "anthropic")]
 mod anthropic;
 
