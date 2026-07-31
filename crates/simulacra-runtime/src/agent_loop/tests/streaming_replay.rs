@@ -108,6 +108,8 @@ async fn replay_resume_preserves_provider_native_content_for_live_continuation()
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(assistant_message),

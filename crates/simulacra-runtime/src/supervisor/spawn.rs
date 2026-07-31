@@ -366,8 +366,7 @@ impl AgentSupervisor {
                 let duration_ms = context.spawn_start.elapsed().as_millis() as u64;
 
                 let mut budget = lock_mutex(&context.parent_budget, "parent_budget");
-                budget.used_tokens +=
-                    output.token_usage.input_tokens + output.token_usage.output_tokens;
+                budget.used_tokens = budget.used_tokens.saturating_add(token_total);
                 budget.used_turns += output.used_turns;
                 budget.used_cost += output.used_cost;
                 drop(budget);
@@ -497,4 +496,53 @@ fn noop_waker() -> std::task::Waker {
         std::task::RawWakerVTable::new(noop_clone, noop, noop, noop);
     // SAFETY: The vtable functions are valid no-ops and the data pointer is null.
     unsafe { std::task::Waker::from_raw(std::task::RawWaker::new(std::ptr::null(), &VTABLE)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s059_child_budget_rollup_saturates_logical_usage_without_charging_cache_subsets() {
+        let parent_budget = Arc::new(Mutex::new(ResourceBudget::new(
+            0,
+            10,
+            rust_decimal::Decimal::new(100, 0),
+            5,
+        )));
+        let context = ChildResultContext {
+            agent_id: AgentId("extreme-child".into()),
+            parent_id: AgentId("parent-agent".into()),
+            agent_type: "test".into(),
+            parent_budget: Arc::clone(&parent_budget),
+            journal: None,
+            activity_sink: Arc::new(NoopActivitySink),
+            spawn_start: Instant::now(),
+        };
+        let output = AgentLoopOutput {
+            exit_reason: simulacra_types::ExitReason::Complete,
+            messages: vec![],
+            token_usage: simulacra_types::TokenUsage {
+                input_tokens: u64::MAX,
+                output_tokens: 1,
+                cache_read_input_tokens: u64::MAX - 7,
+                cache_write_input_tokens: 7,
+            },
+            reported_tool_uses: None,
+            used_turns: 1,
+            used_cost: rust_decimal::Decimal::ZERO,
+        };
+
+        let completed = AgentSupervisor::process_child_result(Ok(output), &context)
+            .expect("extreme child usage must roll up without panic or wrap");
+
+        assert_eq!(
+            lock_mutex(&parent_budget, "parent_budget").used_tokens,
+            u64::MAX,
+            "parent budget must saturate input plus output without adding cache subsets"
+        );
+        assert_eq!(completed.token_usage.cache_read_input_tokens, u64::MAX - 7);
+        assert_eq!(completed.token_usage.cache_write_input_tokens, 7);
+        assert_eq!(completed.token_usage.total(), u64::MAX);
+    }
 }

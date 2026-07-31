@@ -63,6 +63,7 @@ Each spec lives in `specs/` and is testable. If code and spec disagree, the spec
 | `specs/S056-acp-child-agents.md` | Active | ACP-backed child agents as an alternate supervised child runtime behind the existing child-control tools, with ACP execution treated as an opaque injected runtime boundary |
 | `specs/S057-skill-activated-mcp-catalogs.md` | Active | Skill-activated MCP catalogs: stable `mcp_search`/`mcp_call` meta-tools, atomic per-agent dependency activation, and session-scoped searchable MCP inventories |
 | `specs/S058-capability-aware-tool-advertisement.md` | Active | Capability-aware derived tool views and granular sandbox builtin registration |
+| `specs/S059-context-cache-observability.md` | Active | Context and prompt-cache usage accounting across provider responses, journals, replay, and telemetry |
 
 ## Spec Lifecycle
 

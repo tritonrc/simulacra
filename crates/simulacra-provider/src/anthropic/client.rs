@@ -23,6 +23,9 @@ use crate::transport::{TransportStage, transport_error};
 struct ProviderMeters {
     duration_histogram: Histogram<f64>,
     token_usage_histogram: Histogram<u64>,
+    cache_read_histogram: Histogram<u64>,
+    cache_write_histogram: Histogram<u64>,
+    cache_hit_ratio_histogram: Histogram<f64>,
 }
 
 impl ProviderMeters {
@@ -42,8 +45,40 @@ impl ProviderMeters {
                     .with_unit("{token}")
                     .with_description("Token usage per LLM call")
                     .build(),
+                cache_read_histogram: meter
+                    .u64_histogram("simulacra.context.cache.read_tokens")
+                    .with_unit("{token}")
+                    .with_description("Input tokens served from the provider cache")
+                    .build(),
+                cache_write_histogram: meter
+                    .u64_histogram("simulacra.context.cache.write_tokens")
+                    .with_unit("{token}")
+                    .with_description("Input tokens written to the provider cache")
+                    .build(),
+                cache_hit_ratio_histogram: meter
+                    .f64_histogram("simulacra.context.cache.hit_ratio")
+                    .with_unit("1")
+                    .with_description("Provider cache-read tokens divided by logical input tokens")
+                    .build(),
             }
         })
+    }
+
+    fn record_cache_usage(&self, usage: &TokenUsage, model: &str) {
+        let attrs = &[
+            KeyValue::new("gen_ai.provider.name", "anthropic"),
+            KeyValue::new("gen_ai.request.model", model.to_owned()),
+        ];
+        self.cache_read_histogram
+            .record(usage.cache_read_input_tokens, attrs);
+        self.cache_write_histogram
+            .record(usage.cache_write_input_tokens, attrs);
+        let hit_ratio = if usage.input_tokens == 0 {
+            0.0
+        } else {
+            usage.cache_read_input_tokens as f64 / usage.input_tokens as f64
+        };
+        self.cache_hit_ratio_histogram.record(hit_ratio, attrs);
     }
 }
 
@@ -281,6 +316,8 @@ struct AnthropicSseAccumulator<'a> {
     response_id: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_write_input_tokens: u64,
     content: String,
     stop_reason: Option<String>,
     pending_tool_blocks: std::collections::BTreeMap<u64, (String, String, String)>,
@@ -299,6 +336,8 @@ impl<'a> AnthropicSseAccumulator<'a> {
             response_id: None,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
             content: String::new(),
             stop_reason: None,
             pending_tool_blocks: std::collections::BTreeMap::new(),
@@ -334,10 +373,21 @@ impl<'a> AnthropicSseAccumulator<'a> {
         if let Some(msg) = event.get("message") {
             self.response_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
             if let Some(usage) = msg.get("usage") {
-                self.input_tokens = usage
+                let input_tokens = usage
                     .get("input_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                self.cache_read_input_tokens = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.cache_write_input_tokens = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.input_tokens = input_tokens
+                    .saturating_add(self.cache_read_input_tokens)
+                    .saturating_add(self.cache_write_input_tokens);
             }
         }
     }
@@ -561,6 +611,8 @@ impl<'a> AnthropicSseAccumulator<'a> {
             token_usage: TokenUsage {
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
+                cache_read_input_tokens: self.cache_read_input_tokens,
+                cache_write_input_tokens: self.cache_write_input_tokens,
             },
             finish_reason,
             provider_response_id: self.response_id,
@@ -847,6 +899,7 @@ impl Provider for AnthropicProvider {
                     KeyValue::new("gen_ai.token.type", "output"),
                 ],
             );
+            meters.record_cache_usage(&provider_resp.token_usage, &model);
 
             Ok(provider_resp)
         };
@@ -1045,6 +1098,7 @@ impl StreamingProvider for AnthropicProvider {
                     KeyValue::new("gen_ai.token.type", "output"),
                 ],
             );
+            meters.record_cache_usage(&provider_resp.token_usage, &model);
 
             Ok(provider_resp)
         };
@@ -1061,9 +1115,146 @@ mod tests {
     use simulacra_types::{FinishReason, ToolDefinition};
     use std::io::Read;
     use std::net::{Shutdown, SocketAddr, TcpListener};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, Mutex, OnceLock, mpsc};
     use std::thread::JoinHandle;
     use std::time::Duration;
+
+    #[derive(Clone, Debug)]
+    enum RecordedMetricValue {
+        U64(u64),
+        F64(f64),
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordedMetric {
+        name: String,
+        value: RecordedMetricValue,
+        attributes: Vec<KeyValue>,
+    }
+
+    #[derive(Clone, Default)]
+    struct TestMeterProvider {
+        observations: Arc<Mutex<Vec<RecordedMetric>>>,
+    }
+
+    struct TestU64Histogram {
+        name: String,
+        observations: Arc<Mutex<Vec<RecordedMetric>>>,
+    }
+
+    impl opentelemetry::metrics::SyncInstrument<u64> for TestU64Histogram {
+        fn measure(&self, value: u64, attributes: &[KeyValue]) {
+            self.observations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(RecordedMetric {
+                    name: self.name.clone(),
+                    value: RecordedMetricValue::U64(value),
+                    attributes: attributes.to_vec(),
+                });
+        }
+    }
+
+    struct TestF64Histogram {
+        name: String,
+        observations: Arc<Mutex<Vec<RecordedMetric>>>,
+    }
+
+    impl opentelemetry::metrics::SyncInstrument<f64> for TestF64Histogram {
+        fn measure(&self, value: f64, attributes: &[KeyValue]) {
+            self.observations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(RecordedMetric {
+                    name: self.name.clone(),
+                    value: RecordedMetricValue::F64(value),
+                    attributes: attributes.to_vec(),
+                });
+        }
+    }
+
+    impl opentelemetry::metrics::InstrumentProvider for TestMeterProvider {
+        fn u64_histogram(
+            &self,
+            builder: opentelemetry::metrics::HistogramBuilder<
+                '_,
+                opentelemetry::metrics::Histogram<u64>,
+            >,
+        ) -> opentelemetry::metrics::Histogram<u64> {
+            opentelemetry::metrics::Histogram::new(Arc::new(TestU64Histogram {
+                name: builder.name.into_owned(),
+                observations: Arc::clone(&self.observations),
+            }))
+        }
+
+        fn f64_histogram(
+            &self,
+            builder: opentelemetry::metrics::HistogramBuilder<
+                '_,
+                opentelemetry::metrics::Histogram<f64>,
+            >,
+        ) -> opentelemetry::metrics::Histogram<f64> {
+            opentelemetry::metrics::Histogram::new(Arc::new(TestF64Histogram {
+                name: builder.name.into_owned(),
+                observations: Arc::clone(&self.observations),
+            }))
+        }
+    }
+
+    impl opentelemetry::metrics::MeterProvider for TestMeterProvider {
+        fn meter_with_scope(
+            &self,
+            _scope: opentelemetry::InstrumentationScope,
+        ) -> opentelemetry::metrics::Meter {
+            opentelemetry::metrics::Meter::new(Arc::new(self.clone()))
+        }
+    }
+
+    fn test_meter_provider() -> &'static TestMeterProvider {
+        static PROVIDER: OnceLock<TestMeterProvider> = OnceLock::new();
+        PROVIDER.get_or_init(|| {
+            let provider = TestMeterProvider::default();
+            opentelemetry::global::set_meter_provider(provider.clone());
+            provider
+        })
+    }
+
+    fn has_attribute(metric: &RecordedMetric, key: &str, value: &str) -> bool {
+        metric
+            .attributes
+            .iter()
+            .any(|attribute| attribute.key.as_str() == key && attribute.value.to_string() == value)
+    }
+
+    fn has_u64_metric(
+        observations: &[RecordedMetric],
+        name: &str,
+        value: u64,
+        provider: &str,
+        model: &str,
+    ) -> bool {
+        observations.iter().any(|metric| {
+            metric.name == name
+                && matches!(metric.value, RecordedMetricValue::U64(actual) if actual == value)
+                && has_attribute(metric, "gen_ai.provider.name", provider)
+                && has_attribute(metric, "gen_ai.request.model", model)
+        })
+    }
+
+    fn has_f64_metric(
+        observations: &[RecordedMetric],
+        name: &str,
+        value: f64,
+        provider: &str,
+        model: &str,
+    ) -> bool {
+        observations.iter().any(|metric| {
+            metric.name == name
+                && matches!(metric.value, RecordedMetricValue::F64(actual) if actual == value)
+                && has_attribute(metric, "gen_ai.provider.name", provider)
+                && has_attribute(metric, "gen_ai.request.model", model)
+        })
+    }
 
     /// A fake HTTP client that returns a pre-configured response.
     struct FakeHttpClient {
@@ -1230,6 +1421,26 @@ mod tests {
         .unwrap()
     }
 
+    fn cached_success_response_json(input_tokens: u64, output_tokens: u64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": "msg_cached123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Cached hello."}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": input_tokens,
+                "cache_read_input_tokens": 17,
+                "cache_creation_input_tokens": 9,
+                "output_tokens": output_tokens
+            }
+        }))
+        .unwrap()
+    }
+
     fn tool_use_response_json() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "id": "msg_tool456",
@@ -1314,6 +1525,41 @@ mod tests {
         .to_vec()
     }
 
+    fn cached_streaming_response_body_with_usage(
+        input_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        output_tokens: u64,
+    ) -> Vec<u8> {
+        format!(
+            concat!(
+            "event: message_start\n",
+            "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_cached_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"content\":[],\"stop_reason\":null,\"usage\":{{\"input_tokens\":{},\"cache_read_input_tokens\":{},\"cache_creation_input_tokens\":{},\"output_tokens\":0}}}}}}\n\n",
+            "event: content_block_start\n",
+            "data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"Cached\"}}}}\n\n",
+            "event: message_delta\n",
+            "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{}}}}}\n\n",
+            "event: message_stop\n",
+            "data: {{\"type\":\"message_stop\"}}\n\n"
+            ),
+            input_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            output_tokens,
+        )
+        .into_bytes()
+    }
+
+    fn cached_streaming_response_body() -> Vec<u8> {
+        cached_streaming_response_body_with_usage(11, 5, 3, 7)
+    }
+
+    fn token_usage_json(response: &ProviderResponse) -> serde_json::Value {
+        serde_json::to_value(&response.token_usage).expect("token usage should serialize")
+    }
+
     fn streaming_thinking_tool_use_body() -> Vec<u8> {
         concat!(
             "event: message_start\n",
@@ -1346,6 +1592,7 @@ mod tests {
     }
 
     fn fresh_budget() -> ResourceBudget {
+        let _ = test_meter_provider();
         ResourceBudget::new(100_000, 100, Decimal::new(100, 0), 10)
     }
 
@@ -1604,9 +1851,85 @@ mod tests {
         assert!(resp.message.tool_calls.is_empty());
         assert_eq!(resp.token_usage.input_tokens, 10);
         assert_eq!(resp.token_usage.output_tokens, 25);
+        let usage = token_usage_json(&resp);
+        assert_eq!(
+            usage["cache_read_input_tokens"], 0,
+            "missing Anthropic cache reads must default to zero"
+        );
+        assert_eq!(
+            usage["cache_write_input_tokens"], 0,
+            "missing Anthropic cache creation tokens must default to zero"
+        );
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.provider_response_id, Some("msg_test123".to_string()));
         assert_eq!(resp.model, "claude-sonnet-4-20250514");
+    }
+
+    #[tokio::test]
+    async fn s059_anthropic_sync_cache_counters_normalize_logical_input() {
+        let fake = FakeHttpClient::with_response(200, &cached_success_response_json(10, 25));
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(
+            resp.token_usage.input_tokens, 36,
+            "Anthropic logical input must add uncached input, cache reads, and cache creation"
+        );
+        assert_eq!(resp.token_usage.output_tokens, 25);
+        assert_eq!(resp.token_usage.total(), 61);
+        let usage = token_usage_json(&resp);
+        assert_eq!(usage["cache_read_input_tokens"], 17);
+        assert_eq!(usage["cache_write_input_tokens"], 9);
+    }
+
+    #[tokio::test]
+    async fn s059_anthropic_sync_logical_input_sum_saturates() {
+        let fake =
+            FakeHttpClient::with_response(200, &cached_success_response_json(u64::MAX - 4, 1));
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(
+            resp.token_usage.input_tokens,
+            u64::MAX,
+            "Anthropic logical input normalization must saturate instead of overflowing"
+        );
+        assert_eq!(
+            resp.token_usage.total(),
+            u64::MAX,
+            "logical input plus nonzero output must saturate without panicking during successful-response telemetry"
+        );
+        let usage = token_usage_json(&resp);
+        assert_eq!(usage["cache_read_input_tokens"], 17);
+        assert_eq!(usage["cache_write_input_tokens"], 9);
     }
 
     // ── Test 3: Tool use response ──────────────────────────────────
@@ -1994,6 +2317,15 @@ mod tests {
         assert!(resp.message.tool_calls.is_empty());
         assert_eq!(resp.token_usage.input_tokens, 11);
         assert_eq!(resp.token_usage.output_tokens, 7);
+        let usage = token_usage_json(&resp);
+        assert_eq!(
+            usage["cache_read_input_tokens"], 0,
+            "missing Anthropic streaming cache reads must default to zero"
+        );
+        assert_eq!(
+            usage["cache_write_input_tokens"], 0,
+            "missing Anthropic streaming cache creation tokens must default to zero"
+        );
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.provider_response_id, Some("msg_stream789".to_string()));
         assert_eq!(resp.model, "claude-sonnet-4-20250514");
@@ -2039,6 +2371,98 @@ mod tests {
         assert_eq!(resp.token_usage.output_tokens, 7);
         assert_eq!(resp.finish_reason, FinishReason::EndTurn);
         assert_eq!(resp.provider_response_id, Some("msg_stream789".to_string()));
+    }
+
+    #[tokio::test]
+    async fn s059_anthropic_streaming_message_start_cache_counters_normalize_input() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &cached_streaming_response_body(),
+            headers,
+        );
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Say hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let resp = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("Anthropic cached streaming response should assemble");
+
+        assert_eq!(
+            resp.token_usage.input_tokens, 19,
+            "Anthropic streaming logical input must add uncached input, cache reads, and cache creation"
+        );
+        assert_eq!(resp.token_usage.output_tokens, 7);
+        assert_eq!(resp.token_usage.total(), 26);
+        let usage = token_usage_json(&resp);
+        assert_eq!(usage["cache_read_input_tokens"], 5);
+        assert_eq!(usage["cache_write_input_tokens"], 3);
+    }
+
+    #[tokio::test]
+    async fn s059_anthropic_streaming_logical_input_sum_saturates() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &cached_streaming_response_body_with_usage(u64::MAX - 4, 5, 3, 1),
+            headers,
+        );
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Say hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let resp = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("Anthropic saturated cached streaming response should assemble");
+
+        assert_eq!(
+            resp.token_usage.input_tokens,
+            u64::MAX,
+            "Anthropic streaming logical input normalization must saturate"
+        );
+        assert_eq!(resp.token_usage.output_tokens, 1);
+        assert_eq!(resp.token_usage.total(), u64::MAX);
+        let usage = token_usage_json(&resp);
+        assert_eq!(usage["cache_read_input_tokens"], 5);
+        assert_eq!(usage["cache_write_input_tokens"], 3);
     }
 
     #[tokio::test]
@@ -2983,6 +3407,167 @@ mod tests {
                         && event.fields.get("model") == Some(&model.to_string())
                 }),
                 "expected gen_ai.client.token.usage histogram event tagged with operation=chat and the exact model"
+            );
+        }
+
+        #[tokio::test]
+        async fn s059_cache_metrics_are_recorded_for_sync_streaming_and_zero_input_calls() {
+            let model = "claude-sonnet-4-20250514";
+            let recorder = test_meter_provider();
+            recorder
+                .observations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+            let messages = vec![Message {
+                role: simulacra_types::Role::User,
+                content: "Hello".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            }];
+            let mut zero_input_body: serde_json::Value =
+                serde_json::from_slice(&success_response_json()).unwrap();
+            zero_input_body["id"] = serde_json::json!("msg_zero_cache");
+            zero_input_body["usage"] = serde_json::json!({
+                "input_tokens": 0,
+                "output_tokens": 4
+            });
+
+            let sync_provider = AnthropicProvider::with_http_client(
+                "test-key",
+                model,
+                Box::new(FakeHttpClient::with_response(
+                    200,
+                    &cached_success_response_json(10, 25),
+                )),
+            );
+            let mut headers = HashMap::new();
+            headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+            let streaming_provider = AnthropicProvider::with_http_client(
+                "test-key",
+                model,
+                Box::new(FakeHttpClient::with_response_and_headers(
+                    200,
+                    &cached_streaming_response_body(),
+                    headers,
+                )),
+            );
+            let zero_provider = AnthropicProvider::with_http_client(
+                "test-key",
+                model,
+                Box::new(FakeHttpClient::with_response(
+                    200,
+                    &serde_json::to_vec(&zero_input_body).unwrap(),
+                )),
+            );
+            let sink = RecordingProviderStreamSink::default();
+            let mut budget = fresh_budget();
+
+            let _ = sync_provider
+                .chat(&messages, &[], &mut budget)
+                .await
+                .expect("cached sync call should succeed");
+            let _ = simulacra_types::StreamingProvider::chat_stream(
+                &streaming_provider,
+                &messages,
+                &[],
+                &mut budget,
+                &sink,
+            )
+            .await
+            .expect("cached streaming call should succeed");
+            let _ = zero_provider
+                .chat(&messages, &[], &mut budget)
+                .await
+                .expect("zero-input sync call should succeed");
+
+            let observations = recorder
+                .observations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            assert!(
+                has_u64_metric(
+                    &observations,
+                    "simulacra.context.cache.read_tokens",
+                    17,
+                    "anthropic",
+                    model,
+                ),
+                "sync responses must record cache reads in a u64 histogram with exact labels"
+            );
+            assert!(
+                has_u64_metric(
+                    &observations,
+                    "simulacra.context.cache.write_tokens",
+                    9,
+                    "anthropic",
+                    model,
+                ),
+                "sync responses must record cache writes in a u64 histogram with exact labels"
+            );
+            assert!(
+                has_f64_metric(
+                    &observations,
+                    "simulacra.context.cache.hit_ratio",
+                    17.0 / 36.0,
+                    "anthropic",
+                    model,
+                ),
+                "sync responses must record cache hit ratio in an f64 histogram"
+            );
+            assert!(
+                has_u64_metric(
+                    &observations,
+                    "simulacra.context.cache.read_tokens",
+                    5,
+                    "anthropic",
+                    model,
+                ),
+                "streaming responses must record cache reads in a u64 histogram"
+            );
+            assert!(
+                has_u64_metric(
+                    &observations,
+                    "simulacra.context.cache.write_tokens",
+                    3,
+                    "anthropic",
+                    model,
+                ),
+                "streaming responses must record cache writes in a u64 histogram"
+            );
+            assert!(
+                has_f64_metric(
+                    &observations,
+                    "simulacra.context.cache.hit_ratio",
+                    5.0 / 19.0,
+                    "anthropic",
+                    model,
+                ),
+                "streaming responses must record cache hit ratio in an f64 histogram"
+            );
+            assert!(
+                has_u64_metric(
+                    &observations,
+                    "simulacra.context.cache.read_tokens",
+                    0,
+                    "anthropic",
+                    model,
+                ) && has_u64_metric(
+                    &observations,
+                    "simulacra.context.cache.write_tokens",
+                    0,
+                    "anthropic",
+                    model,
+                ) && has_f64_metric(
+                    &observations,
+                    "simulacra.context.cache.hit_ratio",
+                    0.0,
+                    "anthropic",
+                    model,
+                ),
+                "zero logical input must still record zero-valued u64 cache counters and an f64 zero hit ratio"
             );
         }
 

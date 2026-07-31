@@ -50,10 +50,64 @@ pub struct ProviderContentBlock {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
 }
 
 impl TokenUsage {
     pub fn total(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenUsage;
+    use serde_json::json;
+
+    #[test]
+    fn token_usage_cache_counters_default_roundtrip_and_do_not_affect_total() {
+        let legacy: TokenUsage = serde_json::from_value(json!({
+            "input_tokens": 100,
+            "output_tokens": 25
+        }))
+        .expect("legacy TokenUsage JSON should remain readable");
+
+        assert_eq!(legacy.total(), 125);
+        let legacy_json = serde_json::to_value(&legacy).expect("TokenUsage should serialize");
+        assert_eq!(
+            legacy_json["cache_read_input_tokens"], 0,
+            "legacy TokenUsage values must default missing cache reads to zero"
+        );
+        assert_eq!(
+            legacy_json["cache_write_input_tokens"], 0,
+            "legacy TokenUsage values must default missing cache writes to zero"
+        );
+
+        let with_cache: TokenUsage = serde_json::from_value(json!({
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "cache_read_input_tokens": 40,
+            "cache_write_input_tokens": 15
+        }))
+        .expect("S059 TokenUsage JSON should deserialize");
+
+        assert_eq!(
+            with_cache.total(),
+            125,
+            "cache counters are subsets of input_tokens and must not be double-counted"
+        );
+        let with_cache_json =
+            serde_json::to_value(&with_cache).expect("TokenUsage should serialize");
+        assert_eq!(
+            with_cache_json["cache_read_input_tokens"], 40,
+            "cache reads must round-trip when present"
+        );
+        assert_eq!(
+            with_cache_json["cache_write_input_tokens"], 15,
+            "cache writes must round-trip when present"
+        );
     }
 }

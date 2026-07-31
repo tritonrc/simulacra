@@ -67,8 +67,16 @@ impl JournalStorage for InMemoryJournalStorage {
         let mut total = TokenUsage::default();
         for entry in entries.iter().filter(|e| e.agent_id == *agent_id) {
             if let JournalEntryKind::LlmResponse { token_usage, .. } = &entry.entry {
-                total.input_tokens += token_usage.input_tokens;
-                total.output_tokens += token_usage.output_tokens;
+                total.input_tokens = total.input_tokens.saturating_add(token_usage.input_tokens);
+                total.output_tokens = total
+                    .output_tokens
+                    .saturating_add(token_usage.output_tokens);
+                total.cache_read_input_tokens = total
+                    .cache_read_input_tokens
+                    .saturating_add(token_usage.cache_read_input_tokens);
+                total.cache_write_input_tokens = total
+                    .cache_write_input_tokens
+                    .saturating_add(token_usage.cache_write_input_tokens);
             }
         }
         Ok(total)

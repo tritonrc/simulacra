@@ -121,6 +121,8 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
                 token_usage: TokenUsage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(assistant),

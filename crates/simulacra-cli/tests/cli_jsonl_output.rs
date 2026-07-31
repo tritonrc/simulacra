@@ -250,6 +250,8 @@ fn final_response(text: &str, input_tokens: u64, output_tokens: u64) -> Provider
         token_usage: TokenUsage {
             input_tokens,
             output_tokens,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::EndTurn,
         provider_response_id: Some("resp-final".into()),
@@ -273,6 +275,8 @@ fn tool_call_response() -> ProviderResponse {
         token_usage: TokenUsage {
             input_tokens: 5,
             output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::ToolUse,
         provider_response_id: Some("resp-tool".into()),
@@ -305,6 +309,8 @@ fn spawn_agent_tool_call_response() -> ProviderResponse {
         token_usage: TokenUsage {
             input_tokens: 5,
             output_tokens: 3,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::ToolUse,
         provider_response_id: Some("resp-spawn".into()),

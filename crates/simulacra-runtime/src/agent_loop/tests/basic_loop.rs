@@ -64,6 +64,549 @@ async fn proc_budget_mirror_tracks_loop_owned_turn_and_token_updates() {
     assert_eq!(mirrored.used_tokens, 15);
 }
 
+fn s059_cached_response(
+    mut response: ProviderResponse,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_write_input_tokens: u64,
+) -> ProviderResponse {
+    response.token_usage = serde_json::from_value(serde_json::json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_write_input_tokens": cache_write_input_tokens
+    }))
+    .expect("cached TokenUsage fixture should deserialize");
+    response
+}
+
+fn s059_token_usage_json(usage: &TokenUsage) -> serde_json::Value {
+    serde_json::to_value(usage).expect("token usage should serialize")
+}
+
+async fn assert_s059_live_extreme_cache_aggregation_saturates(cache_reads: bool) {
+    let (first_read, second_read, first_write, second_write) = if cache_reads {
+        (u64::MAX, 1, 0, 0)
+    } else {
+        (0, 0, u64::MAX, 1)
+    };
+    let provider = FakeProvider::new(vec![
+        s059_cached_response(
+            tool_call_response("echo", serde_json::json!({"msg": "extreme cache usage"})),
+            0,
+            0,
+            first_read,
+            first_write,
+        ),
+        s059_cached_response(
+            text_response("extreme cache usage complete"),
+            0,
+            0,
+            second_read,
+            second_write,
+        ),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("echo tool registration should succeed");
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        default_budget(),
+    );
+
+    let output = agent
+        .run("aggregate extreme cache usage")
+        .await
+        .expect("extreme cache counters must not panic or wrap a successful run");
+    let usage = s059_token_usage_json(&output.token_usage);
+    let field = if cache_reads {
+        "cache_read_input_tokens"
+    } else {
+        "cache_write_input_tokens"
+    };
+    assert_eq!(
+        usage[field],
+        serde_json::json!(u64::MAX),
+        "{field} aggregation must saturate"
+    );
+    assert_eq!(
+        output.token_usage.total(),
+        0,
+        "cache subsets must not alter budget-token totals"
+    );
+}
+
+async fn assert_s059_live_logical_aggregation_saturates(logical_input: bool) {
+    let (first_input, second_input, first_output, second_output) = if logical_input {
+        (u64::MAX - 4, 10, 0, 0)
+    } else {
+        (10, 10, u64::MAX - 4, 10)
+    };
+    let provider = FakeProvider::new(vec![
+        s059_cached_response(
+            tool_call_response("echo", serde_json::json!({"msg": "extreme logical usage"})),
+            first_input,
+            first_output,
+            3,
+            1,
+        ),
+        s059_cached_response(
+            text_response("extreme logical usage complete"),
+            second_input,
+            second_output,
+            2,
+            1,
+        ),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("echo tool registration should succeed");
+    let unlimited_budget =
+        ResourceBudget::new(0, 10, rust_decimal::Decimal::new(100, 0), 5);
+    let budget_mirror = Arc::new(Mutex::new(unlimited_budget.clone()));
+    let turn_mirror = Arc::new(AtomicU64::new(0));
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        unlimited_budget,
+    );
+    agent.set_proc_budget_mirror(Arc::clone(&budget_mirror), Arc::clone(&turn_mirror));
+
+    let output = agent
+        .run("aggregate extreme logical usage")
+        .await
+        .expect("extreme logical counters must not panic or wrap a successful run");
+    let logical_field = if logical_input {
+        output.token_usage.input_tokens
+    } else {
+        output.token_usage.output_tokens
+    };
+    assert_eq!(logical_field, u64::MAX, "logical aggregation must saturate");
+    assert_eq!(output.token_usage.total(), u64::MAX);
+    assert_eq!(output.token_usage.cache_read_input_tokens, 5);
+    assert_eq!(output.token_usage.cache_write_input_tokens, 2);
+    assert_eq!(
+        budget_mirror
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .used_tokens,
+        u64::MAX,
+        "budget charging must saturate logical input plus output without adding cache subsets"
+    );
+}
+
+#[tokio::test]
+async fn s059_live_agent_run_cache_read_aggregation_saturates() {
+    assert_s059_live_extreme_cache_aggregation_saturates(true).await;
+}
+
+#[tokio::test]
+async fn s059_live_agent_run_cache_write_aggregation_saturates() {
+    assert_s059_live_extreme_cache_aggregation_saturates(false).await;
+}
+
+#[tokio::test]
+async fn s059_live_agent_run_logical_input_aggregation_saturates() {
+    assert_s059_live_logical_aggregation_saturates(true).await;
+}
+
+#[tokio::test]
+async fn s059_live_agent_run_output_aggregation_saturates() {
+    assert_s059_live_logical_aggregation_saturates(false).await;
+}
+
+#[tokio::test]
+async fn s059_live_agent_run_aggregates_cache_counters_without_double_charging_budget() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![
+        s059_cached_response(
+            tool_call_response("echo", serde_json::json!({"msg": "cached live"})),
+            20,
+            10,
+            7,
+            2,
+        ),
+        s059_cached_response(text_response("cached live complete"), 11, 6, 4, 3),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("echo tool registration should succeed");
+    let initial_budget = default_budget();
+    let budget_mirror = Arc::new(Mutex::new(initial_budget.clone()));
+    let turn_mirror = Arc::new(AtomicU64::new(0));
+    let mut agent = build_loop(
+        provider,
+        tools,
+        Box::new(PassthroughContext),
+        journal,
+        initial_budget,
+    );
+    agent.set_proc_budget_mirror(Arc::clone(&budget_mirror), Arc::clone(&turn_mirror));
+
+    let output = agent.run("use cache").await.expect("run should succeed");
+
+    assert_eq!(output.token_usage.input_tokens, 31);
+    assert_eq!(output.token_usage.output_tokens, 16);
+    assert_eq!(output.token_usage.total(), 47);
+    let usage = s059_token_usage_json(&output.token_usage);
+    assert_eq!(
+        usage["cache_read_input_tokens"], 11,
+        "live agent output must aggregate distinct cache reads across tool-use and terminal responses"
+    );
+    assert_eq!(
+        usage["cache_write_input_tokens"], 5,
+        "live agent output must aggregate distinct cache writes across tool-use and terminal responses"
+    );
+
+    let mirrored = budget_mirror.lock().unwrap().clone();
+    assert_eq!(
+        mirrored.used_tokens, 47,
+        "budget charging must use logical input plus output, without adding cache counters again"
+    );
+}
+
+struct RecordingLlmAfterHook {
+    after_context: Arc<Mutex<Option<serde_json::Value>>>,
+}
+
+impl simulacra_hooks::HookModule for RecordingLlmAfterHook {
+    fn name(&self) -> &str {
+        "recording-llm-after-hook"
+    }
+
+    fn invoke(
+        &self,
+        phase: simulacra_hooks::Phase,
+        operation: simulacra_hooks::Operation,
+        context: &str,
+    ) -> Result<simulacra_hooks::Verdict, simulacra_hooks::HookError> {
+        assert_eq!(operation, simulacra_hooks::Operation::Llm);
+        if phase == simulacra_hooks::Phase::After {
+            let context =
+                serde_json::from_str(context).expect("LLM after-hook context should be JSON");
+            *self
+                .after_context
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(context);
+        }
+        Ok(simulacra_hooks::Verdict::continue_unchanged())
+    }
+}
+
+#[tokio::test]
+async fn s059_llm_after_hook_usage_schema_remains_s026_compatible() {
+    let after_context = Arc::new(Mutex::new(None));
+    let mut pipeline = simulacra_hooks::HookPipeline::new();
+    pipeline.add(
+        simulacra_hooks::Operation::Llm,
+        Arc::new(RecordingLlmAfterHook {
+            after_context: Arc::clone(&after_context),
+        }),
+    );
+    let response = s059_cached_response(text_response("hooked response"), 10, 5, 7, 3);
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(FakeProvider::new(vec![response])),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        default_budget(),
+        None,
+        Some(Arc::new(pipeline)),
+    );
+
+    agent
+        .run("capture the after hook")
+        .await
+        .expect("hooked agent run should succeed");
+
+    let context = after_context
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .expect("the LLM after hook should receive a context");
+    assert_eq!(
+        context["usage"],
+        serde_json::json!({
+            "input_tokens": 10,
+            "output_tokens": 5
+        }),
+        "S059 must not expand the S026 public LLM after-hook usage object"
+    );
+}
+
+fn s059_two_turn_replay_entries(
+    tool_response: ProviderResponse,
+    terminal_response: ProviderResponse,
+) -> Vec<JournalEntry> {
+    vec![
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1000,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1001,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 2,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1002,
+            entry: JournalEntryKind::LlmResponse {
+                model: "test-model".into(),
+                token_usage: tool_response.token_usage,
+                finish_reason: "ToolUse".into(),
+                assistant_message: Some(tool_response.message),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1003,
+            entry: JournalEntryKind::ToolCall {
+                tool_call_id: Some("tc-1".into()),
+                tool_name: "echo".into(),
+                arguments: serde_json::json!({"msg": "cached replay"}),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1004,
+            entry: JournalEntryKind::ToolResult {
+                tool_call_id: Some("tc-1".into()),
+                tool_name: "echo".into(),
+                content: r#"{"msg":"cached replay"}"#.into(),
+                is_error: false,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1005,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1006,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 4,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1007,
+            entry: JournalEntryKind::LlmResponse {
+                model: "test-model".into(),
+                token_usage: terminal_response.token_usage,
+                finish_reason: "EndTurn".into(),
+                assistant_message: Some(terminal_response.message),
+            },
+        },
+    ]
+}
+
+#[tokio::test]
+async fn s059_replayed_agent_run_logical_input_aggregation_saturates() {
+    let replay_entries = s059_two_turn_replay_entries(
+        s059_cached_response(
+            tool_call_response("echo", serde_json::json!({"msg": "cached replay"})),
+            u64::MAX - 4,
+            0,
+            3,
+            1,
+        ),
+        s059_cached_response(text_response("cached replay complete"), 10, 0, 2, 1),
+    );
+    let unlimited_budget =
+        ResourceBudget::new(0, 10, rust_decimal::Decimal::new(100, 0), 5);
+    let budget_mirror = Arc::new(Mutex::new(unlimited_budget.clone()));
+    let turn_mirror = Arc::new(AtomicU64::new(0));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("echo tool registration should succeed");
+    let mut agent = AgentLoop::with_clock_and_replay(
+        default_config(),
+        Box::new(FakeProvider::new(vec![])),
+        tools,
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        unlimited_budget,
+        Box::new(FixedClock(2001)),
+        Some(replay_entries),
+    );
+    agent.set_proc_budget_mirror(Arc::clone(&budget_mirror), Arc::clone(&turn_mirror));
+
+    let output = agent
+        .run("replay extreme logical usage")
+        .await
+        .expect("replayed logical counters must not panic or wrap");
+
+    assert_eq!(output.token_usage.input_tokens, u64::MAX);
+    assert_eq!(output.token_usage.output_tokens, 0);
+    assert_eq!(output.token_usage.cache_read_input_tokens, 5);
+    assert_eq!(output.token_usage.cache_write_input_tokens, 2);
+    assert_eq!(output.token_usage.total(), u64::MAX);
+    assert_eq!(
+        budget_mirror
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .used_tokens,
+        u64::MAX,
+        "replay budget charging must exclude cache subsets"
+    );
+}
+
+#[tokio::test]
+async fn s059_replayed_agent_run_restores_cache_counters_from_llm_response() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let tool_response = s059_cached_response(
+        tool_call_response("echo", serde_json::json!({"msg": "cached replay"})),
+        23,
+        8,
+        9,
+        4,
+    );
+    let terminal_response =
+        s059_cached_response(text_response("cached replay complete"), 13, 7, 5, 6);
+    let replay_entries = vec![
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1000,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1001,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 2,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1002,
+            entry: JournalEntryKind::LlmResponse {
+                model: "test-model".into(),
+                token_usage: tool_response.token_usage,
+                finish_reason: "ToolUse".into(),
+                assistant_message: Some(tool_response.message),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1003,
+            entry: JournalEntryKind::ToolCall {
+                tool_call_id: Some("tc-1".into()),
+                tool_name: "echo".into(),
+                arguments: serde_json::json!({"msg": "cached replay"}),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1004,
+            entry: JournalEntryKind::ToolResult {
+                tool_call_id: Some("tc-1".into()),
+                tool_name: "echo".into(),
+                content: r#"{"msg":"cached replay"}"#.into(),
+                is_error: false,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1005,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1006,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 4,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1007,
+            entry: JournalEntryKind::LlmResponse {
+                model: "test-model".into(),
+                token_usage: terminal_response.token_usage,
+                finish_reason: "EndTurn".into(),
+                assistant_message: Some(terminal_response.message),
+            },
+        },
+    ];
+    let initial_budget = default_budget();
+    let budget_mirror = Arc::new(Mutex::new(initial_budget.clone()));
+    let turn_mirror = Arc::new(AtomicU64::new(0));
+    let mut agent = AgentLoop::with_clock_and_replay(
+        default_config(),
+        Box::new(FakeProvider::new(vec![])),
+        {
+            let mut tools = ToolRegistry::new();
+            tools
+                .register(Box::new(EchoTool))
+                .expect("echo tool registration should succeed");
+            tools
+        },
+        Box::new(PassthroughContext),
+        journal,
+        initial_budget,
+        Box::new(FixedClock(2001)),
+        Some(replay_entries),
+    );
+    agent.set_proc_budget_mirror(Arc::clone(&budget_mirror), Arc::clone(&turn_mirror));
+
+    let output = agent.run("replay cache").await.expect("run should succeed");
+
+    assert_eq!(output.token_usage.input_tokens, 36);
+    assert_eq!(output.token_usage.output_tokens, 15);
+    assert_eq!(output.token_usage.total(), 51);
+    let usage = s059_token_usage_json(&output.token_usage);
+    assert_eq!(
+        usage["cache_read_input_tokens"], 14,
+        "replayed agent output must aggregate distinct cache reads across both journaled responses"
+    );
+    assert_eq!(
+        usage["cache_write_input_tokens"], 10,
+        "replayed agent output must aggregate distinct cache writes across both journaled responses"
+    );
+
+    let mirrored = budget_mirror.lock().unwrap().clone();
+    assert_eq!(
+        mirrored.used_tokens, 51,
+        "replay budget charging must not double-charge cache counters"
+    );
+}
+
 // -----------------------------------------------------------------------
 // Test 2: Tool call + response — two turns
 // -----------------------------------------------------------------------
@@ -424,6 +967,8 @@ async fn provider_native_content_survives_tool_round_trip() {
         token_usage: TokenUsage {
             input_tokens: 20,
             output_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
         finish_reason: FinishReason::ToolUse,
         provider_response_id: Some("resp-fable-tool".into()),

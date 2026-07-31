@@ -105,6 +105,10 @@ pub(crate) enum ApiResponseContentBlock {
 pub(crate) struct ApiUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 // ── Error response ─────────────────────────────────────────────────
@@ -434,8 +438,14 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
             provider_content,
         },
         token_usage: TokenUsage {
-            input_tokens: resp.usage.input_tokens,
+            input_tokens: resp
+                .usage
+                .input_tokens
+                .saturating_add(resp.usage.cache_read_input_tokens)
+                .saturating_add(resp.usage.cache_creation_input_tokens),
             output_tokens: resp.usage.output_tokens,
+            cache_read_input_tokens: resp.usage.cache_read_input_tokens,
+            cache_write_input_tokens: resp.usage.cache_creation_input_tokens,
         },
         finish_reason,
         provider_response_id: Some(resp.id),

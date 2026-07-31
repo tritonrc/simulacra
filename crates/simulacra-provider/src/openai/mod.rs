@@ -23,6 +23,9 @@ use crate::transport::{TransportStage, transport_error};
 struct OpenAiMeters {
     duration_histogram: Histogram<f64>,
     token_usage_histogram: Histogram<u64>,
+    cache_read_histogram: Histogram<u64>,
+    cache_write_histogram: Histogram<u64>,
+    cache_hit_ratio_histogram: Histogram<f64>,
 }
 
 impl OpenAiMeters {
@@ -42,8 +45,40 @@ impl OpenAiMeters {
                     .with_unit("{token}")
                     .with_description("Token usage per LLM call")
                     .build(),
+                cache_read_histogram: meter
+                    .u64_histogram("simulacra.context.cache.read_tokens")
+                    .with_unit("{token}")
+                    .with_description("Input tokens served from the provider cache")
+                    .build(),
+                cache_write_histogram: meter
+                    .u64_histogram("simulacra.context.cache.write_tokens")
+                    .with_unit("{token}")
+                    .with_description("Input tokens written to the provider cache")
+                    .build(),
+                cache_hit_ratio_histogram: meter
+                    .f64_histogram("simulacra.context.cache.hit_ratio")
+                    .with_unit("1")
+                    .with_description("Provider cache-read tokens divided by logical input tokens")
+                    .build(),
             }
         })
+    }
+
+    fn record_cache_usage(&self, usage: &TokenUsage, model: &str) {
+        let attrs = &[
+            KeyValue::new("gen_ai.provider.name", "openai"),
+            KeyValue::new("gen_ai.request.model", model.to_owned()),
+        ];
+        self.cache_read_histogram
+            .record(usage.cache_read_input_tokens, attrs);
+        self.cache_write_histogram
+            .record(usage.cache_write_input_tokens, attrs);
+        let hit_ratio = if usage.input_tokens == 0 {
+            0.0
+        } else {
+            usage.cache_read_input_tokens as f64 / usage.input_tokens as f64
+        };
+        self.cache_hit_ratio_histogram.record(hit_ratio, attrs);
     }
 }
 
@@ -427,6 +462,12 @@ impl OpenAiProvider {
             .and_then(|u| u.get("completion_tokens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let cache_read_input_tokens = usage
+            .and_then(|u| u.get("prompt_tokens_details"))
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(input_tokens);
 
         Ok(ProviderResponse {
             message: Message {
@@ -441,6 +482,8 @@ impl OpenAiProvider {
             token_usage: TokenUsage {
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens,
+                cache_write_input_tokens: 0,
             },
             finish_reason,
             provider_response_id: response_id,
@@ -467,6 +510,7 @@ struct OpenAiSseAccumulator<'a> {
     response_id: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_read_input_tokens: u64,
     content: String,
     finish_reason: Option<String>,
     resp_model: Option<String>,
@@ -482,6 +526,7 @@ impl<'a> OpenAiSseAccumulator<'a> {
             response_id: None,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_input_tokens: 0,
             content: String::new(),
             finish_reason: None,
             resp_model: None,
@@ -578,6 +623,12 @@ impl<'a> OpenAiSseAccumulator<'a> {
                 .get("completion_tokens")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(self.output_tokens);
+            self.cache_read_input_tokens = usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(self.cache_read_input_tokens)
+                .min(self.input_tokens);
         }
 
         Ok(())
@@ -625,6 +676,8 @@ impl<'a> OpenAiSseAccumulator<'a> {
             token_usage: TokenUsage {
                 input_tokens: self.input_tokens,
                 output_tokens: self.output_tokens,
+                cache_read_input_tokens: self.cache_read_input_tokens,
+                cache_write_input_tokens: 0,
             },
             finish_reason,
             provider_response_id: self.response_id,
@@ -860,6 +913,7 @@ impl Provider for OpenAiProvider {
                     KeyValue::new("gen_ai.token.type", "output"),
                 ],
             );
+            meters.record_cache_usage(&provider_resp.token_usage, &model);
 
             Ok(provider_resp)
         };
@@ -1021,6 +1075,7 @@ impl StreamingProvider for OpenAiProvider {
                     KeyValue::new("gen_ai.token.type", "output"),
                 ],
             );
+            meters.record_cache_usage(&provider_resp.token_usage, &model);
 
             Ok(provider_resp)
         };

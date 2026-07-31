@@ -1092,6 +1092,8 @@ async fn join_child_terminal_result_includes_elapsed_ms_and_structured_tool_use_
                 token_usage: TokenUsage {
                     input_tokens: 3,
                     output_tokens: 2,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
             reported_tool_uses: None,
                 used_turns: 1,
@@ -1502,8 +1504,10 @@ fn wait_any_output(message: &str, input_tokens: u64, output_tokens: u64) -> Agen
         token_usage: TokenUsage {
             input_tokens,
             output_tokens,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     }

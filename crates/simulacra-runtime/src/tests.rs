@@ -70,6 +70,40 @@ fn make_journal_entry(agent_id: &str, kind: JournalEntryKind) -> JournalEntry {
     }
 }
 
+fn token_usage_from_json(value: serde_json::Value) -> TokenUsage {
+    serde_json::from_value(value).expect("token usage fixture should deserialize")
+}
+
+fn token_usage_json(usage: &TokenUsage) -> serde_json::Value {
+    serde_json::to_value(usage).expect("token usage should serialize")
+}
+
+fn append_cached_llm_response(
+    storage: &dyn JournalStorage,
+    agent_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_write_input_tokens: u64,
+) {
+    storage
+        .append(make_journal_entry(
+            agent_id,
+            JournalEntryKind::LlmResponse {
+                model: "gpt-4o-mini".into(),
+                token_usage: token_usage_from_json(serde_json::json!({
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_input_tokens": cache_read_input_tokens,
+                    "cache_write_input_tokens": cache_write_input_tokens
+                })),
+                finish_reason: "stop".into(),
+                assistant_message: None,
+            },
+        ))
+        .expect("cached LlmResponse should append");
+}
+
 #[test]
 fn journal_append_and_read_all_roundtrip() {
     let storage = InMemoryJournalStorage::new();
@@ -109,6 +143,8 @@ fn journal_query_token_usage() {
                 token_usage: TokenUsage {
                     input_tokens: 100,
                     output_tokens: 50,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "stop".into(),
                 assistant_message: None,
@@ -123,6 +159,8 @@ fn journal_query_token_usage() {
                 token_usage: TokenUsage {
                     input_tokens: 200,
                     output_tokens: 75,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "stop".into(),
                 assistant_message: None,
@@ -138,6 +176,8 @@ fn journal_query_token_usage() {
                 token_usage: TokenUsage {
                     input_tokens: 999,
                     output_tokens: 999,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "stop".into(),
                 assistant_message: None,
@@ -149,6 +189,231 @@ fn journal_query_token_usage() {
     assert_eq!(usage.input_tokens, 300);
     assert_eq!(usage.output_tokens, 125);
     assert_eq!(usage.total(), 425);
+}
+
+fn assert_s059_journal_cache_roundtrip_and_query(storage: &dyn JournalStorage) {
+    let agent = AgentId("agent-s059".into());
+
+    append_cached_llm_response(storage, "agent-s059", 100, 25, 40, 5);
+    append_cached_llm_response(storage, "agent-s059", 20, 7, 3, 11);
+    append_cached_llm_response(storage, "other-agent", 999, 999, 999, 999);
+
+    let entries = storage
+        .read_all(&agent)
+        .expect("journal entries should read back");
+    assert_eq!(entries.len(), 2);
+    match &entries[0].entry {
+        JournalEntryKind::LlmResponse { token_usage, .. } => {
+            let usage = token_usage_json(token_usage);
+            assert_eq!(
+                usage["cache_read_input_tokens"], 40,
+                "LlmResponse read path must preserve cache reads"
+            );
+            assert_eq!(
+                usage["cache_write_input_tokens"], 5,
+                "LlmResponse read path must preserve cache writes"
+            );
+        }
+        other => panic!("expected LlmResponse, got {other:?}"),
+    }
+
+    let totals = storage
+        .query_token_usage(&agent)
+        .expect("journal token usage query should succeed");
+    assert_eq!(totals.input_tokens, 120);
+    assert_eq!(totals.output_tokens, 32);
+    assert_eq!(totals.total(), 152);
+    let totals_json = token_usage_json(&totals);
+    assert_eq!(
+        totals_json["cache_read_input_tokens"], 43,
+        "journal queries must independently aggregate cache reads"
+    );
+    assert_eq!(
+        totals_json["cache_write_input_tokens"], 16,
+        "journal queries must independently aggregate cache writes"
+    );
+}
+
+fn assert_s059_extreme_journal_cache_aggregation_saturates(
+    storage: &dyn JournalStorage,
+    agent_id: &str,
+    cache_reads: bool,
+) {
+    let (first_read, second_read, first_write, second_write) = if cache_reads {
+        (u64::MAX, 1, 0, 0)
+    } else {
+        (0, 0, u64::MAX, 1)
+    };
+    append_cached_llm_response(storage, agent_id, 0, 0, first_read, first_write);
+    append_cached_llm_response(storage, agent_id, 0, 0, second_read, second_write);
+
+    let totals = storage
+        .query_token_usage(&AgentId(agent_id.into()))
+        .expect("extreme journal cache counters must aggregate without panic or wrap");
+    let totals = token_usage_json(&totals);
+    let field = if cache_reads {
+        "cache_read_input_tokens"
+    } else {
+        "cache_write_input_tokens"
+    };
+    assert_eq!(
+        totals[field],
+        serde_json::json!(u64::MAX),
+        "{field} journal aggregation must saturate"
+    );
+}
+
+fn assert_s059_extreme_journal_logical_aggregation_saturates(
+    storage: &dyn JournalStorage,
+    agent_id: &str,
+    logical_input: bool,
+) {
+    let (first_input, second_input, first_output, second_output) = if logical_input {
+        (u64::MAX - 4, 10, 0, 0)
+    } else {
+        (10, 10, u64::MAX - 4, 10)
+    };
+    append_cached_llm_response(storage, agent_id, first_input, first_output, 3, 1);
+    append_cached_llm_response(storage, agent_id, second_input, second_output, 2, 1);
+
+    let totals = storage
+        .query_token_usage(&AgentId(agent_id.into()))
+        .expect("extreme logical journal counters must aggregate without panic or wrap");
+    let logical_total = if logical_input {
+        totals.input_tokens
+    } else {
+        totals.output_tokens
+    };
+    assert_eq!(
+        logical_total,
+        u64::MAX,
+        "logical journal aggregation must saturate"
+    );
+    assert_eq!(totals.total(), u64::MAX);
+    assert_eq!(
+        totals.cache_read_input_tokens, 5,
+        "cache reads must aggregate independently without entering the logical total"
+    );
+    assert_eq!(
+        totals.cache_write_input_tokens, 2,
+        "cache writes must aggregate independently without entering the logical total"
+    );
+}
+
+#[test]
+fn s059_in_memory_journal_preserves_and_aggregates_cache_counters() {
+    let storage = InMemoryJournalStorage::new();
+    assert_s059_journal_cache_roundtrip_and_query(&storage);
+}
+
+#[test]
+fn s059_in_memory_journal_cache_read_aggregation_saturates() {
+    let storage = InMemoryJournalStorage::new();
+    assert_s059_extreme_journal_cache_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-read",
+        true,
+    );
+}
+
+#[test]
+fn s059_in_memory_journal_cache_write_aggregation_saturates() {
+    let storage = InMemoryJournalStorage::new();
+    assert_s059_extreme_journal_cache_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-write",
+        false,
+    );
+}
+
+#[test]
+fn s059_in_memory_journal_logical_input_aggregation_saturates() {
+    let storage = InMemoryJournalStorage::new();
+    assert_s059_extreme_journal_logical_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-logical-input",
+        true,
+    );
+}
+
+#[test]
+fn s059_in_memory_journal_output_aggregation_saturates() {
+    let storage = InMemoryJournalStorage::new();
+    assert_s059_extreme_journal_logical_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-output",
+        false,
+    );
+}
+
+#[test]
+fn s059_sqlite_journal_preserves_and_aggregates_cache_counters() {
+    let storage = SqliteJournalStorage::in_memory().expect("in-memory SQLite journal should open");
+    assert_s059_journal_cache_roundtrip_and_query(&storage);
+}
+
+#[test]
+fn s059_sqlite_journal_cache_read_aggregation_saturates() {
+    let storage = SqliteJournalStorage::in_memory().expect("in-memory SQLite journal should open");
+    assert_s059_extreme_journal_cache_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-read",
+        true,
+    );
+}
+
+#[test]
+fn s059_sqlite_journal_cache_write_aggregation_saturates() {
+    let storage = SqliteJournalStorage::in_memory().expect("in-memory SQLite journal should open");
+    assert_s059_extreme_journal_cache_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-write",
+        false,
+    );
+}
+
+#[test]
+fn s059_sqlite_journal_logical_input_aggregation_saturates() {
+    let storage = SqliteJournalStorage::in_memory().expect("in-memory SQLite journal should open");
+    assert_s059_extreme_journal_logical_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-logical-input",
+        true,
+    );
+}
+
+#[test]
+fn s059_sqlite_journal_output_aggregation_saturates() {
+    let storage = SqliteJournalStorage::in_memory().expect("in-memory SQLite journal should open");
+    assert_s059_extreme_journal_logical_aggregation_saturates(
+        &storage,
+        "agent-s059-extreme-output",
+        false,
+    );
+}
+
+#[test]
+fn s059_legacy_llm_response_json_deserializes_with_zero_cache_counters() {
+    let entry: JournalEntryKind = serde_json::from_value(serde_json::json!({
+        "type": "LlmResponse",
+        "model": "legacy-model",
+        "token_usage": {
+            "input_tokens": 8,
+            "output_tokens": 5
+        },
+        "finish_reason": "stop"
+    }))
+    .expect("legacy LlmResponse JSON should deserialize");
+
+    match entry {
+        JournalEntryKind::LlmResponse { token_usage, .. } => {
+            let usage = token_usage_json(&token_usage);
+            assert_eq!(usage["cache_read_input_tokens"], 0);
+            assert_eq!(usage["cache_write_input_tokens"], 0);
+            assert_eq!(token_usage.total(), 13);
+        }
+        other => panic!("expected LlmResponse, got {other:?}"),
+    }
 }
 
 #[test]
@@ -208,6 +473,8 @@ fn checkpoint_fork_creates_independent_journal() {
                 token_usage: TokenUsage {
                     input_tokens: 100,
                     output_tokens: 50,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "stop".into(),
                 assistant_message: None,
@@ -302,6 +569,8 @@ fn replay_from_checkpoint_skips_earlier_entries() {
                 token_usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "stop".into(),
                 assistant_message: None,

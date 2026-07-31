@@ -83,6 +83,8 @@ async fn replay_fails_when_recorded_tool_call_does_not_match_live_tool_call() {
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(assistant_message),
@@ -174,6 +176,8 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(assistant_message),
@@ -326,6 +330,8 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
                 token_usage: TokenUsage {
                     input_tokens: 20,
                     output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                 },
                 finish_reason: "ToolUse".into(),
                 assistant_message: Some(assistant_message),
