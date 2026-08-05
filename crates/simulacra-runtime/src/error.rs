@@ -81,9 +81,13 @@ pub enum WorkspaceLostCause {
 impl std::fmt::Display for WorkspaceLostCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Self::Gone => "gone",
-            Self::Closed => "closed",
-            Self::Reaped => "reaped",
+            Self::Gone => {
+                "workspace disappeared without a clean shutdown; work in progress there was not saved"
+            }
+            Self::Closed => {
+                "workspace shut down cleanly on its own side; work in progress there was not saved"
+            }
+            Self::Reaped => "runtime tore the workspace down; work in progress there was not saved",
         };
         write!(f, "{s}")
     }
@@ -121,28 +125,47 @@ mod tests {
     }
 
     #[test]
-    fn workspace_lost_display_includes_typed_cause() {
-        assert_eq!(
-            RuntimeError::WorkspaceLost {
-                cause: WorkspaceLostCause::Gone
-            }
-            .to_string(),
-            "workspace lost: gone"
-        );
-        assert_eq!(
-            RuntimeError::WorkspaceLost {
-                cause: WorkspaceLostCause::Closed
-            }
-            .to_string(),
-            "workspace lost: closed"
-        );
-        assert_eq!(
-            RuntimeError::WorkspaceLost {
-                cause: WorkspaceLostCause::Reaped
-            }
-            .to_string(),
-            "workspace lost: reaped"
-        );
+    fn workspace_lost_cause_display_explains_event_and_unsaved_work() {
+        let cases = [
+            (
+                WorkspaceLostCause::Gone,
+                "workspace disappeared without a clean shutdown; work in progress there was not saved",
+            ),
+            (
+                WorkspaceLostCause::Closed,
+                "workspace shut down cleanly on its own side; work in progress there was not saved",
+            ),
+            (
+                WorkspaceLostCause::Reaped,
+                "runtime tore the workspace down; work in progress there was not saved",
+            ),
+        ];
+
+        for (cause, expected) in cases {
+            assert_eq!(cause.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn workspace_lost_error_display_preserves_actionable_cause_message() {
+        let cases = [
+            (
+                WorkspaceLostCause::Gone,
+                "workspace lost: workspace disappeared without a clean shutdown; work in progress there was not saved",
+            ),
+            (
+                WorkspaceLostCause::Closed,
+                "workspace lost: workspace shut down cleanly on its own side; work in progress there was not saved",
+            ),
+            (
+                WorkspaceLostCause::Reaped,
+                "workspace lost: runtime tore the workspace down; work in progress there was not saved",
+            ),
+        ];
+
+        for (cause, expected) in cases {
+            assert_eq!(RuntimeError::WorkspaceLost { cause }.to_string(), expected);
+        }
     }
 
     #[test]
