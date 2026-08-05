@@ -40,6 +40,28 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - name: Install Aniani
+        run: >-
+          cargo install --locked
+          --git https://github.com/tritonrc/aniani.git
+          --rev cfefdbf63971cde2385199fd9247ce2be615b699
+          aniani
+      - name: Start Aniani
+        run: |
+          aniani --port 4320 --retention 2h > "$RUNNER_TEMP/aniani.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/aniani.pid"
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:4320/ready > /dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/aniani.pid")" 2> /dev/null; then
+              cat "$RUNNER_TEMP/aniani.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/aniani.log"
+          exit 1
       - name: Build workspace
         run: cargo build --workspace
       # nextest runs each test in its own process (isolation) and retries
@@ -48,3 +70,15 @@ jobs:
       # the default in-process runner is prone to under CI load.
       - name: Test (nextest)
         run: cargo nextest run --workspace
+      - name: Print Aniani logs on failure
+        if: failure()
+        run: |
+          if [[ -f "$RUNNER_TEMP/aniani.log" ]]; then
+            cat "$RUNNER_TEMP/aniani.log"
+          fi
+      - name: Stop Aniani
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/aniani.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/aniani.pid")" 2> /dev/null || true
+          fi
