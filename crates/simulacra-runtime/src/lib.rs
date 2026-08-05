@@ -35,7 +35,7 @@ pub use agent_loop::{
     AgentLoopOutput, ChildInputHandle, REQUEST_INPUT_TOOL_NAME, RequestInputTool, StepContext,
     ToolApprovalResponse, TurnContext, TurnResult, TurnState,
 };
-pub use error::RuntimeError;
+pub use error::{RuntimeError, WorkspaceLostCause};
 pub use guardrail::{GuardrailDecision, InputGuardrail, OutputGuardrail};
 pub use journal::{CountingJournalStorage, InMemoryJournalStorage};
 pub use journal_sqlite::SqliteJournalStorage;

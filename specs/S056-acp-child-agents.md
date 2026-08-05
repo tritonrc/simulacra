@@ -102,6 +102,27 @@ implementation selected by `acp_profile`.
 - [ ] ACP child execution does not require local sandbox inspection APIs.
 - [ ] Simulacra must not require local filesystem mediation for ACP children.
 
+### Error Classification
+
+- [ ] `RuntimeError` exposes a `WorkspaceLost` variant distinct from the
+  free-text `Session` variant, so an embedding system can classify "the ACP
+  child's workspace disappeared" by matching on a type instead of sniffing
+  error message text.
+- [ ] `WorkspaceLost` carries a closed-set `WorkspaceLostCause` distinguishing
+  an abrupt disappearance (transport EOF/error) from a clean, deliberate close
+  initiated by the child's own side, and from a runtime-initiated teardown
+  (idle reclamation).
+- [ ] The cause enum stays generic: no DevForge/Payabli/Kubernetes-specific
+  vocabulary in `simulacra-runtime`. Only the embedding system knows why a
+  workspace is actually gone (killed pod, network partition, etc.); Simulacra
+  only knows the shape of the failure it observed. Vocabulary genericness is a
+  property of doc comments and naming, not runtime behavior — per
+  `rules/R004-test-against-fakes.md` this is verified by code review, not by
+  a unit test asserting derived `Debug` strings against themselves.
+- [ ] This variant is additive only: no existing `RuntimeError` variant,
+  construction site, or match arm changes as part of adding it. Verified by
+  diff inspection, not by a unit test.
+
 ### Known limitation (pre-existing, out of scope here)
 
 - The supervisor retry path (`run_task_with_retries`, strategies `RetryOnce` /

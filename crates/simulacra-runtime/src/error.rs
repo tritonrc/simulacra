@@ -49,6 +49,44 @@ pub enum RuntimeError {
         agent_type: String,
         acp_profile: String,
     },
+    /// The workspace backing a running task disappeared.
+    ///
+    /// Use this instead of `Session` when a consumer needs to classify "the
+    /// workspace is gone" by type rather than by matching free-text error
+    /// messages. `cause` distinguishes an abrupt transport-level
+    /// disappearance from a clean close initiated by the workspace's own
+    /// side, and from a runtime-initiated teardown.
+    #[error("workspace lost: {cause}")]
+    WorkspaceLost { cause: WorkspaceLostCause },
+}
+
+/// Why a workspace was lost.
+///
+/// Kept generic and embedding-agnostic: Simulacra only knows the shape of
+/// the failure it observed, not the embedding-specific reason a workspace is
+/// actually gone (e.g. a killed process or a network partition).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceLostCause {
+    /// The workspace vanished abruptly: a transport EOF or error was
+    /// observed with no clean shutdown, e.g. the workspace was killed,
+    /// crashed, or became unreachable over the network.
+    Gone,
+    /// The workspace ended cleanly and deliberately on its own side.
+    Closed,
+    /// The runtime itself tore the workspace down, e.g. reclaiming an idle
+    /// workspace.
+    Reaped,
+}
+
+impl std::fmt::Display for WorkspaceLostCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Gone => "gone",
+            Self::Closed => "closed",
+            Self::Reaped => "reaped",
+        };
+        write!(f, "{s}")
+    }
 }
 
 impl RuntimeError {
@@ -58,5 +96,59 @@ impl RuntimeError {
             Self::Provider(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RuntimeError, WorkspaceLostCause};
+
+    #[test]
+    fn workspace_lost_is_distinct_from_free_text_session_error() {
+        let error = RuntimeError::WorkspaceLost {
+            cause: WorkspaceLostCause::Gone,
+        };
+
+        match error {
+            RuntimeError::WorkspaceLost {
+                cause: WorkspaceLostCause::Gone,
+            } => {}
+            RuntimeError::Session(message) => {
+                panic!("workspace loss must not be classified by Session text: {message}");
+            }
+            other => panic!("expected WorkspaceLost error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_lost_display_includes_typed_cause() {
+        assert_eq!(
+            RuntimeError::WorkspaceLost {
+                cause: WorkspaceLostCause::Gone
+            }
+            .to_string(),
+            "workspace lost: gone"
+        );
+        assert_eq!(
+            RuntimeError::WorkspaceLost {
+                cause: WorkspaceLostCause::Closed
+            }
+            .to_string(),
+            "workspace lost: closed"
+        );
+        assert_eq!(
+            RuntimeError::WorkspaceLost {
+                cause: WorkspaceLostCause::Reaped
+            }
+            .to_string(),
+            "workspace lost: reaped"
+        );
+    }
+
+    #[test]
+    fn workspace_lost_cause_distinguishes_abrupt_disappearance_clean_close_and_reap() {
+        assert_ne!(WorkspaceLostCause::Gone, WorkspaceLostCause::Closed);
+        assert_ne!(WorkspaceLostCause::Gone, WorkspaceLostCause::Reaped);
+        assert_ne!(WorkspaceLostCause::Closed, WorkspaceLostCause::Reaped);
     }
 }
