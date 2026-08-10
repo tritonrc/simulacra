@@ -316,7 +316,6 @@ fn s060_hook_stack_with_config_and_outcome(
         parent_capability: capability.clone(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: Some(Arc::new(pipeline)),
         script_executor: None,
         child_cell_configurator: None,

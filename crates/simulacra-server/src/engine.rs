@@ -1863,7 +1863,6 @@ impl SimulacraEngine {
                         parent_capability: capability_token.clone(),
                         allowed_mcp_servers: Some(tenant_mcp_servers.clone()),
                         supervisor_sender: supervisor_tx_for_factory,
-                        parent_model: model_clone.clone(),
                         pipeline: Some(Arc::clone(&hook_pipeline)),
                         script_executor: Some(ScriptExecutor::new(4)),
                         child_cell_configurator,
@@ -2043,9 +2042,9 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
                 skill_patterns.push(other.to_owned());
             }
             other if other.starts_with("spawn:") => {
-                let agent_type = other.trim_start_matches("spawn:").trim();
-                if !agent_type.is_empty() {
-                    spawn_placements.push(agent_type.to_owned());
+                let placement = other.trim_start_matches("spawn:").trim();
+                if !placement.is_empty() {
+                    spawn_placements.push(placement.to_owned());
                 }
             }
             _ => {}

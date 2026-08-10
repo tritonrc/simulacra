@@ -259,7 +259,6 @@ fn s060_privacy_factory(
         parent_capability: capability,
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "root-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: None,

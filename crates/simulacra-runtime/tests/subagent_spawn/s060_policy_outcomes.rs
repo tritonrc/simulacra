@@ -278,7 +278,6 @@ fn s060_policy_outcome_stack(
         parent_capability: capability.clone(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: Some(Arc::new(pipeline)),
         script_executor: None,
         child_cell_configurator: None,
@@ -665,7 +664,6 @@ fn s060_a40_real_factory_prepare_preserves_typed_before_kill_when_audit_fails() 
         parent_capability: parent_capability.clone(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: Some(Arc::new(s060_before_kill_pipeline(
             "direct-factory-before-kill",
             "factory kill stays typed",

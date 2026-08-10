@@ -37,7 +37,6 @@ fn agent_task_factory_attaches_child_cancellation_token() {
         parent_capability: CapabilityToken::default(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: None,

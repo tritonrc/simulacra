@@ -898,4 +898,60 @@ mod tests {
         assert_eq!(completed.token_usage.cache_write_input_tokens, 7);
         assert_eq!(completed.token_usage.total(), u64::MAX);
     }
+
+    #[test]
+    fn s060_unmatched_terminal_never_fabricates_child_result_metadata_or_control_state() {
+        let supervisor = AgentSupervisor::new(
+            CapabilityToken::default(),
+            ResourceBudget::new(0, 0, rust_decimal::Decimal::ZERO, 0),
+        );
+        let child_id = AgentId("never-accepted".into());
+
+        AgentSupervisor::record_child_terminal_result(
+            &supervisor.child_results,
+            ChildTerminalResult {
+                child_id: child_id.clone(),
+                placement: "workspace".into(),
+                status: "completed".into(),
+                elapsed_ms: 1,
+                tool_uses: 0,
+                result: Err("unmatched terminal".into()),
+            },
+        );
+
+        assert!(
+            lock_mutex(&supervisor.child_results, "child_results").is_empty(),
+            "an unmatched terminal must not fabricate cached result, metadata, or join state"
+        );
+        assert!(
+            lock_mutex(&supervisor.cancellation_tokens, "cancellation_tokens").is_empty(),
+            "an unmatched terminal must not create cancellation control state"
+        );
+        assert!(
+            lock_mutex(&supervisor.child_inputs, "child_inputs").is_empty(),
+            "an unmatched terminal must not create steering-input control state"
+        );
+        assert!(
+            lock_mutex(&supervisor.children, "children").is_empty(),
+            "an unmatched terminal must not create a live-child roster entry"
+        );
+        assert!(
+            lock_mutex(&supervisor.accepted_child_ids, "accepted_child_ids").is_empty(),
+            "an unmatched terminal must not reserve the opaque child id"
+        );
+
+        let (join_tx, mut join_rx) = tokio::sync::oneshot::channel();
+        supervisor.join_child(child_id.clone(), join_tx);
+        assert!(
+            matches!(join_rx.try_recv(), Ok(Err(error)) if error.contains("unknown child_id")),
+            "an unmatched terminal must not leave a joinable terminal result"
+        );
+
+        let (roster_tx, mut roster_rx) = tokio::sync::oneshot::channel();
+        supervisor.send_child_roster_inspection(roster_tx);
+        assert!(
+            matches!(roster_rx.try_recv(), Ok(Ok(entries)) if entries.is_empty()),
+            "an unmatched terminal must not appear in the host roster"
+        );
+    }
 }

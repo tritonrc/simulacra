@@ -116,17 +116,6 @@ impl AgentLoop {
         let start = replay.position();
         let entries = replay.entries();
         let mut selected: Option<usize> = None;
-        let allow_legacy_tool_result_match =
-            entries.get(start.saturating_sub(1)).is_some_and(|entry| {
-                matches!(
-                    entry.entry,
-                    JournalEntryKind::ToolCall {
-                        tool_call_id: None,
-                        ..
-                    }
-                )
-            });
-
         for (offset, entry) in entries[start..].iter().enumerate() {
             match &entry.entry {
                 JournalEntryKind::ToolResult {
@@ -137,17 +126,6 @@ impl AgentLoop {
                 } if recorded_id == tool_call_id && recorded == tool_name => {
                     selected = Some(offset);
                     break;
-                }
-                // Backward compatibility for old journals that predate
-                // tool_call_id. New nested sandbox results do not set ids, so
-                // they no longer collide with the top-level ToolResult.
-                JournalEntryKind::ToolResult {
-                    tool_call_id: None,
-
-                    tool_name: recorded,
-                    ..
-                } if allow_legacy_tool_result_match && recorded == tool_name => {
-                    selected = Some(offset)
                 }
                 JournalEntryKind::ToolResult { .. }
                 | JournalEntryKind::ShellCommand { .. }

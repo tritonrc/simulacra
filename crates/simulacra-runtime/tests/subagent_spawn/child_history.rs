@@ -97,7 +97,6 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_default_prompt_and_p
         parent_capability: CapabilityToken::default(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: None,
@@ -200,7 +199,6 @@ fn agent_task_factory_applies_child_cell_and_tool_hooks_before_provider_call() {
         parent_capability: CapabilityToken::default(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: Some(Arc::new(|cell: &mut simulacra_sandbox::AgentCell| {
@@ -299,7 +297,6 @@ fn agent_task_factory_intersects_child_type_capability_with_the_spawn_override()
         parent_capability: CapabilityToken::default(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: None,

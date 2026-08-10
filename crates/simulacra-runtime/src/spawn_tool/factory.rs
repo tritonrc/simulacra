@@ -33,7 +33,6 @@ pub struct AgentTaskFactory {
     pub parent_capability: CapabilityToken,
     pub allowed_mcp_servers: Option<Vec<String>>,
     pub supervisor_sender: Option<tokio::sync::mpsc::Sender<SupervisorMessage>>,
-    pub parent_model: String,
     pub pipeline: Option<Arc<simulacra_hooks::pipeline::HookPipeline>>,
     pub script_executor: Option<simulacra_sandbox::ScriptExecutor>,
     pub child_cell_configurator: Option<ChildCellConfigurator>,
@@ -49,6 +48,9 @@ impl crate::TaskFactory for AgentTaskFactory {
             .child_placements
             .get(&spawn_config.placement)
             .ok_or_else(|| unknown_placement_error(&self.config, &spawn_config.placement))?;
+        if placement.backend == AgentBackend::Native {
+            native_placement_model(&spawn_config.placement, placement)?;
+        }
         validate_placement_budget(&spawn_config.budget, placement)?;
         if placement.backend == AgentBackend::Acp && self.acp_child_runtime.is_none() {
             return Err(RuntimeError::AcpChildRuntimeMissing {
@@ -228,7 +230,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                 return Ok(output);
             }
 
-            let model = placement_config.model.clone().unwrap_or_default();
+            let model = native_placement_model(&placement_name, &placement_config)?;
             let system_prompt = spawn_config
                 .instructions
                 .clone()
@@ -320,6 +322,21 @@ fn unknown_placement_error(config: &SimulacraConfig, requested: &str) -> Runtime
     RuntimeError::Session(format!(
         "unknown child placement {requested:?}{available_suffix}"
     ))
+}
+
+fn native_placement_model(
+    placement_name: &str,
+    placement: &simulacra_config::ChildPlacementConfig,
+) -> Result<String, RuntimeError> {
+    placement
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .ok_or_else(|| {
+            RuntimeError::Session(format!(
+                "native child placement {placement_name:?} requires a non-blank model"
+            ))
+        })
 }
 
 fn validate_placement_budget(

@@ -435,7 +435,6 @@ fn s056_factory(
         parent_capability: s056_parent_capability(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: Some(Arc::new(move |_cell| {
@@ -851,6 +850,10 @@ async fn s056_acp_factory_delegates_request_without_native_environment() {
     assert_eq!(request.parent_id, AgentId("parent-1".into()));
     assert_eq!(request.placement, "reviewer");
     assert_eq!(request.acp_profile, "codex-local");
+    assert!(
+        request.instructions.is_none(),
+        "absent ACP spawn instructions must remain None rather than becoming an empty prompt"
+    );
     assert_eq!(request.task, "review the patch");
     assert_eq!(request.budget.max_tokens, 321);
     assert_eq!(request.budget.max_turns, 7);

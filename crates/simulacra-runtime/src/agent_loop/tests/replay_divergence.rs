@@ -148,6 +148,233 @@ async fn replay_fails_when_recorded_tool_call_does_not_match_live_tool_call() {
 }
 
 #[tokio::test]
+async fn replay_rejects_idless_v3_tool_call_matching() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let assistant_message = tool_call_response("echo", serde_json::json!({"msg": "live"})).message;
+    let replay_entries = vec![
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 2,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 2,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 3,
+            entry: JournalEntryKind::LlmResponse {
+                model: "test-model".into(),
+                token_usage: TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                },
+                finish_reason: "ToolUse".into(),
+                assistant_message: Some(assistant_message),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 4,
+            entry: JournalEntryKind::ToolCall {
+                tool_call_id: None,
+                tool_name: "echo".into(),
+                arguments: serde_json::json!({"msg": "live"}),
+            },
+        },
+    ];
+
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("test tool registration should succeed");
+    let mut agent = AgentLoop::with_clock_and_replay(
+        default_config(),
+        Box::new(FakeProvider::new(vec![])),
+        tools,
+        Box::new(PassthroughContext),
+        journal,
+        default_budget(),
+        Box::new(FixedClock(2000)),
+        Some(replay_entries),
+    );
+
+    let mut messages = vec![
+        Message {
+            role: Role::System,
+            content: "system".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        },
+        Message {
+            role: Role::User,
+            content: "use echo".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        },
+    ];
+
+    let error = agent
+        .run_single_turn(&mut messages)
+        .await
+        .expect_err("v3 replay must reject ID-less legacy ToolCall matching");
+    let message = error.to_string();
+    assert!(
+        message.contains("ToolCall"),
+        "unexpected error: {message}"
+    );
+}
+
+#[tokio::test]
+async fn replay_rejects_idless_v3_tool_result_without_executing_the_tool() {
+    struct CountingEchoTool(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl simulacra_types::Tool for CountingEchoTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "echo".into(),
+                description: "Counts real execution".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        fn call(
+            &self,
+            arguments: serde_json::Value,
+            _capability: &CapabilityToken,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<serde_json::Value, simulacra_types::ToolError>,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok(arguments) })
+        }
+    }
+
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let assistant_message = tool_call_response("echo", serde_json::json!({"msg": "live"})).message;
+    let replay_entries = vec![
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 1,
+            entry: JournalEntryKind::TurnStart,
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 2,
+            entry: JournalEntryKind::LlmRequest {
+                model: "test-model".into(),
+                message_count: 2,
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 3,
+            entry: JournalEntryKind::LlmResponse {
+                model: "test-model".into(),
+                token_usage: TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                },
+                finish_reason: "ToolUse".into(),
+                assistant_message: Some(assistant_message),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 4,
+            entry: JournalEntryKind::ToolCall {
+                tool_call_id: Some("tc-1".into()),
+                tool_name: "echo".into(),
+                arguments: serde_json::json!({"msg": "live"}),
+            },
+        },
+        JournalEntry {
+            schema_version: JOURNAL_SCHEMA_VERSION,
+            agent_id: AgentId("test-agent".into()),
+            timestamp_ms: 5,
+            entry: JournalEntryKind::ToolResult {
+                tool_call_id: None,
+                tool_name: "echo".into(),
+                content: "legacy final".into(),
+                is_error: false,
+            },
+        },
+    ];
+
+    let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(CountingEchoTool(std::sync::Arc::clone(&executions))))
+        .expect("test tool registration should succeed");
+    let mut agent = AgentLoop::with_clock_and_replay(
+        default_config(),
+        Box::new(FakeProvider::new(vec![])),
+        tools,
+        Box::new(PassthroughContext),
+        journal,
+        default_budget(),
+        Box::new(FixedClock(2000)),
+        Some(replay_entries),
+    );
+
+    let mut messages = vec![
+        Message {
+            role: Role::System,
+            content: "system".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        },
+        Message {
+            role: Role::User,
+            content: "use echo".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        },
+    ];
+
+    let error = agent
+        .run_single_turn(&mut messages)
+        .await
+        .expect_err("v3 replay must reject an ID-less ToolResult rather than execute the live tool");
+    let message = error.to_string();
+    assert!(
+        message.contains("expected ToolResult") && message.contains("tc-1"),
+        "unexpected error: {message}"
+    );
+    assert_eq!(
+        executions.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a malformed replay ToolResult must fail before real tool execution"
+    );
+}
+
+#[tokio::test]
 async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_final_result() {
     let journal = Arc::new(InMemoryJournalStorage::new());
     let assistant_message = tool_call_response("echo", serde_json::json!({"msg": "live"})).message;

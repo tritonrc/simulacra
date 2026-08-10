@@ -200,30 +200,32 @@ pub async fn import_toml_seed(
 /// identical capability strings.
 pub fn capabilities_to_strings(agent: &AgentTypeConfig) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let Some(caps) = agent.capabilities.as_ref() else {
-        return out;
-    };
-    push_boolean_caps(caps, &mut out);
-    for n in &caps.network {
-        out.push(if n.starts_with("net:") {
-            n.clone()
-        } else {
-            format!("net:{n}")
-        });
+    if let Some(caps) = agent.capabilities.as_ref() {
+        push_boolean_caps(caps, &mut out);
+        for n in &caps.network {
+            out.push(if n.starts_with("net:") {
+                n.clone()
+            } else {
+                format!("net:{n}")
+            });
+        }
+        for m in &caps.mcp {
+            out.push(if m.starts_with("mcp:") {
+                m.clone()
+            } else {
+                format!("mcp:{m}")
+            });
+        }
+        for skill in &caps.skill_patterns {
+            out.push(if skill.starts_with("skill:") {
+                skill.clone()
+            } else {
+                format!("skill:{skill}")
+            });
+        }
     }
-    for m in &caps.mcp {
-        out.push(if m.starts_with("mcp:") {
-            m.clone()
-        } else {
-            format!("mcp:{m}")
-        });
-    }
-    for skill in &caps.skill_patterns {
-        out.push(if skill.starts_with("skill:") {
-            skill.clone()
-        } else {
-            format!("skill:{skill}")
-        });
+    for placement in &agent.allowed_child_placements {
+        out.push(format!("spawn:{placement}"));
     }
     out
 }

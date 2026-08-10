@@ -2,8 +2,8 @@
 // DEFAULT_SYSTEM_PROMPT
 // ---------------------------------------------------------------------------
 
-/// Default system prompt used for child agents when no explicit prompt is
-/// configured in the agent type.
+/// Default system prompt used for native children when caller instructions
+/// are absent. Child placements never configure workflow prompts.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "\
 You are a helpful AI assistant running inside Simulacra, a sandboxed agent runtime.
 

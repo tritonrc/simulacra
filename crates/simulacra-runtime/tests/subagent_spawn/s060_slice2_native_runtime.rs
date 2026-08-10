@@ -222,7 +222,6 @@ async fn s060_a30_concurrent_invalid_placements_have_zero_accepted_effects() {
         parent_capability: capability.clone(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: Some(Arc::new(pipeline)),
         script_executor: None,
         child_cell_configurator: None,
@@ -334,4 +333,44 @@ async fn s060_a30_empty_tool_and_token_lists_each_deny_all() {
         token_receiver.try_recv().is_err(),
         "denied token call must not dispatch"
     );
+}
+
+#[test]
+fn s060_agent_task_factory_rejects_native_placement_with_missing_model() {
+    let mut config = s060_a30_config();
+    config
+        .child_placements
+        .get_mut("workspace")
+        .expect("workspace placement should exist")
+        .model = None;
+    let factory = s060_real_task_factory(config);
+
+    let error = factory
+        .validate_spawn_config(&s060_supervisor_request(
+            "workspace",
+            ResourceBudget::new(10, 1, Decimal::ZERO, 0),
+        ))
+        .expect_err("malformed native placement must be rejected before defaulting to an empty model");
+    let message = error.to_string();
+    assert!(
+        message.contains("workspace") && message.contains("model"),
+        "malformed placement error should name the placement and missing model: {message}"
+    );
+}
+
+#[test]
+fn s060_agent_task_factory_never_coerces_blank_or_unicode_unknown_placements_to_native() {
+    let factory = s060_real_task_factory(s060_a30_config());
+    for placement in ["", " \t\n", "\u{2003}", "workspace\u{2003}", "未知"] {
+        let error = factory
+            .validate_spawn_config(&s060_supervisor_request(
+                placement,
+                ResourceBudget::new(10, 1, Decimal::ZERO, 0),
+            ))
+            .expect_err("non-configured placement must be denied rather than defaulting native");
+        assert!(
+            error.to_string().contains("placement"),
+            "denial should identify placement for {placement:?}: {error}"
+        );
+    }
 }

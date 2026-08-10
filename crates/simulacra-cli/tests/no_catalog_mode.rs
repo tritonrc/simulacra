@@ -92,6 +92,20 @@ fn agent_with(model: &str, prompt: Option<&str>) -> AgentTypeConfig {
     }
 }
 
+fn agent_with_allowed_children(
+    model: &str,
+    prompt: Option<&str>,
+    placements: &[&str],
+) -> AgentTypeConfig {
+    AgentTypeConfig {
+        allowed_child_placements: placements
+            .iter()
+            .map(|placement| (*placement).to_owned())
+            .collect(),
+        ..agent_with(model, prompt)
+    }
+}
+
 /// Build a `CliArgs` populated with the values our tests care about. The
 /// remaining fields are inert (`None`/`false`) because `ensure_catalog` only
 /// reads `no_catalog`. Keeping every field explicit here prevents future
@@ -331,6 +345,39 @@ async fn no_catalog_mode_fixtures_serve_get_list_resolve_via_memory_agent_repo()
     assert!(
         resolved.skills.is_empty(),
         "planner has no inline skills (host references only)"
+    );
+}
+
+#[tokio::test]
+async fn catalog_fixtures_retain_allowed_child_placements_as_spawn_grants() {
+    let mut config = base_config();
+    config.agent_types.insert(
+        "planner".into(),
+        agent_with_allowed_children("claude-x", Some("plan!"), &["workspace", "in_process"]),
+    );
+
+    let fixtures = fixtures_from_config(&config);
+    let repo = MemoryAgentRepository::new(fixtures);
+    let resolved = repo
+        .resolve(&default_tenant_id(), "planner")
+        .await
+        .expect("planner should resolve from no-catalog fixtures");
+
+    assert!(
+        resolved
+            .capabilities
+            .iter()
+            .any(|capability| capability == "spawn:workspace"),
+        "allowed_child_placements must survive catalog import as spawn:workspace grants: {:?}",
+        resolved.capabilities
+    );
+    assert!(
+        resolved
+            .capabilities
+            .iter()
+            .any(|capability| capability == "spawn:in_process"),
+        "allowed_child_placements must survive catalog import as spawn:in_process grants: {:?}",
+        resolved.capabilities
     );
 }
 

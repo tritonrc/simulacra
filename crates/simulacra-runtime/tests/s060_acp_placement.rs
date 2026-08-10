@@ -282,7 +282,6 @@ fn acp_harness(
         parent_capability: parent_capability.clone(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: Some(Arc::new(move |_cell| {

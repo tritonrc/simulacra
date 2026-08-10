@@ -155,7 +155,6 @@ fn s060_real_task_factory(config: SimulacraConfig) -> AgentTaskFactory {
         parent_capability: s060_capability(&["workspace", "in_process"]),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "root-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: None,

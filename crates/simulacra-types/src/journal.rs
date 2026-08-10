@@ -58,8 +58,8 @@ pub enum JournalEntryKind {
         assistant_message: Option<Message>,
     },
     ToolCall {
-        /// Provider tool-call id. Optional for journals written before this
-        /// field existed and for any non-provider synthetic entries.
+        /// Provider tool-call id. Top-level replay matching requires this;
+        /// non-provider synthetic entries leave it unset.
         #[serde(default)]
         tool_call_id: Option<String>,
         tool_name: String,

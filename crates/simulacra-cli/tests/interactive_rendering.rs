@@ -379,6 +379,36 @@ fn interactive_session_tracks_all_concurrent_children_and_removes_only_exact_ter
     assert!(!session.status_line().contains("delegating"));
 }
 
+#[tokio::test]
+async fn unmatched_child_finished_does_not_create_a_cancellable_terminal_child() {
+    let mut session = build_session();
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<SupervisorMessage>(1);
+    session.set_supervisor_control(control_tx, AgentId("interactive-root".into()));
+
+    session.process_activity_event(&finished_child("never-accepted", "completed"));
+    session.process_activity_event(&ActivityEvent::ToolStart {
+        tool_call_id: "join-never-accepted".into(),
+        name: "join_child_agent".into(),
+        arguments: serde_json::json!({"child_id": "never-accepted"}),
+    });
+    let view = session.cancel_selected_child().await;
+
+    assert!(
+        !session.status_line().contains("delegating"),
+        "an unmatched terminal lifecycle event must not create an active child roster entry"
+    );
+    assert!(
+        control_rx.try_recv().is_err(),
+        "an unmatched terminal lifecycle event must not make the id controllable"
+    );
+    assert!(
+        view.tool_results_to_model
+            .iter()
+            .all(|message| !message.content.contains("never-accepted")),
+        "unmatched ChildFinished must not fabricate a model-visible child result"
+    );
+}
+
 #[test]
 fn every_child_finished_outcome_removes_its_exact_accepted_id() {
     for (index, exit_reason) in [

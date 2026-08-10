@@ -290,32 +290,22 @@ impl AgentSupervisor {
     ) {
         let mut results = lock_mutex(child_results, "child_results");
         let finished_at_ms = now_ms();
-        let fallback_metadata = ChildMetadata {
-            child_id: terminal.child_id.clone(),
-            placement: terminal.placement.clone(),
-            task: String::new(),
-            parent_id: AgentId(String::new()),
-            capability: CapabilityToken::default(),
-            started_at_ms: finished_at_ms,
-            finished_at_ms: None,
-        };
-        let had_state = results.contains_key(&terminal.child_id);
-        let state = results
-            .entry(terminal.child_id.clone())
-            .or_insert_with(|| ChildRunState {
-                metadata: fallback_metadata,
-                result: None,
-                result_delivered: false,
-                join_waiters: Vec::new(),
-                wait_waiters: Vec::new(),
-            });
-        state.metadata.finished_at_ms = Some(finished_at_ms);
-        if had_state {
+        let (join_waiters, wait_waiters) = {
+            let Some(state) = results.get_mut(&terminal.child_id) else {
+                tracing::warn!(
+                    child_id = terminal.child_id.0.as_str(),
+                    "ignoring terminal result for unknown or closed child"
+                );
+                return;
+            };
+            state.metadata.finished_at_ms = Some(finished_at_ms);
             terminal.elapsed_ms = finished_at_ms.saturating_sub(state.metadata.started_at_ms);
-        }
-        state.result = Some(terminal.clone());
-        let join_waiters = std::mem::take(&mut state.join_waiters);
-        let wait_waiters = std::mem::take(&mut state.wait_waiters);
+            state.result = Some(terminal.clone());
+            (
+                std::mem::take(&mut state.join_waiters),
+                std::mem::take(&mut state.wait_waiters),
+            )
+        };
         for waiter in &wait_waiters {
             for waited_child_id in &waiter.child_ids {
                 if waited_child_id == &terminal.child_id {

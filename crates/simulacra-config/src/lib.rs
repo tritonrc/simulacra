@@ -771,7 +771,17 @@ pub fn validate_mcp_server(config: &McpServerConfig) -> Result<(), ConfigError> 
 /// that has `allowed_child_placements = ["worker"]` but no capabilities block would have
 /// its spawn grant silently dropped.
 pub fn build_capability_token(agent_type: &AgentTypeConfig) -> CapabilityToken {
-    let mut token = match &agent_type.capabilities {
+    build_capability_token_from_parts(
+        agent_type.capabilities.as_ref(),
+        agent_type.allowed_child_placements.clone(),
+    )
+}
+
+fn build_capability_token_from_parts(
+    capabilities: Option<&CapabilitiesConfig>,
+    spawn_placements: Vec<String>,
+) -> CapabilityToken {
+    let mut token = match capabilities {
         Some(caps) => CapabilityToken {
             network: caps
                 .network
@@ -802,24 +812,16 @@ pub fn build_capability_token(agent_type: &AgentTypeConfig) -> CapabilityToken {
         },
         None => CapabilityToken::default(),
     };
-    token.spawn_placements = agent_type.allowed_child_placements.clone();
+    token.spawn_placements = spawn_placements;
     token
 }
 
 /// Build the host capability envelope for a configured child placement.
 pub fn build_child_placement_capability(placement: &ChildPlacementConfig) -> CapabilityToken {
-    let surrogate = AgentTypeConfig {
-        model: placement.model.clone().unwrap_or_default(),
-        system_prompt: None,
-        skills: placement.skills.clone(),
-        max_turns: placement.max_turns,
-        max_tokens: placement.max_tokens,
-        max_sub_agents: placement.max_sub_agents,
-        allowed_child_placements: placement.allowed_child_placements.clone(),
-        restart_policy: None,
-        capabilities: placement.capabilities.clone(),
-    };
-    build_capability_token(&surrogate)
+    build_capability_token_from_parts(
+        placement.capabilities.as_ref(),
+        placement.allowed_child_placements.clone(),
+    )
 }
 
 /// Map `MemoryCapabilityConfig` → `simulacra_types::MemoryCapability`. Invalid

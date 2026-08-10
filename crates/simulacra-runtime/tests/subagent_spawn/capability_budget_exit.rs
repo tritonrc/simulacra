@@ -92,7 +92,6 @@ fn agent_task_factory_performs_three_way_capability_intersection_parent_config_a
         parent_capability: CapabilityToken::default(),
         allowed_mcp_servers: None,
         supervisor_sender: None,
-        parent_model: "parent-model".into(),
         pipeline: None,
         script_executor: None,
         child_cell_configurator: None,

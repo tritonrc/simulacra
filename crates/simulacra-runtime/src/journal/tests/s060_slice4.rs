@@ -112,3 +112,17 @@ fn s060_a34_wrong_version_rejection_logs_expected_got_and_new_session_action() {
         );
     }
 }
+
+#[test]
+fn s060_v3_rejects_legacy_and_hybrid_sub_agent_spawned_payloads_before_replay() {
+    for payload in [
+        r#"{"type":"SubAgentSpawned","child_id":"child-0123456789abcdef0123456789abcdef","agent_type":"coder","system_prompt":"legacy"}"#,
+        r#"{"type":"SubAgentSpawned","child_id":"child-0123456789abcdef0123456789abcdef","placement":"workspace","backend":"Native","task":"bounded","instructions":null,"tier":"legacy"}"#,
+    ] {
+        let parsed = serde_json::from_str::<JournalEntryKind>(payload);
+        assert!(
+            parsed.is_err(),
+            "v3 must reject legacy/hybrid SubAgentSpawned payload rather than silently accepting it: {payload}"
+        );
+    }
+}

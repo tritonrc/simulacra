@@ -175,7 +175,6 @@ async fn s060_a26_a27_a36_nested_spawn_uses_immediate_callers_effective_capabili
         parent_capability: root_capability.clone(),
         allowed_mcp_servers: None,
         supervisor_sender: Some(sender.clone()),
-        parent_model: "root-model".into(),
         pipeline: Some(Arc::new(pipeline)),
         script_executor: None,
         child_cell_configurator: Some(Arc::new(move |cell| {
@@ -579,7 +578,6 @@ async fn s060_capture_final_memory_capabilities(
             parent_capability: parent_capability.clone(),
             allowed_mcp_servers: None,
             supervisor_sender: None,
-            parent_model: "root-model".into(),
             pipeline: Some(Arc::new(s060_memory_hook(change))),
             script_executor: None,
             child_cell_configurator: Some(Arc::new(move |cell| {
