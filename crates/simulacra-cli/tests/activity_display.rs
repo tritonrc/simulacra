@@ -159,19 +159,23 @@ mod activity_block_rendering {
     }
 
     #[test]
-    fn child_spawned_opens_a_child_activity_block_with_agent_type_and_task_summary() {
+    fn child_spawned_opens_a_generic_child_activity_block_with_task_summary() {
         let mut renderer = ActivityBlockRenderer::new();
         let lines = renderer.process_event(&ActivityEvent::ChildSpawned {
             child_id: "child-1".into(),
-            agent_type: "Explore".into(),
+            placement: "workspace".into(),
             task: "Research streaming architecture".into(),
         });
 
         assert!(!lines.is_empty(), "ChildSpawned should produce output");
         let header = &lines[0];
         assert!(
-            header.contains("Explore"),
-            "Header should contain agent_type, got: {header}"
+            header.contains("Child"),
+            "Header should use a generic child label, got: {header}"
+        );
+        assert!(
+            !header.contains("workspace"),
+            "placement is not identity: {header}"
         );
         assert!(
             header.contains("Research streaming architecture"),
@@ -184,14 +188,14 @@ mod activity_block_rendering {
         let mut renderer = ActivityBlockRenderer::new();
         renderer.process_event(&ActivityEvent::ChildSpawned {
             child_id: "child-1".into(),
-            agent_type: "Explore".into(),
+            placement: "workspace".into(),
             task: "some task".into(),
         });
 
         // A ChildActivity wrapping a ToolStart
         let lines = renderer.process_event(&ActivityEvent::ChildActivity {
             child_id: "child-1".into(),
-            agent_type: "Explore".into(),
+            placement: "workspace".into(),
             event: Box::new(ActivityEvent::ToolStart {
                 tool_call_id: "tc-child-1".into(),
                 name: "Read".into(),
@@ -215,13 +219,13 @@ mod activity_block_rendering {
         let mut renderer = ActivityBlockRenderer::new();
         renderer.process_event(&ActivityEvent::ChildSpawned {
             child_id: "child-1".into(),
-            agent_type: "Explore".into(),
+            placement: "workspace".into(),
             task: "some task".into(),
         });
 
         let lines = renderer.process_event(&ActivityEvent::ChildFinished {
             child_id: "child-1".into(),
-            agent_type: "Explore".into(),
+            placement: "workspace".into(),
             exit_reason: "complete".into(),
             duration_ms: 46000,
             tool_uses: 21,

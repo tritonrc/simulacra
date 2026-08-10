@@ -14,7 +14,7 @@
 //! - `ToolFinish` transitions the block to completed: a filled dot for success or
 //!   an X indicator for errors. Summary shows `Done · {duration}` or
 //!   `Error (exit code {N}) · {duration}`.
-//! - `ChildSpawned` opens a child activity block with spinner + agent_type + task summary.
+//! - `ChildSpawned` opens a generic child activity block with spinner + task summary.
 //! - `ChildActivity` events render within the child's activity block using the same
 //!   rules recursively (recursive activity block nesting).
 //! - `ChildFinished` transitions the child block to completed with stats:
@@ -43,7 +43,7 @@ struct ActivityBlock {
     /// Block kind: "tool", "agent", or "thinking".
     #[allow(dead_code)]
     kind: String,
-    /// Display name (tool name, agent_type, or "Thinking...").
+    /// Display name (tool name, opaque child identity, or "Thinking...").
     name: String,
     /// Truncated argument/task summary for the header line.
     summary: String,
@@ -164,15 +164,16 @@ impl ActivityBlockRenderer {
                 }
             }
 
-            // ChildSpawned opens a child activity block with agent_type and task summary
+            // ChildSpawned opens a generic child block; placement is capability
+            // context, not the child's identity.
             ActivityEvent::ChildSpawned {
                 child_id,
-                agent_type,
+                placement: _,
                 task,
             } => {
                 let block = ActivityBlock {
                     kind: "agent".into(),
-                    name: agent_type.clone(),
+                    name: "Child".into(),
                     summary: truncate_text(task, 60),
                     started_at: Instant::now(),
                     tail_lines: Vec::new(),
@@ -189,7 +190,7 @@ impl ActivityBlockRenderer {
             // using the same rules recursively (recursive activity block nesting)
             ActivityEvent::ChildActivity {
                 child_id,
-                agent_type: _,
+                placement: _,
                 event,
             } => {
                 // Process the inner event recursively
@@ -206,7 +207,7 @@ impl ActivityBlockRenderer {
             // ChildFinished transitions child block to completed with stats
             ActivityEvent::ChildFinished {
                 child_id,
-                agent_type: _,
+                placement: _,
                 exit_reason: _,
                 duration_ms,
                 tool_uses,

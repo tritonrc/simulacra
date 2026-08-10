@@ -1,6 +1,6 @@
 #[test]
 fn supervisor_enforces_capability_attenuation_on_spawn() {
-    let parent_capability = CapabilityToken::default();
+    let parent_capability = worker_parent_capability();
     let child_capability = CapabilityToken {
         shell: true,
         ..CapabilityToken::default()
@@ -20,6 +20,38 @@ fn supervisor_enforces_capability_attenuation_on_spawn() {
     assert!(
         matches!(err, RuntimeError::CapabilityViolation(ref message) if message.contains("subset")),
         "expected a capability violation when the child requests shell access the parent lacks, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn s060_descendant_spawn_uses_immediate_parent_capability_not_root_authority() {
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
+        default_budget(),
+        Arc::new(NoopTaskFactory),
+    );
+    install_test_journal(&mut supervisor);
+    supervisor.set_root_agent_id(AgentId("root-agent".into()));
+    supervisor
+        .spawn_agent(spawn_config(
+            "parent-child",
+            "root-agent",
+            CapabilityToken::default(),
+            leaf_child_budget(),
+            RestartStrategy::LetCrash,
+        ))
+        .expect("root may create the child with no descendant placement authority");
+
+    let result = supervisor.spawn_agent(spawn_config(
+        "forbidden-grandchild",
+        "parent-child",
+        CapabilityToken::default(),
+        leaf_child_budget(),
+        RestartStrategy::LetCrash,
+    ));
+    assert!(
+        matches!(result, Err(RuntimeError::CapabilityViolation(ref reason)) if reason.contains("worker") && reason.contains("parent-child")),
+        "the immediate parent's empty spawn_placements must deny the descendant even though root allows worker; got {result:?}"
     );
 }
 
@@ -93,10 +125,11 @@ fn restart_strategy_is_applied_on_agent_failure() {
 #[tokio::test]
 async fn cancelled_agent_receives_cancellation_signal() {
     let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+        worker_parent_capability(),
         default_budget(),
         Arc::new(NoopTaskFactory),
     );
+    install_test_journal(&mut supervisor);
     let token = supervisor
         .spawn_agent(spawn_config(
             "cancelled-agent",
@@ -137,7 +170,7 @@ async fn cancelled_agent_receives_cancellation_signal() {
 // S009 Assertion: Child budget does not exceed parent budget.
 #[test]
 fn child_budget_does_not_exceed_parent_budget() {
-    let parent_capability = CapabilityToken::default();
+    let parent_capability = worker_parent_capability();
     let mut parent_budget = default_budget();
     parent_budget.max_tokens = 10;
     parent_budget.used_tokens = 5;
@@ -159,7 +192,14 @@ fn child_budget_does_not_exceed_parent_budget() {
         .expect_err("spawn_agent should reject a child budget that exceeds the parent's remaining token budget");
 
     assert!(
-        matches!(err, RuntimeError::BudgetExhausted(ref exhausted) if exhausted.resource == "tokens"),
+        matches!(
+            err,
+            RuntimeError::BudgetExhausted(ref exhausted)
+                if exhausted.resource
+                    == "max_tokens requested 6 exceeds immediate parent remaining 5 (limit 10)"
+                    && exhausted.used == "6"
+                    && exhausted.limit == "5"
+        ),
         "expected spawn_agent to reject the oversized child token budget, got {err:?}"
     );
 }
@@ -171,6 +211,17 @@ struct SuspendedTracingTaskFactory {
 }
 
 impl TaskFactory for SuspendedTracingTaskFactory {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        if config.placement == "worker" {
+            Ok(())
+        } else {
+            Err(RuntimeError::Session(format!(
+                "unknown child placement {:?}; configured test placement: worker",
+                config.placement
+            )))
+        }
+    }
+
     fn create_task(&self, _config: SpawnConfig, _token: CancellationToken) -> BoxTaskFuture {
         let background_polled = self
             .background_polled
@@ -218,11 +269,9 @@ async fn detached_child_dispatcher_does_not_leak_across_await() {
         resume: Arc::clone(&resume),
         child_event_emitted: Mutex::new(Some(child_event_emitted_tx)),
     });
-    let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
-        default_budget(),
-        factory,
-    );
+    let mut supervisor =
+        AgentSupervisor::with_task_factory(worker_parent_capability(), default_budget(), factory);
+    install_test_journal(&mut supervisor);
 
     tracing::dispatcher::with_default(&dispatch, || {
         supervisor
@@ -281,10 +330,11 @@ fn agent_spawn_produces_create_agent_span_with_agent_name() {
         .expect("test runtime should build");
     let _runtime_guard = runtime.enter();
     let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+        worker_parent_capability(),
         default_budget(),
         Arc::new(NoopTaskFactory),
     );
+    install_test_journal(&mut supervisor);
 
     tracing::dispatcher::with_default(&dispatch, || {
         supervisor
@@ -376,19 +426,24 @@ async fn simulacra_agent_turns_counter_tracks_turns_per_agent() {
     );
 }
 
-// S009 O11y Assertion: Agent spawn is logged at INFO with agent name, parent, and capabilities.
+// S009/S060 O11y Assertion: Agent spawn is logged at INFO with bounded spawn metadata.
 #[tokio::test]
-async fn agent_spawn_is_logged_at_info_with_agent_name_parent_and_capabilities() {
+async fn agent_spawn_is_logged_at_info_with_bounded_spawn_metadata() {
     let (subscriber, _captured_spans, captured_events) = setup_capture();
     let child_capability = CapabilityToken {
         shell: true,
         ..CapabilityToken::default()
     };
+    let parent_capability = CapabilityToken {
+        spawn_placements: vec!["worker".into()],
+        ..child_capability.clone()
+    };
     let mut supervisor = AgentSupervisor::with_task_factory(
-        child_capability.clone(),
+        parent_capability,
         default_budget(),
         Arc::new(NoopTaskFactory),
     );
+    install_test_journal(&mut supervisor);
 
     let (_capture_guard, _guard) = install_capture(subscriber).await;
     supervisor
@@ -407,18 +462,21 @@ async fn agent_spawn_is_logged_at_info_with_agent_name_parent_and_capabilities()
         .find(|event| {
             event.level == "INFO"
                 && event.current_span.as_deref() == Some("create_agent")
-                && event.fields.get("gen_ai.agent.name") == Some(&"child-agent".to_string())
-                && event.fields.get("parent") == Some(&"parent-agent".to_string())
+                && event.fields.get("child_id") == Some(&"child-agent".to_string())
+                && event.fields.get("parent_id") == Some(&"parent-agent".to_string())
+                && event.fields.get("placement") == Some(&"worker".to_string())
+                && event.fields.get("backend") == Some(&"native".to_string())
         })
         .expect("expected an INFO spawn event with agent and parent context");
 
+    assert_eq!(
+        spawn_event.fields.get("instruction_length_bytes"),
+        Some(&"0".to_string())
+    );
     assert!(
-        spawn_event
-            .fields
-            .get("capabilities")
-            .is_some_and(|value| value.contains("shell: true")),
-        "expected the spawn log to include the child's capabilities, got {:?}",
-        spawn_event.fields
+        !spawn_event.fields.contains_key("capabilities"),
+        "spawn logs must not serialize capability contents: {:?}",
+        spawn_event.fields,
     );
 }
 

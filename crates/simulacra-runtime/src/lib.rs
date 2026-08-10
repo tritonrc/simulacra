@@ -12,6 +12,7 @@ mod exit_reason;
 mod guardrail;
 mod journal;
 mod journal_sqlite;
+mod policy_kill;
 mod replay;
 mod session;
 mod session_file;
@@ -28,7 +29,7 @@ mod vfs_hook;
 // Re-export all public types at the crate root.
 pub use acp_child::{AcpChildFuture, AcpChildRequest, AcpChildRuntime};
 pub use activity_sink::{
-    ActivitySink, ChannelActivitySink, ForwardingActivitySink, NoopActivitySink,
+    ActivitySink, ChannelActivitySink, ForwardingActivitySink, NoopActivitySink, RoutedActivitySink,
 };
 pub use agent_loop::{
     ActiveTurn, AgentHitlRuntime, AgentHitlSenders, AgentInputQueue, AgentLoop, AgentLoopConfig,

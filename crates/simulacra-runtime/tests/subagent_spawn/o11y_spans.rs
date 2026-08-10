@@ -6,6 +6,7 @@ async fn create_agent_span_uses_genai_operation_name_and_child_agent_name() {
             default_budget(),
             Arc::new(NoopFactory),
         );
+        install_spawn_test_journal(&mut supervisor);
         supervisor
             .spawn_agent(spawn_config(
                 "child-1",
@@ -69,13 +70,14 @@ fn running_the_child_loop_emits_an_invoke_agent_span() {
 }
 
 #[tokio::test]
-async fn subagent_lifecycle_spans_include_parent_and_child_linkage_attributes() {
+async fn subagent_lifecycle_spans_include_parent_placement_and_backend_attributes() {
     let (_, spans, _) = capture_trace(|| {
         let mut supervisor = AgentSupervisor::with_task_factory(
             default_capability(),
             default_budget(),
             Arc::new(NoopFactory),
         );
+        install_spawn_test_journal(&mut supervisor);
         supervisor
             .spawn_agent(spawn_config(
                 "child-1",
@@ -88,9 +90,13 @@ async fn subagent_lifecycle_spans_include_parent_and_child_linkage_attributes() 
     assert!(
         spans.iter().any(|span| {
             span.fields.contains_key("simulacra.parent.agent_id")
-                && span.fields.contains_key("simulacra.child.agent_type")
+                && span.fields.get("simulacra.child.placement").map(String::as_str)
+                    == Some("researcher")
+                && span.fields.get("simulacra.child.backend").map(String::as_str)
+                    == Some("native")
+                && !span.fields.contains_key("simulacra.child.agent_type")
         }),
-        "sub-agent lifecycle spans should expose Simulacra-specific parent/child linkage attributes"
+        "sub-agent lifecycle spans should expose parent linkage plus child placement/backend without agent_type"
     );
 }
 
@@ -105,7 +111,7 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     })]);
@@ -116,6 +122,7 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
             default_budget(),
             Arc::new(factory.clone()),
         );
+        install_spawn_test_journal(&mut supervisor);
         supervisor
             .spawn_agent(spawn_config(
                 "child-1",
@@ -139,7 +146,7 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
 }
 
 #[tokio::test]
-async fn child_failure_is_logged_at_warn_with_child_parent_agent_type_and_failure_reason() {
+async fn child_failure_is_logged_at_warn_with_child_parent_placement_and_failure_reason() {
     let factory =
         RecordingTaskFactory::new(vec![Err(RuntimeError::CapabilityViolation("boom".into()))]);
 
@@ -149,6 +156,7 @@ async fn child_failure_is_logged_at_warn_with_child_parent_agent_type_and_failur
             default_budget(),
             Arc::new(factory.clone()),
         );
+        install_spawn_test_journal(&mut supervisor);
         // After WARNING 1's fix, spawn_agent propagates immediate child errors —
         // the return value may be Err for this test. We only care about the
         // WARN log being emitted via process_child_result.
@@ -165,10 +173,11 @@ async fn child_failure_is_logged_at_warn_with_child_parent_agent_type_and_failur
             event.level == "WARN"
                 && event.fields.contains_key("child_id")
                 && event.fields.contains_key("parent_id")
-                && event.fields.contains_key("agent_type")
+                && event.fields.get("placement").map(String::as_str) == Some("researcher")
+                && !event.fields.contains_key("agent_type")
                 && event.fields.contains_key("failure_reason")
         }),
-        "child failures should log a WARN event with child id, parent id, agent type, and failure reason"
+        "child failures should log a WARN event with child id, parent id, placement, and failure reason without agent_type"
     );
 }
 
@@ -233,10 +242,16 @@ async fn supervisor_writes_sub_agent_spawned_journal_entry_to_parent_stream_befo
             &entry.entry,
             JournalEntryKind::SubAgentSpawned {
                 child_id,
-                agent_type,
-                ..
+                placement,
+                backend,
+                task,
+                instructions,
             }
-            if child_id.0 == "child-1" && agent_type == "researcher"
+            if child_id.0 == "child-1"
+                && placement == "researcher"
+                && backend == "native"
+                && task == "delegate task"
+                && instructions.is_none()
         )
     });
     assert!(
@@ -405,7 +420,7 @@ async fn spawn_agent_tool_exit_reason_uses_snake_case_format_per_spec() {
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };
@@ -437,7 +452,7 @@ async fn spawn_agent_tool_exit_reason_completed_uses_snake_case_format_per_spec(
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };

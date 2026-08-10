@@ -1,7 +1,7 @@
 use rust_decimal::Decimal;
 use simulacra_runtime::{
     AgentLoopOutput, AgentSupervisor, BoxTaskFuture, CancellationToken, InMemoryJournalStorage,
-    SpawnConfig, TaskFactory,
+    RuntimeError, SpawnConfig, TaskFactory,
 };
 use simulacra_types::{
     AgentId, CapabilityToken, CheckpointData, ExitReason, JOURNAL_SCHEMA_VERSION, JournalEntry,
@@ -15,6 +15,17 @@ use std::sync::Arc;
 struct NoopTaskFactory;
 
 impl TaskFactory for NoopTaskFactory {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        if config.placement == "worker" {
+            Ok(())
+        } else {
+            Err(RuntimeError::Session(format!(
+                "unknown child placement {:?}; configured test placement: worker",
+                config.placement
+            )))
+        }
+    }
+
     fn create_task(&self, _config: SpawnConfig, _token: CancellationToken) -> BoxTaskFuture {
         Box::pin(async {
             Ok(AgentLoopOutput {
@@ -102,7 +113,10 @@ fn checkpoint_budget_snapshot_survives_serialize_deserialize_roundtrip() {
 
 #[tokio::test]
 async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
-    let parent_cap = CapabilityToken::default();
+    let parent_cap = CapabilityToken {
+        spawn_placements: vec!["worker".into()],
+        ..Default::default()
+    };
     let parent_budget = ResourceBudget::new(100_000, 50, Decimal::new(500, 2), 10);
 
     let mut supervisor = AgentSupervisor::with_task_factory(
@@ -110,6 +124,7 @@ async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
         parent_budget,
         Arc::new(NoopTaskFactory),
     );
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
 
     // Create a child config with some simulated usage
     let mut child_budget = ResourceBudget::new(10_000, 5, Decimal::new(50, 2), 0);
@@ -123,11 +138,9 @@ async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
         capability: Some(parent_cap.clone()),
         budget: child_budget,
         restart_strategy: simulacra_runtime::RestartStrategy::LetCrash,
-        agent_type: Some(String::new()),
+        placement: "worker".into(),
         task: String::new(),
-        system_prompt: None,
-        tier: None,
-        resolved_tier: None,
+        instructions: None,
     };
 
     // Spawn the child (increments used_sub_agents)
@@ -136,13 +149,11 @@ async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
             agent_id: AgentId("child-1".into()),
             parent_id: AgentId("parent".into()),
             capability: Some(parent_cap.clone()),
-            budget: ResourceBudget::new(10_000, 5, Decimal::new(50, 2), 0),
+            budget: ResourceBudget::new(10_000, 5, Decimal::new(50, 2), 1),
             restart_strategy: simulacra_runtime::RestartStrategy::LetCrash,
-            agent_type: Some(String::new()),
+            placement: "worker".into(),
             task: String::new(),
-            system_prompt: None,
-            tier: None,
-            resolved_tier: None,
+            instructions: None,
         })
         .expect("spawn should succeed");
 
@@ -190,11 +201,9 @@ fn multiple_child_deductions_accumulate_in_parent() {
             capability: Some(parent_cap.clone()),
             budget: child_budget,
             restart_strategy: simulacra_runtime::RestartStrategy::LetCrash,
-            agent_type: Some(String::new()),
+            placement: "worker".into(),
             task: String::new(),
-            system_prompt: None,
-            tier: None,
-            resolved_tier: None,
+            instructions: None,
         };
 
         supervisor.handle_completion(&config);

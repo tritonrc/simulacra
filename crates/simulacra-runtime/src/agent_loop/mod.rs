@@ -106,4 +106,14 @@ pub struct AgentLoop {
     input_queue: Option<AgentInputQueue>,
     /// Optional human-in-the-loop channels for server-launched resumable waits.
     hitl: Option<AgentHitlRuntime>,
+    /// First journal entry not yet inspected for an asynchronous spawn-hook kill.
+    ///
+    /// This cursor is initialized from the journal state that predates this loop,
+    /// then advanced monotonically as turns run. That prevents a newly completed
+    /// child from killing its parent only when completion happens to overlap the
+    /// synchronous `spawn_agent` tool call.
+    spawn_hook_journal_frontier: Option<usize>,
+    /// Live first-wins spawn-policy signal for this parent. This remains
+    /// authoritative even when the corresponding HookKill audit append fails.
+    policy_kill_signal: Arc<crate::policy_kill::PolicyKillSignal>,
 }

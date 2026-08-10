@@ -8,6 +8,7 @@ async fn parent_max_sub_agents_zero_means_unlimited_sub_agents_not_already_exhau
         parent_budget,
         Arc::new(NoopFactory),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -31,6 +32,7 @@ async fn parent_max_tokens_zero_means_unlimited_tokens_for_child_budget_requests
         parent_budget,
         Arc::new(NoopFactory),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -54,6 +56,7 @@ async fn parent_max_turns_zero_means_unlimited_turns_not_already_exhausted() {
         parent_budget,
         Arc::new(NoopFactory),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -77,6 +80,7 @@ async fn parent_max_cost_zero_means_unlimited_cost_not_already_exhausted() {
         parent_budget,
         Arc::new(NoopFactory),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -100,6 +104,7 @@ fn child_budget_request_exceeding_parent_remaining_budget_is_rejected_before_chi
         parent_budget,
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let result = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -129,6 +134,7 @@ async fn child_turn_budget_request_exceeding_parent_remaining_turns_is_rejected_
         parent_budget,
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let result = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -159,6 +165,7 @@ async fn child_cost_budget_request_exceeding_parent_remaining_cost_is_rejected_b
         parent_budget,
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     let result = supervisor.spawn_agent(spawn_config(
         "child-1",
@@ -184,6 +191,7 @@ async fn accepting_child_spawn_increments_parent_used_sub_agents() {
         default_budget(),
         Arc::new(NoopFactory),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     supervisor
         .spawn_agent(spawn_config(
@@ -213,7 +221,7 @@ async fn child_token_usage_is_rolled_up_from_agent_loop_output_not_stale_spawn_b
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     })]);
@@ -222,6 +230,7 @@ async fn child_token_usage_is_rolled_up_from_agent_loop_output_not_stale_spawn_b
         default_budget(),
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     supervisor
         .spawn_agent(spawn_config(
@@ -246,7 +255,7 @@ async fn child_turn_and_cost_usage_are_rolled_up_from_agent_loop_output_not_stal
         exit_reason: ExitReason::Complete,
         messages: vec![],
         token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 2,
         used_cost: Decimal::new(375, 2),
     })]);
@@ -255,6 +264,7 @@ async fn child_turn_and_cost_usage_are_rolled_up_from_agent_loop_output_not_stal
         default_budget(),
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     supervisor
         .spawn_agent(spawn_config(
@@ -278,16 +288,17 @@ async fn child_turn_and_cost_usage_are_rolled_up_from_agent_loop_output_not_stal
 }
 
 #[tokio::test]
-async fn spawn_config_passes_agent_type_and_task_to_the_task_factory() {
+async fn spawn_config_passes_placement_and_task_to_the_task_factory() {
     let factory = RecordingTaskFactory::new(vec![Ok(child_success_output())]);
     let mut supervisor = AgentSupervisor::with_task_factory(
         default_capability(),
         default_budget(),
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     supervisor
-        .spawn_agent(spawn_config_with_agent_type(
+        .spawn_agent(spawn_config_with_placement(
             "child-1",
             "parent-agent",
             "reviewer",
@@ -300,7 +311,7 @@ async fn spawn_config_passes_agent_type_and_task_to_the_task_factory() {
     let snapshot = started
         .first()
         .expect("task factory should capture the spawn config");
-    assert_eq!(snapshot.agent_type, "reviewer");
+    assert_eq!(snapshot.placement, "reviewer");
     assert_eq!(snapshot.task, "delegate task");
 }
 
@@ -310,7 +321,7 @@ async fn parent_receives_exactly_one_tool_result_message_per_spawn_agent_call() 
     // receives exactly one result per spawn_agent call.
     let (result, _captured) = run_spawn_tool_call(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 1,
@@ -339,11 +350,11 @@ async fn parent_receives_exactly_one_tool_result_message_per_spawn_agent_call() 
 }
 
 #[tokio::test]
-async fn failed_spawn_agent_calls_return_error_tool_results_with_child_id_agent_type_and_error() {
+async fn failed_spawn_agent_calls_return_error_tool_results_with_child_id_placement_and_error() {
     // Exercise the real SpawnAgentTool path with a child runtime failure.
     let (result, _captured) = run_spawn_tool_call(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 1,
@@ -365,7 +376,7 @@ async fn failed_spawn_agent_calls_return_error_tool_results_with_child_id_agent_
             );
             assert!(
                 msg.contains("researcher"),
-                "error message should reference the agent_type: {msg}"
+                "error message should reference the placement: {msg}"
             );
             assert!(
                 msg.contains("shell denied") || msg.contains("failed"),
@@ -380,9 +391,9 @@ async fn failed_spawn_agent_calls_return_error_tool_results_with_child_id_agent_
 
 #[tokio::test]
 async fn spawn_agent_tool_parses_capabilities_override_json_into_spawn_config() {
-    let (result, captured) = run_spawn_tool_call(
+    let (result, captured) = run_spawn_tool_call_with_caller_capability(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 1,
@@ -398,11 +409,21 @@ async fn spawn_agent_tool_parses_capabilities_override_json_into_spawn_config() 
                 "python": false,
                 "paths_write": ["/workspace/out.txt"],
                 "paths_read": ["/workspace/in.txt"],
-                "spawn_types": ["reviewer"]
+                "spawn_placements": ["reviewer"]
             }
         }),
         &["researcher"],
         Ok(child_success_output()),
+        CapabilityToken {
+            network: vec![NetworkPermission("net:api.github.com".into())],
+            mcp_tools: vec!["github".into()],
+            shell: true,
+            javascript: true,
+            paths_write: vec![PathPattern("/workspace/out.txt".into())],
+            paths_read: vec![PathPattern("/workspace/in.txt".into())],
+            spawn_placements: vec!["researcher".into(), "reviewer".into()],
+            ..Default::default()
+        },
     )
     .await;
 
@@ -426,31 +447,29 @@ async fn spawn_agent_tool_parses_capabilities_override_json_into_spawn_config() 
         cap.paths_read,
         vec![PathPattern("/workspace/in.txt".into())]
     );
-    assert_eq!(cap.spawn_types, vec!["reviewer".to_string()]);
+    assert_eq!(cap.spawn_placements, vec!["reviewer".to_string()]);
 }
 
 #[tokio::test]
-async fn spawn_agent_tool_rejects_agent_type_not_in_call_site_spawn_types() {
+async fn spawn_agent_tool_rejects_placement_not_in_call_site_spawn_placements() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     let tool = SpawnAgentTool {
         sender,
-        can_spawn: vec!["researcher".into()],
+        allowed_placements: vec!["researcher".into()],
         activity_sink: Arc::new(NoopActivitySink),
         parent_id: AgentId("parent-agent".into()),
-        tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
-        parent_model: "parent-model".into(),
         guidance: None,
     };
     let capability = CapabilityToken {
-        spawn_types: vec!["reviewer".into()],
+        spawn_placements: vec!["reviewer".into()],
         ..Default::default()
     };
 
     let result = tool
         .call(
             serde_json::json!({
-                "agent_type": "researcher",
+                "placement": "researcher",
                 "task": "check",
                 "budget": {
                     "max_tokens": 1,
@@ -464,9 +483,9 @@ async fn spawn_agent_tool_rejects_agent_type_not_in_call_site_spawn_types() {
         .await;
 
     match result {
-        Err(ToolError::ExecutionFailed(msg)) => {
+        Err(ToolError::InvalidArguments(msg)) => {
             assert!(
-                msg.contains("caller spawn_types"),
+                msg.contains("caller spawn_placements"),
                 "error should identify the call-site capability denial: {msg}"
             );
         }
@@ -482,7 +501,7 @@ async fn spawn_agent_tool_rejects_agent_type_not_in_call_site_spawn_types() {
 async fn spawn_agent_tool_child_runtime_failures_return_toolerror_execution_failed() {
     let (result, _captured) = run_spawn_tool_call(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 1,
@@ -506,7 +525,7 @@ async fn spawn_agent_tool_child_runtime_failures_return_toolerror_execution_fail
 async fn spawn_agent_tool_does_not_hardcode_parent_agent_id_in_spawn_config() {
     let (_result, captured) = run_spawn_tool_call(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 1,

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 
+mod s060_slice4;
+
 #[derive(Debug, Clone)]
 struct CapturedEvent {
     level: String,
@@ -215,9 +217,9 @@ fn fork_from_checkpoint_creates_storage_independent_of_original_mutations() {
 }
 
 #[test]
-fn read_from_rejects_schema_mismatch_on_individual_entry() {
-    // Edge case: replay reads should fail loudly if any individual entry has a newer schema,
-    // even when surrounding entries are otherwise valid.
+fn append_rejects_schema_mismatch_without_poisoning_read_from() {
+    // Strict v3 storage rejects a mismatched entry before it can enter the
+    // stream; replay then sees only the surrounding valid entries.
     let agent_id = AgentId("schema-agent".into());
     let storage = InMemoryJournalStorage::new();
 
@@ -229,7 +231,7 @@ fn read_from_rejects_schema_mismatch_on_individual_entry() {
             entry: JournalEntryKind::TurnStart,
         })
         .unwrap();
-    storage
+    let err = storage
         .append(JournalEntry {
             schema_version: JOURNAL_SCHEMA_VERSION + 1,
             agent_id: agent_id.clone(),
@@ -239,7 +241,14 @@ fn read_from_rejects_schema_mismatch_on_individual_entry() {
                 message_count: 2,
             },
         })
-        .unwrap();
+        .expect_err("mismatched schema must be rejected at append");
+    assert!(matches!(
+        err,
+        JournalError::SchemaVersionMismatch {
+            expected: JOURNAL_SCHEMA_VERSION,
+            got
+        } if got == JOURNAL_SCHEMA_VERSION + 1
+    ));
     storage
         .append(JournalEntry {
             schema_version: JOURNAL_SCHEMA_VERSION,
@@ -259,16 +268,14 @@ fn read_from_rejects_schema_mismatch_on_individual_entry() {
         })
         .unwrap();
 
-    let err = storage
+    let entries = storage
         .read_from(&AgentId("schema-agent".into()), 0)
-        .expect_err("mixed-schema replay should not silently continue");
-
+        .expect("rejected entry must not poison replay");
+    assert_eq!(entries.len(), 2);
+    assert!(matches!(entries[0].entry, JournalEntryKind::TurnStart));
     assert!(matches!(
-        err,
-        JournalError::SchemaVersionMismatch {
-            expected: JOURNAL_SCHEMA_VERSION,
-            got
-        } if got == JOURNAL_SCHEMA_VERSION + 1
+        entries[1].entry,
+        JournalEntryKind::LlmResponse { .. }
     ));
 }
 
@@ -278,19 +285,15 @@ fn schema_version_mismatch_is_logged_at_error_with_expected_and_found_versions()
     let storage = InMemoryJournalStorage::new();
     let agent_id = AgentId("schema-log-agent".into());
 
-    storage
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let err = storage
         .append(JournalEntry {
             schema_version: JOURNAL_SCHEMA_VERSION + 1,
             agent_id: agent_id.clone(),
             timestamp_ms: 1,
             entry: JournalEntryKind::TurnStart,
         })
-        .unwrap();
-
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let err = storage
-        .read_all(&agent_id)
-        .expect_err("schema mismatch should be surfaced");
+        .expect_err("schema mismatch should be surfaced at append");
     assert!(matches!(
         err,
         JournalError::SchemaVersionMismatch {
@@ -298,21 +301,42 @@ fn schema_version_mismatch_is_logged_at_error_with_expected_and_found_versions()
             got
         } if got == JOURNAL_SCHEMA_VERSION + 1
     ));
+    assert!(
+        storage
+            .read_all(&agent_id)
+            .expect("rejected append must leave a readable stream")
+            .is_empty()
+    );
 
     let events = captured_events.lock().unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.level == "ERROR")
+        .expect("schema mismatch append should log at ERROR");
+    assert_eq!(
+        event
+            .fields
+            .get("expected")
+            .expect("structured expected field")
+            .trim_matches('"'),
+        JOURNAL_SCHEMA_VERSION.to_string()
+    );
+    assert_eq!(
+        event
+            .fields
+            .get("got")
+            .expect("structured got field")
+            .trim_matches('"'),
+        (JOURNAL_SCHEMA_VERSION + 1).to_string()
+    );
+    let message = event
+        .fields
+        .get("message")
+        .expect("operator recovery message");
     assert!(
-        events.iter().any(|event| {
-            event.level == "ERROR"
-                && event
-                    .fields
-                    .values()
-                    .any(|value| value.contains("schema version mismatch"))
-                && event.fields.values().any(|value| {
-                    value.contains(&JOURNAL_SCHEMA_VERSION.to_string())
-                        && value.contains(&(JOURNAL_SCHEMA_VERSION + 1).to_string())
-                })
-        }),
-        "expected an ERROR log with the expected and found schema versions"
+        message.contains("schema version mismatch")
+            && message.to_lowercase().contains("start a new session"),
+        "schema mismatch log should explain recovery: {message}"
     );
 }
 

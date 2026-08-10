@@ -514,20 +514,16 @@ fn schema_version_mismatch_produces_error() {
     let storage = InMemoryJournalStorage::new();
     let agent = AgentId("agent-1".into());
 
-    // Append an entry with a future schema version
+    // Strict v3 rejects an entry with a future schema version at append.
     let future_entry = JournalEntry {
         schema_version: JOURNAL_SCHEMA_VERSION + 1,
         agent_id: agent.clone(),
         timestamp_ms: 1000,
         entry: JournalEntryKind::TurnStart,
     };
-    // append itself does not validate — it's the storage write path
-    storage.append(future_entry).unwrap();
-
-    // read_all should detect the version mismatch
-    let result = storage.read_all(&agent);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
+    let err = storage
+        .append(future_entry)
+        .expect_err("future schema must fail at append");
     match err {
         simulacra_types::JournalError::SchemaVersionMismatch { expected, got } => {
             assert_eq!(expected, JOURNAL_SCHEMA_VERSION);
@@ -535,6 +531,12 @@ fn schema_version_mismatch_produces_error() {
         }
         other => panic!("expected SchemaVersionMismatch, got: {other}"),
     }
+    assert!(
+        storage
+            .read_all(&agent)
+            .expect("rejected append must leave a readable stream")
+            .is_empty()
+    );
 }
 
 // -----------------------------------------------------------------------

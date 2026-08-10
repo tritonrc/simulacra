@@ -13,6 +13,16 @@ pub enum RuntimeError {
     Sandbox(String),
     #[error("provider error: {0}")]
     Provider(#[from] ProviderError),
+    /// An error returned by the opaque ACP child-runtime port.
+    ///
+    /// The source remains available to callers, while the supervisor can
+    /// classify this boundary without rendering an unbounded error message
+    /// into telemetry.
+    #[error("ACP child runtime error: {source}")]
+    AcpChildRuntime {
+        #[source]
+        source: Box<RuntimeError>,
+    },
     #[error("tool error: {0}")]
     Tool(#[from] ToolError),
     #[error("budget exhausted: {0}")]
@@ -42,11 +52,18 @@ pub enum RuntimeError {
     /// (or `set_task_factory` when wired) before calling `spawn_agent`.
     #[error("spawn_agent called on a supervisor with no task factory configured")]
     SpawnMissingTask,
+    /// The supervisor cannot accept a child without durable lifecycle
+    /// journaling. Callers must install storage before exposing spawn.
     #[error(
-        "ACP backend requested for agent_type '{agent_type}' with acp_profile '{acp_profile}', but no ACP child runtime was injected; configure an AcpChildRuntime before spawning ACP children"
+        "spawn_agent called on a supervisor with no journal storage configured; call set_journal_storage before spawning"
+    )]
+    SpawnMissingJournal,
+    /// An ACP placement was resolved successfully, but no ACP runtime was injected.
+    #[error(
+        "child placement {placement:?} requires an injected ACP runtime for profile {acp_profile:?}"
     )]
     AcpChildRuntimeMissing {
-        agent_type: String,
+        placement: String,
         acp_profile: String,
     },
     /// The workspace backing a running task disappeared.
@@ -94,6 +111,13 @@ impl std::fmt::Display for WorkspaceLostCause {
 }
 
 impl RuntimeError {
+    /// Marks an error returned across the opaque ACP child-runtime boundary.
+    pub(crate) fn acp_child_runtime(source: RuntimeError) -> Self {
+        Self::AcpChildRuntime {
+            source: Box::new(source),
+        }
+    }
+
     /// Returns a reference to the inner `ProviderError` if this is a `Provider` variant.
     pub fn as_provider_error(&self) -> Option<&ProviderError> {
         match self {

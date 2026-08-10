@@ -116,7 +116,7 @@ fn make_session_with_skills(
             task: Some("skills red test".into()),
             requested_session_id: None,
             tool_definitions,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog,
         },
     )

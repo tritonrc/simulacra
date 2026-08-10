@@ -81,7 +81,7 @@ pub struct InteractiveSessionConfig {
     pub task: Option<String>,
     pub requested_session_id: Option<String>,
     pub tool_definitions: Vec<ToolDefinition>,
-    pub can_spawn: Vec<String>,
+    pub allowed_child_placements: Vec<String>,
     /// S017: Effective skill catalog for /skill-name interactive invocation.
     /// In interactive mode, `/skill-name` is a reserved slash-command form for
     /// user-invocable skills. Slash-command resolution order is:

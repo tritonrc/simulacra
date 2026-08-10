@@ -5,10 +5,10 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
 use simulacra_runtime::{
     AgentLoop, AgentSupervisor, CancellationToken, MessagePriority, Session, SessionStorage,
-    SupervisorPayload, TurnResult,
+    SupervisorMessage, SupervisorPayload, TurnResult,
 };
 use simulacra_types::{
-    ActivityEvent, AgentId, CapabilityToken, ExitReason, Message, Provider, ResourceBudget, Role,
+    ActivityEvent, AgentId, CapabilityToken, ExitReason, Message, Provider, Role,
     SkillDependencyActivator, ToolCallMessage, VirtualFs,
 };
 #[cfg(any(test, feature = "test-support"))]
@@ -79,9 +79,21 @@ where
     /// MessagePriority::Command, and live child control via join/cancel payloads.
     #[allow(dead_code)]
     supervisor: Option<AgentSupervisor>,
-    /// The currently active child agent_type (set when a spawn_agent call is in flight).
-    /// Used for prefixing child output, status line delegation text, and cancel behavior.
-    active_child_type: Option<String>,
+    /// Every accepted child that has not produced its matching terminal event,
+    /// retained in deterministic lifecycle insertion order.
+    live_child_ids: Vec<String>,
+    /// Immediate children owned by this interactive root. Recursive activity
+    /// still contributes to `live_child_ids`, but a root join/cancel may never
+    /// select a descendant owned by another parent.
+    controllable_child_ids: Vec<String>,
+    /// The exact child selected by an in-flight, syntactically valid
+    /// `join_child_agent` tool operation. Activity ordering never selects this.
+    selected_join_child_id: Option<AgentId>,
+    /// Production control channel installed by the CLI once it has built the
+    /// bound supervisor actor. Keeping this optional makes the session usable
+    /// in non-supervised modes without fabricating a cancellation success.
+    supervisor_sender: Option<tokio::sync::mpsc::Sender<SupervisorMessage>>,
+    supervisor_caller_id: Option<AgentId>,
     skill_dependency_activator: Option<Arc<dyn SkillDependencyActivator>>,
     skill_capability: Option<CapabilityToken>,
 }
@@ -106,7 +118,6 @@ where
             session_id,
             ..SessionView::default()
         };
-        let active_child_type = config.can_spawn.first().cloned();
         Self {
             io,
             provider,
@@ -117,7 +128,11 @@ where
             view,
             session_span: None,
             supervisor: None,
-            active_child_type,
+            live_child_ids: Vec::new(),
+            controllable_child_ids: Vec::new(),
+            selected_join_child_id: None,
+            supervisor_sender: None,
+            supervisor_caller_id: None,
             skill_dependency_activator: None,
             skill_capability: None,
         }
@@ -130,6 +145,18 @@ where
     ) {
         self.skill_dependency_activator = Some(activator);
         self.skill_capability = Some(capability);
+    }
+
+    /// Install the bound supervisor control path used by Ctrl-C during a
+    /// single-child join. The caller id is the root identity authenticated by
+    /// the supervisor; it is never inferred from child activity.
+    pub fn set_supervisor_control(
+        &mut self,
+        sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+        caller_id: AgentId,
+    ) {
+        self.supervisor_sender = Some(sender);
+        self.supervisor_caller_id = Some(caller_id);
     }
 
     pub fn start(&mut self) -> SessionView {
@@ -503,8 +530,8 @@ where
             self.config.max_turns
         );
         // Show delegation text only when a child is actually running.
-        if let Some(ref child_type) = self.active_child_type {
-            format!("{base} | delegating to {child_type}")
+        if !self.live_child_ids.is_empty() {
+            format!("{base} | delegating to Child")
         } else {
             base
         }
@@ -609,79 +636,6 @@ where
         format!(
             "~/.simulacra/sessions/{}/checkpoint.json",
             self.view.session_id
-        )
-    }
-
-    /// Build a spawn message for the supervisor actor loop.
-    ///
-    /// Validates that the requested agent_type is present in the parent's
-    /// can_spawn config and spawn_types capability. Unknown child types are
-    /// rejected as invalid arguments before the supervisor starts work.
-    /// Returns the message and a oneshot receiver for the child result.
-    #[allow(dead_code)]
-    fn build_spawn_message(
-        &self,
-        agent_type: &str,
-        parent_agent_id: &AgentId,
-    ) -> Result<
-        (
-            simulacra_runtime::SupervisorMessage,
-            tokio::sync::oneshot::Receiver<
-                Result<simulacra_runtime::SpawnAck, simulacra_runtime::RuntimeError>,
-            >,
-        ),
-        String,
-    > {
-        // Validate agent_type is in can_spawn config
-        if !self.config.can_spawn.contains(&agent_type.to_string()) {
-            return Err(format!(
-                "invalid arguments: agent_type '{agent_type}' is not in can_spawn config"
-            ));
-        }
-
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        Ok((
-            simulacra_runtime::SupervisorMessage {
-                agent_id: parent_agent_id.clone(),
-                priority: MessagePriority::Command,
-                payload: SupervisorPayload::Spawn(
-                    Box::new(simulacra_runtime::SpawnConfig {
-                        agent_id: AgentId(format!("child-{agent_type}")),
-                        parent_id: parent_agent_id.clone(),
-                        capability: None,
-                        budget: ResourceBudget::new(0, 0, rust_decimal::Decimal::ZERO, 0),
-                        restart_strategy: simulacra_runtime::RestartStrategy::LetCrash,
-                        agent_type: Some(agent_type.to_string()),
-                        task: String::new(),
-                        system_prompt: None,
-                        tier: None,
-                        resolved_tier: None,
-                    }),
-                    result_tx,
-                ),
-            },
-            result_rx,
-        ))
-    }
-
-    /// Build a cancellation message for the supervisor to cancel a running child.
-    #[allow(dead_code)]
-    fn build_cancel_message(
-        &self,
-        child_agent_id: &AgentId,
-    ) -> (
-        simulacra_runtime::SupervisorMessage,
-        tokio::sync::oneshot::Receiver<Result<(), String>>,
-    ) {
-        tracing::info!("child cancelled");
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        (
-            simulacra_runtime::SupervisorMessage {
-                agent_id: child_agent_id.clone(),
-                priority: MessagePriority::Signal,
-                payload: SupervisorPayload::CancelChild(child_agent_id.clone(), result_tx),
-            },
-            result_rx,
         )
     }
 
@@ -910,6 +864,7 @@ where
                                 stop_spinner(s);
                                 clear_spinner_line();
                             }
+                            self.process_activity_event(&event);
                             let lines = renderer.process_event(&event);
                             for line in lines {
                                 self.io.write_line(&line);
@@ -921,8 +876,12 @@ where
                                 clear_spinner_line();
                             }
                             if !interrupt_sent {
-                                self.io.write_line("^C — interrupted");
-                                cancellation.signal();
+                                if self.selected_join_child_id.is_some() {
+                                    self.cancel_selected_child().await;
+                                } else {
+                                    self.io.write_line("^C — interrupted");
+                                    cancellation.signal();
+                                }
                                 interrupt_sent = true;
                             }
                         }
@@ -935,6 +894,7 @@ where
                 if let Some(result) = result {
                     // Drain any remaining buffered events
                     while let Ok(event) = rx.try_recv() {
+                        self.process_activity_event(&event);
                         let lines = renderer.process_event(&event);
                         for line in lines {
                             self.io.write_line(&line);
@@ -1090,6 +1050,135 @@ where
             self.view.visible_output.join("\n")
         }
     }
+
+    /// Ingest supervisor lifecycle and tool events. A tool-call attempt is not
+    /// proof of delegation; only accepted child lifecycle events affect the
+    /// live-child roster. A join selection is instead tied to the exact id in
+    /// an in-flight single-child join operation.
+    pub fn process_activity_event(&mut self, event: &ActivityEvent) -> SessionView {
+        self.ingest_activity_event(event, true);
+        self.view.clone()
+    }
+
+    fn ingest_activity_event(&mut self, event: &ActivityEvent, directly_owned: bool) {
+        match event {
+            ActivityEvent::ChildSpawned { child_id, .. } => {
+                if !self.live_child_ids.contains(child_id) {
+                    self.live_child_ids.push(child_id.clone());
+                }
+                if directly_owned && !self.controllable_child_ids.contains(child_id) {
+                    self.controllable_child_ids.push(child_id.clone());
+                }
+            }
+            ActivityEvent::ChildFinished { child_id, .. } => {
+                self.live_child_ids.retain(|live_id| live_id != child_id);
+                self.controllable_child_ids
+                    .retain(|controllable_id| controllable_id != child_id);
+                if self
+                    .selected_join_child_id
+                    .as_ref()
+                    .is_some_and(|selected| selected.0 == *child_id)
+                {
+                    self.selected_join_child_id = None;
+                }
+            }
+            ActivityEvent::ChildActivity { event, .. } => {
+                self.ingest_activity_event(event, false);
+            }
+            ActivityEvent::ToolStart {
+                name, arguments, ..
+            } if name == "join_child_agent" => {
+                self.selected_join_child_id = arguments
+                    .as_object()
+                    .and_then(|object| object.get("child_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|child_id| !child_id.is_empty())
+                    .filter(|child_id| {
+                        self.controllable_child_ids
+                            .iter()
+                            .any(|controllable| controllable == child_id)
+                    })
+                    .map(|child_id| AgentId(child_id.to_string()));
+            }
+            ActivityEvent::ToolFinish { name, .. } if name == "join_child_agent" => {
+                self.selected_join_child_id = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Request cancellation of the exact child selected by an in-flight
+    /// single-child join. A successful acknowledgement only means the signal
+    /// was accepted; the child remains live until its terminal lifecycle event
+    /// arrives and must never be reported as already cancelled here.
+    pub async fn cancel_selected_child(&mut self) -> SessionView {
+        let Some(child_id) = self.selected_join_child_id.clone() else {
+            return self.view.clone();
+        };
+        let (Some(sender), Some(caller_id)) = (
+            self.supervisor_sender.clone(),
+            self.supervisor_caller_id.clone(),
+        ) else {
+            self.record_cancellation_error(
+                &child_id,
+                "interactive supervisor control is unavailable",
+            );
+            return self.view.clone();
+        };
+
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(SupervisorMessage {
+                agent_id: caller_id,
+                priority: MessagePriority::Signal,
+                payload: SupervisorPayload::CancelChild(child_id.clone(), result_tx),
+            })
+            .await
+            .is_err()
+        {
+            self.record_cancellation_error(&child_id, "supervisor channel closed");
+            return self.view.clone();
+        }
+
+        match result_rx.await {
+            Ok(Ok(())) => {
+                let line = format!("[agent:Child] cancellation requested ({})", child_id.0);
+                self.view.visible_output.push(line.clone());
+                self.io.write_line(&line);
+                self.view.tool_results_to_model.push(Message {
+                    role: Role::Tool,
+                    content: serde_json::json!({
+                        "child_id": child_id.0,
+                        "status": "cancellation_requested"
+                    })
+                    .to_string(),
+                    tool_calls: vec![],
+                    tool_call_id: Some("cancelled".to_string()),
+                    provider_content: vec![],
+                });
+                tracing::info!(
+                    child_id = child_id.0.as_str(),
+                    "child cancellation requested"
+                );
+            }
+            Ok(Err(error)) => self.record_cancellation_error(&child_id, &error),
+            Err(_) => self.record_cancellation_error(
+                &child_id,
+                "supervisor dropped cancellation acknowledgement",
+            ),
+        }
+        self.view.clone()
+    }
+
+    fn record_cancellation_error(&mut self, child_id: &AgentId, error: &str) {
+        let message = format!(
+            "failed to request cancellation for child {}: {error}",
+            child_id.0
+        );
+        self.view.error = Some(message.clone());
+        self.view.visible_output.push(message.clone());
+        self.io.write_line(&message);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,9 +1300,8 @@ where
                 StreamEvent::Token(token) => {
                     // Prefix child-visible output with agent identity so the user
                     // can distinguish it from the parent assistant and tool blocks.
-                    let prefixed = if let Some(ref child_type) = self.active_child_type {
-                        let child_id = self.view.session_id.as_str();
-                        format!("[agent:{child_type}/{child_id}] {token}")
+                    let prefixed = if !self.live_child_ids.is_empty() {
+                        format!("[agent:Child] {token}")
                     } else {
                         token
                     };
@@ -1225,30 +1313,6 @@ where
                     let frame = format!("[tool] {}: {}", tc.name, tc.arguments);
                     self.view.stream_frames.push(frame.clone());
                     self.view.visible_output.push(frame);
-
-                    if tc.name == "spawn_agent" {
-                        // Mark a child as running so subsequent Token events
-                        // and cancellation/failure messages are prefixed with
-                        // the child agent identity.
-                        let child_type = tc
-                            .arguments
-                            .get("agent_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        self.active_child_type = Some(child_type.clone());
-                        tracing::info!("spawn started");
-
-                        // Also render an error line with the child prefix when
-                        // a spawn_agent call appears in the stream (failures).
-                        let child_id = self.view.session_id.as_str();
-                        let error_frame = format!(
-                            "[agent:{child_type}/{child_id}] error: spawn_agent {}",
-                            tc.arguments
-                        );
-                        self.view.stream_frames.push(error_frame.clone());
-                        self.view.visible_output.push(error_frame);
-                    }
                 }
                 StreamEvent::Done => {
                     tracing::info!("child finished");
@@ -1276,39 +1340,10 @@ where
     }
 
     pub fn cancel_tool_execution(&mut self) -> SessionView {
-        // Show cancellation with the child prefix so the user sees it before
-        // the parent turn resumes. Use the active child type if a spawn is in
-        // flight, otherwise fall back to the configured can_spawn type.
-        let child_type_owned = self
-            .active_child_type
-            .clone()
-            .or_else(|| self.config.can_spawn.first().cloned());
-        if let Some(ref child_type) = child_type_owned {
-            let child_id = self.view.session_id.as_str();
-            let line = format!("[agent:{child_type}/{child_id}] cancelled");
-            self.view.visible_output.push(line);
-            tracing::info!("child cancelled");
-
-            let structured = serde_json::json!({
-                "error": "cancelled by user",
-                "agent_type": child_type,
-            });
-            self.view.tool_results_to_model.push(Message {
-                role: Role::Tool,
-                content: structured.to_string(),
-                tool_calls: vec![],
-                tool_call_id: Some("cancelled".to_string()),
-                provider_content: vec![],
-            });
-        } else {
-            self.view.tool_results_to_model.push(Message {
-                role: Role::Tool,
-                content: "Cancelled by user".to_string(),
-                tool_calls: vec![],
-                tool_call_id: Some("cancelled".to_string()),
-                provider_content: vec![],
-            });
-        }
+        // This legacy synchronous facade cannot honestly await supervisor
+        // acknowledgement. In particular it must not select the newest live
+        // child or fabricate a cancellation result. Ctrl-C uses the async
+        // `cancel_selected_child` path below.
         self.view.clone()
     }
 

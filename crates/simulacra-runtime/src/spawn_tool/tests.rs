@@ -3,23 +3,15 @@ use crate::{
     AgentSupervisor, ChannelActivitySink, InMemoryJournalStorage, NoopActivitySink,
     RestartStrategy, TaskFactory,
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use simulacra_hooks::{HookError, HookModule, HookPipeline, Operation, Phase, Verdict};
 use simulacra_types::{
     ActivityEvent, ExitReason, FsMetadata, MemoryCapability, MemoryPath, PathPattern, Role,
     TokenUsage, Tool, VfsError, VfsSnapshot,
 };
 use simulacra_vfs::MemoryFs;
 
-const STOCK_SPAWN_AGENT_DESCRIPTION: &str = "\
-Spawn a supervised child agent for a concrete, bounded, independent subtask. \
-Do not delegate immediate critical-path blockers when the parent cannot make \
-progress until the answer returns. This tool returns a live child handle, not \
-a final answer. After spawning, continue non-overlapping parent work; use \
-child_status for cheap nonblocking inspection, wait_child_agent for bounded \
-polling or wait-any orchestration, join_child_agent when the terminal result \
-is needed, and close_child_agent only to clean up a terminal child handle.";
+const STOCK_SPAWN_AGENT_DESCRIPTION: &str = "I can start a supervised child for one concrete, bounded, independent task. Choose where I run it with placement and shape how it works with instructions; placement supplies an environment and capabilities, not a role. I return a live handle, not the child's final answer.";
 
 fn spawn_tool_with_guidance(
     guidance: Option<SpawnAgentGuidance>,
@@ -31,12 +23,10 @@ fn spawn_tool_with_guidance(
     (
         SpawnAgentTool {
             sender,
-            can_spawn: vec!["reviewer".into()],
+            allowed_placements: vec!["reviewer".into()],
             activity_sink: Arc::new(NoopActivitySink),
             parent_id: AgentId("parent-agent".into()),
-            tiers: TierMap::new(),
             parent_budget: Arc::new(Mutex::new(ResourceBudget::new(100, 10, Decimal::ZERO, 1))),
-            parent_model: "parent-model".into(),
             guidance,
         },
         receiver,
@@ -48,16 +38,19 @@ async fn call_spawn_tool_with_ack(
     mut receiver: tokio::sync::mpsc::Receiver<SupervisorMessage>,
 ) -> serde_json::Value {
     let arguments = serde_json::json!({
-        "agent_type": "reviewer",
+        "placement": "reviewer",
         "task": "review the focused change",
         "budget": {
             "max_tokens": 10,
             "max_turns": 1,
             "max_cost": "0",
-            "max_sub_agents": 0
+            "max_sub_agents": 1
         }
     });
-    let capability = CapabilityToken::default();
+    let capability = CapabilityToken {
+        spawn_placements: vec!["reviewer".into()],
+        ..Default::default()
+    };
     let call = tool.call(arguments, &capability);
     let acknowledge = async move {
         let message = receiver
@@ -68,7 +61,8 @@ async fn call_spawn_tool_with_ack(
             SupervisorPayload::Spawn(_, result_tx) => result_tx
                 .send(Ok(crate::supervisor::SpawnAck {
                     child_id: AgentId("child-fixed".into()),
-                    agent_type: "reviewer".into(),
+                    placement: "reviewer".into(),
+                    backend: AgentBackend::Native,
                 }))
                 .expect("spawn tool should await the acknowledgement"),
             other => panic!("expected spawn request, got {other:?}"),
@@ -86,7 +80,7 @@ async fn absent_spawn_guidance_preserves_stock_definition_and_acknowledgement_by
     let acknowledgement = call_spawn_tool_with_ack(&tool, receiver).await;
     assert_eq!(
         serde_json::to_vec(&acknowledgement).expect("acknowledgement should encode"),
-        br#"{"agent_type":"reviewer","child_id":"child-fixed","status":"running"}"#
+        br#"{"child_id":"child-fixed","placement":"reviewer","status":"running"}"#
     );
     assert!(acknowledgement.get("note").is_none());
 }
@@ -359,51 +353,19 @@ impl VirtualFs for PanicFs {
     }
 }
 
-struct RecordingSpawnHook {
-    before_verdict: Verdict,
-    before_calls: Arc<AtomicUsize>,
-    after_calls: Arc<AtomicUsize>,
-}
-
-impl HookModule for RecordingSpawnHook {
-    fn name(&self) -> &str {
-        "recording-spawn-hook"
-    }
-
-    fn invoke(
-        &self,
-        phase: Phase,
-        operation: Operation,
-        context: &str,
-    ) -> Result<Verdict, HookError> {
-        assert_eq!(operation, Operation::Spawn);
-        match phase {
-            Phase::Before => {
-                self.before_calls.fetch_add(1, Ordering::SeqCst);
-                let context: serde_json::Value =
-                    serde_json::from_str(context).expect("spawn hook context should be JSON");
-                assert_eq!(context["agent_type"], "reviewer");
-                assert_eq!(context["budget"]["max_tokens"], 321);
-                Ok(self.before_verdict.clone())
-            }
-            Phase::After => {
-                self.after_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(Verdict::continue_unchanged())
-            }
-        }
-    }
-}
-
 fn s056_acp_config() -> SimulacraConfig {
     let toml_str = r#"
 [project]
 name = "s056"
 
-[agent_types.reviewer]
+[agent_types.parent]
+model = "parent-model"
+
+[child_placements.reviewer]
 backend = "acp"
 acp_profile = "codex-local"
 
-[agent_types.reviewer.capabilities]
+[child_placements.reviewer.capabilities]
 shell = true
 paths_read = ["/workspace/**"]
 paths_write = ["/workspace/out/**"]
@@ -418,7 +380,7 @@ fn s056_parent_capability() -> CapabilityToken {
         shell: true,
         paths_read: vec![PathPattern("/workspace/**".into())],
         paths_write: vec![PathPattern("/workspace/out/**".into())],
-        spawn_types: vec!["reviewer".into()],
+        spawn_placements: vec!["reviewer".into()],
         ..Default::default()
     }
 }
@@ -428,13 +390,11 @@ fn s056_spawn_config() -> SpawnConfig {
         agent_id: AgentId("child-acp-1".into()),
         parent_id: AgentId("parent-1".into()),
         capability: None,
-        budget: ResourceBudget::new(321, 7, Decimal::ZERO, 0),
+        budget: ResourceBudget::new(321, 7, Decimal::ZERO, 1),
         restart_strategy: RestartStrategy::LetCrash,
-        agent_type: Some("reviewer".into()),
+        placement: "reviewer".into(),
         task: "review the patch".into(),
-        system_prompt: None,
-        tier: None,
-        resolved_tier: None,
+        instructions: None,
     }
 }
 
@@ -490,21 +450,6 @@ fn s056_factory(
     }
 }
 
-fn s056_factory_with_pipeline(
-    acp_child_runtime: Option<Arc<dyn AcpChildRuntime>>,
-    pipeline: Arc<HookPipeline>,
-) -> AgentTaskFactory {
-    AgentTaskFactory {
-        pipeline: Some(pipeline),
-        ..s056_factory(
-            acp_child_runtime,
-            Arc::new(NoopActivitySink),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
-}
-
 #[tokio::test]
 async fn live_acp_child_receives_supervisor_steer_message_through_runtime_queue() {
     let (runtime_started_tx, runtime_started_rx) = tokio::sync::oneshot::channel();
@@ -549,11 +494,13 @@ async fn live_acp_child_receives_supervisor_steer_message_through_runtime_queue(
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
     ));
-    let supervisor = AgentSupervisor::with_task_factory(
+    let mut supervisor = AgentSupervisor::with_task_factory(
         s056_parent_capability(),
         ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
         factory,
     );
+    supervisor.set_root_agent_id(AgentId("parent-1".into()));
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
     let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
     let supervisor_task = tokio::spawn(async move {
         supervisor.run_actor_loop(supervisor_rx).await;
@@ -563,7 +510,7 @@ async fn live_acp_child_receives_supervisor_steer_message_through_runtime_queue(
     supervisor_tx
         .send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: AgentId("child-acp-1".into()),
+            agent_id: AgentId("parent-1".into()),
             payload: SupervisorPayload::Spawn(Box::new(s056_spawn_config()), spawn_result_tx),
         })
         .await
@@ -582,7 +529,7 @@ async fn live_acp_child_receives_supervisor_steer_message_through_runtime_queue(
     supervisor_tx
         .send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: child_id.clone(),
+            agent_id: AgentId("parent-1".into()),
             payload: SupervisorPayload::SteerChild(
                 child_id,
                 "inspect the changed files".into(),
@@ -658,11 +605,13 @@ async fn live_acp_child_receives_supervisor_steers_in_enqueue_order() {
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
     ));
-    let supervisor = AgentSupervisor::with_task_factory(
+    let mut supervisor = AgentSupervisor::with_task_factory(
         s056_parent_capability(),
         ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
         factory,
     );
+    supervisor.set_root_agent_id(AgentId("parent-1".into()));
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
     let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
     let supervisor_task = tokio::spawn(async move {
         supervisor.run_actor_loop(supervisor_rx).await;
@@ -672,7 +621,7 @@ async fn live_acp_child_receives_supervisor_steers_in_enqueue_order() {
     supervisor_tx
         .send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: AgentId("child-acp-1".into()),
+            agent_id: AgentId("parent-1".into()),
             payload: SupervisorPayload::Spawn(Box::new(s056_spawn_config()), spawn_result_tx),
         })
         .await
@@ -692,7 +641,7 @@ async fn live_acp_child_receives_supervisor_steers_in_enqueue_order() {
         supervisor_tx
             .send(SupervisorMessage {
                 priority: MessagePriority::Command,
-                agent_id: child_id.clone(),
+                agent_id: AgentId("parent-1".into()),
                 payload: SupervisorPayload::SteerChild(
                     child_id.clone(),
                     message.into(),
@@ -765,11 +714,13 @@ async fn steer_is_still_accepted_after_cancellation_has_begun_while_child_lives(
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
     ));
-    let supervisor = AgentSupervisor::with_task_factory(
+    let mut supervisor = AgentSupervisor::with_task_factory(
         s056_parent_capability(),
         ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
         factory,
     );
+    supervisor.set_root_agent_id(AgentId("parent-1".into()));
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
     let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
     let supervisor_task = tokio::spawn(async move {
         supervisor.run_actor_loop(supervisor_rx).await;
@@ -779,7 +730,7 @@ async fn steer_is_still_accepted_after_cancellation_has_begun_while_child_lives(
     supervisor_tx
         .send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: AgentId("child-acp-1".into()),
+            agent_id: AgentId("parent-1".into()),
             payload: SupervisorPayload::Spawn(Box::new(s056_spawn_config()), spawn_result_tx),
         })
         .await
@@ -800,7 +751,7 @@ async fn steer_is_still_accepted_after_cancellation_has_begun_while_child_lives(
     supervisor_tx
         .send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: child_id.clone(),
+            agent_id: AgentId("parent-1".into()),
             payload: SupervisorPayload::CancelChild(child_id.clone(), cancel_result_tx),
         })
         .await
@@ -814,7 +765,7 @@ async fn steer_is_still_accepted_after_cancellation_has_begun_while_child_lives(
     supervisor_tx
         .send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: child_id.clone(),
+            agent_id: AgentId("parent-1".into()),
             payload: SupervisorPayload::SteerChild(
                 child_id.clone(),
                 "inspect the changed files despite cancellation".into(),
@@ -898,7 +849,7 @@ async fn s056_acp_factory_delegates_request_without_native_environment() {
     let request = &requests[0];
     assert_eq!(request.child_id, AgentId("child-acp-1".into()));
     assert_eq!(request.parent_id, AgentId("parent-1".into()));
-    assert_eq!(request.agent_type, "reviewer");
+    assert_eq!(request.placement, "reviewer");
     assert_eq!(request.acp_profile, "codex-local");
     assert_eq!(request.task, "review the patch");
     assert_eq!(request.budget.max_tokens, 321);
@@ -933,116 +884,15 @@ async fn s056_acp_without_injected_runtime_fails_before_native_environment_is_bu
         .await
         .expect_err("ACP child without runtime must fail before native execution");
 
-    assert!(
-        matches!(
-            err,
-            RuntimeError::AcpChildRuntimeMissing {
-                ref agent_type,
-                ref acp_profile
-            } if agent_type == "reviewer" && acp_profile == "codex-local"
-        ),
-        "unexpected error: {err}"
-    );
+    assert!(matches!(
+        err,
+        RuntimeError::AcpChildRuntimeMissing {
+            placement,
+            acp_profile,
+        } if placement == "reviewer" && acp_profile == "codex-local"
+    ));
     assert!(!native_cell_built.load(Ordering::SeqCst));
     assert!(!native_tools_registered.load(Ordering::SeqCst));
-}
-
-#[tokio::test]
-async fn s056_acp_spawn_runs_simulacra_spawn_hooks_without_native_environment() {
-    let before_calls = Arc::new(AtomicUsize::new(0));
-    let after_calls = Arc::new(AtomicUsize::new(0));
-    let mut pipeline = HookPipeline::new();
-    pipeline.add(
-        Operation::Spawn,
-        Arc::new(RecordingSpawnHook {
-            before_verdict: Verdict::continue_unchanged(),
-            before_calls: Arc::clone(&before_calls),
-            after_calls: Arc::clone(&after_calls),
-        }),
-    );
-    let runtime_started = Arc::new(AtomicBool::new(false));
-    let runtime_started_for_runtime = Arc::clone(&runtime_started);
-    let runtime = ScriptedAcpRuntime::new(
-        move |_request, _cancellation, _activity_sink, _input_queue| {
-            let runtime_started = Arc::clone(&runtime_started_for_runtime);
-            Box::pin(async move {
-                runtime_started.store(true, Ordering::SeqCst);
-                Ok(s056_acp_output(
-                    ExitReason::Complete,
-                    "hooked ACP summary",
-                    TokenUsage::default(),
-                    1,
-                ))
-            })
-        },
-    );
-
-    let factory = s056_factory_with_pipeline(Some(runtime), Arc::new(pipeline));
-
-    let output = factory
-        .create_task(
-            s056_spawn_config(),
-            CancellationToken::new(Duration::from_millis(50)),
-        )
-        .await
-        .expect("ACP child should run when spawn hooks continue");
-
-    assert_eq!(
-        output.messages.last().unwrap().content,
-        "hooked ACP summary"
-    );
-    assert!(runtime_started.load(Ordering::SeqCst));
-    assert_eq!(before_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(after_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn s056_acp_spawn_before_hook_denial_prevents_runtime_start() {
-    let before_calls = Arc::new(AtomicUsize::new(0));
-    let after_calls = Arc::new(AtomicUsize::new(0));
-    let mut pipeline = HookPipeline::new();
-    pipeline.add(
-        Operation::Spawn,
-        Arc::new(RecordingSpawnHook {
-            before_verdict: Verdict::Deny("blocked by spawn policy".into()),
-            before_calls: Arc::clone(&before_calls),
-            after_calls: Arc::clone(&after_calls),
-        }),
-    );
-    let runtime_started = Arc::new(AtomicBool::new(false));
-    let runtime_started_for_runtime = Arc::clone(&runtime_started);
-    let runtime = ScriptedAcpRuntime::new(
-        move |_request, _cancellation, _activity_sink, _input_queue| {
-            let runtime_started = Arc::clone(&runtime_started_for_runtime);
-            Box::pin(async move {
-                runtime_started.store(true, Ordering::SeqCst);
-                Ok(s056_acp_output(
-                    ExitReason::Complete,
-                    "should not run",
-                    TokenUsage::default(),
-                    1,
-                ))
-            })
-        },
-    );
-
-    let factory = s056_factory_with_pipeline(Some(runtime), Arc::new(pipeline));
-
-    let err = factory
-        .create_task(
-            s056_spawn_config(),
-            CancellationToken::new(Duration::from_millis(50)),
-        )
-        .await
-        .expect_err("spawn hook denial should reject ACP child before runtime start");
-
-    assert!(
-        matches!(err, RuntimeError::HookDenial(ref reason) if reason == "blocked by spawn policy"),
-        "unexpected error: {err}"
-    );
-    assert!(!runtime_started.load(Ordering::SeqCst));
-    assert_eq!(before_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(after_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1135,6 +985,8 @@ async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_pro
         ResourceBudget::new(10_000, 20, Decimal::ZERO, 4),
         factory,
     );
+    supervisor.set_root_agent_id(AgentId("parent-1".into()));
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
     supervisor.set_activity_sink(Arc::clone(&activity_sink));
 
     let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
@@ -1144,33 +996,32 @@ async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_pro
 
     let spawn_tool = SpawnAgentTool {
         sender: supervisor_tx.clone(),
-        can_spawn: vec!["reviewer".into()],
+        allowed_placements: vec!["reviewer".into()],
         activity_sink: Arc::new(NoopActivitySink),
         parent_id: AgentId("parent-1".into()),
-        tiers: TierMap::new(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(
             10_000,
             20,
             Decimal::ZERO,
             4,
         ))),
-        parent_model: "parent-model".into(),
         guidance: None,
     };
     let join_tool = JoinChildAgentTool {
         sender: supervisor_tx.clone(),
+        caller_id: AgentId("parent-1".into()),
     };
 
     let spawn = spawn_tool
         .call(
             serde_json::json!({
-                "agent_type": "reviewer",
+                "placement": "reviewer",
                 "task": "review the patch",
                 "budget": {
                     "max_tokens": 321,
                     "max_turns": 7,
                     "max_cost": "0",
-                    "max_sub_agents": 0
+                    "max_sub_agents": 1
                 }
             }),
             &s056_parent_capability(),

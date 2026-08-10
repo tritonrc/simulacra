@@ -1,8 +1,8 @@
 #[tokio::test]
 async fn spawn_agent_tool_normalizes_directory_scope_capability_overrides_before_spawn_config() {
-    let (result, captured) = run_spawn_tool_call(
+    let (result, captured) = run_spawn_tool_call_with_caller_capability(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 1,
@@ -35,6 +35,30 @@ async fn spawn_agent_tool_normalizes_directory_scope_capability_overrides_before
         }),
         &["researcher"],
         Ok(child_success_output()),
+        CapabilityToken {
+            paths_write: vec![
+                PathPattern("/workspace/specs/**".into()),
+                PathPattern("/workspace/crates/**".into()),
+                PathPattern("/workspace/tests/**".into()),
+                PathPattern("/workspace/src/**".into()),
+                PathPattern("/workspace/Cargo.toml".into()),
+                PathPattern("/workspace/Makefile".into()),
+                PathPattern("/workspace/LICENSE".into()),
+                PathPattern("/secrets/**".into()),
+            ],
+            paths_read: vec![
+                PathPattern("/workspace/specs/**".into()),
+                PathPattern("/workspace/crates/**".into()),
+                PathPattern("/workspace/tests/**".into()),
+                PathPattern("/workspace/src/**".into()),
+                PathPattern("/workspace/Cargo.toml".into()),
+                PathPattern("/workspace/Makefile".into()),
+                PathPattern("/workspace/LICENSE".into()),
+                PathPattern("/secrets/**".into()),
+            ],
+            spawn_placements: vec!["researcher".into()],
+            ..Default::default()
+        },
     )
     .await;
 

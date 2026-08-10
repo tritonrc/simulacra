@@ -11,6 +11,25 @@ use super::*;
 // coordinate with waiters registered by the wait_* operations.
 
 impl AgentSupervisor {
+    pub(super) fn authorize_child_owner(
+        &self,
+        caller_id: &AgentId,
+        child_id: &AgentId,
+    ) -> Result<(), String> {
+        self.validate_caller_identity(caller_id)?;
+        let results = lock_mutex(&self.child_results, "child_results");
+        let state = results
+            .get(child_id)
+            .ok_or_else(|| format!("unknown or closed child_id: {}", child_id.0))?;
+        if &state.metadata.parent_id != caller_id {
+            return Err(format!(
+                "caller {:?} does not own child {:?}; owner is {:?}",
+                caller_id.0, child_id.0, state.metadata.parent_id.0
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn join_child(&self, child_id: AgentId, result_tx: ChildJoinSender) {
         let mut results = lock_mutex(&self.child_results, "child_results");
         let Some(state) = results.get_mut(&child_id) else {
@@ -61,16 +80,25 @@ impl AgentSupervisor {
 
     pub(super) fn send_child_roster(
         &self,
+        caller_id: &AgentId,
         result_tx: tokio::sync::oneshot::Sender<Result<Vec<ChildRosterEntry>, String>>,
     ) {
+        if let Err(error) = self.validate_caller_identity(caller_id) {
+            let _ = result_tx.send(Err(error));
+            return;
+        }
         let mut results = lock_mutex(&self.child_results, "child_results");
         let mut entries = results
             .values()
+            .filter(|state| &state.metadata.parent_id == caller_id)
             .map(roster_entry_from_state)
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.child_id.cmp(&right.child_id));
         if result_tx.send(Ok(entries)).is_ok() {
-            for state in results.values_mut() {
+            for state in results
+                .values_mut()
+                .filter(|state| &state.metadata.parent_id == caller_id)
+            {
                 if state.result.is_some() {
                     state.result_delivered = true;
                 }
@@ -251,6 +279,8 @@ impl AgentSupervisor {
         drop(results);
         lock_mutex(&self.cancellation_tokens, "cancellation_tokens").remove(child_id);
         lock_mutex(&self.child_inputs, "child_inputs").remove(child_id);
+        lock_mutex(&self.child_budget_accounts, "child_budget_accounts").remove(child_id);
+        lock_mutex(&self.budget_reservations, "budget_reservations").remove(child_id);
         Ok(())
     }
 
@@ -262,9 +292,10 @@ impl AgentSupervisor {
         let finished_at_ms = now_ms();
         let fallback_metadata = ChildMetadata {
             child_id: terminal.child_id.clone(),
-            agent_type: terminal.agent_type.clone(),
+            placement: terminal.placement.clone(),
             task: String::new(),
             parent_id: AgentId(String::new()),
+            capability: CapabilityToken::default(),
             started_at_ms: finished_at_ms,
             finished_at_ms: None,
         };
@@ -379,7 +410,7 @@ fn status_from_state(state: &ChildRunState) -> ChildStatus {
     let end_ms = state.metadata.finished_at_ms.unwrap_or_else(now_ms);
     ChildStatus {
         child_id: state.metadata.child_id.clone(),
-        agent_type: state.metadata.agent_type.clone(),
+        placement: state.metadata.placement.clone(),
         status,
         ready,
         elapsed_ms: end_ms.saturating_sub(state.metadata.started_at_ms),
@@ -390,7 +421,7 @@ fn roster_entry_from_state(state: &ChildRunState) -> ChildRosterEntry {
     let status = status_from_state(state);
     ChildRosterEntry {
         child_id: status.child_id.0,
-        agent_type: status.agent_type,
+        placement: status.placement,
         task: state.metadata.task.clone(),
         status: status.status,
         ready: status.ready,
@@ -401,7 +432,7 @@ fn roster_entry_from_state(state: &ChildRunState) -> ChildRosterEntry {
 fn wait_result_running(metadata: &ChildMetadata) -> WaitChildResult {
     WaitChildResult {
         child_id: metadata.child_id.clone(),
-        agent_type: None,
+        placement: Some(metadata.placement.clone()),
         status: "running".to_string(),
         ready: false,
         terminal: None,
@@ -411,7 +442,7 @@ fn wait_result_running(metadata: &ChildMetadata) -> WaitChildResult {
 fn wait_result_terminal(terminal: ChildTerminalResult) -> WaitChildResult {
     WaitChildResult {
         child_id: terminal.child_id.clone(),
-        agent_type: Some(terminal.agent_type.clone()),
+        placement: Some(terminal.placement.clone()),
         status: status_from_terminal(&terminal),
         ready: true,
         terminal: Some(terminal),

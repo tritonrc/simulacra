@@ -23,4 +23,7 @@ pub use simulacra_types::{
 };
 #[cfg(feature = "sandbox")]
 pub use skills::SkillTool;
-pub use skills::{SkillMeta, discover_and_filter_skills, parse_skill_frontmatter};
+pub use skills::{
+    SkillMeta, discover_and_filter_skills, discover_and_filter_skills_for_placement,
+    parse_skill_frontmatter,
+};

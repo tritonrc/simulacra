@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Schema version for journal entries. Increments when the enum changes.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 2;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
 
 /// A single journal entry. Append-only, schema-versioned.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ impl Clock for SystemClock {
 
 /// The kind of journal entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum JournalEntryKind {
     TurnStart,
     LlmRequest {
@@ -83,11 +83,10 @@ pub enum JournalEntryKind {
     },
     SubAgentSpawned {
         child_id: AgentId,
-        agent_type: String,
-        /// Full inline prompt for generic sub-agents. `None` for configured
-        /// agent types and legacy journal entries.
-        #[serde(default)]
-        system_prompt: Option<String>,
+        placement: String,
+        backend: String,
+        task: String,
+        instructions: Option<String>,
     },
     SubAgentCompleted {
         child_id: AgentId,
@@ -360,8 +359,10 @@ mod tests {
     fn roundtrip_sub_agent_spawned_and_completed() {
         let spawned = make_entry(JournalEntryKind::SubAgentSpawned {
             child_id: AgentId("child-1".into()),
-            agent_type: "reviewer".into(),
-            system_prompt: None,
+            placement: "reviewer".into(),
+            backend: "native".into(),
+            task: "review the patch".into(),
+            instructions: None,
         });
         let completed = make_entry(JournalEntryKind::SubAgentCompleted {
             child_id: AgentId("child-1".into()),

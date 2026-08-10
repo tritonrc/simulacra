@@ -93,10 +93,24 @@ impl HookPipeline {
         operation: Operation,
         context: &str,
     ) -> Result<(Verdict, String), HookError> {
+        self.run_before_attributed(operation, context)
+            .map(|(verdict, context, _hook_name)| (verdict, context))
+    }
+
+    /// Run before-phase hooks while preserving the identity of the hook that
+    /// produced a terminal verdict. Callers that journal policy decisions must
+    /// use this form rather than guessing a hook name from the operation.
+    pub fn run_before_attributed(
+        &self,
+        operation: Operation,
+        context: &str,
+    ) -> Result<(Verdict, String, Option<String>), HookError> {
         let meters = HookMeters::get();
         let chain = match self.chains.get(&operation) {
             Some(c) => c,
-            None => return Ok((Verdict::continue_unchanged(), context.to_string())),
+            None => {
+                return Ok((Verdict::continue_unchanged(), context.to_string(), None));
+            }
         };
 
         let mut current_context = context.to_string();
@@ -127,7 +141,11 @@ impl HookPipeline {
                             KeyValue::new("operation", operation.to_string()),
                         ],
                     );
-                    return Ok((Verdict::Deny(reason), current_context));
+                    return Ok((
+                        Verdict::Deny(reason),
+                        current_context,
+                        Some(hook.name().to_string()),
+                    ));
                 }
                 Ok(Verdict::Kill(reason)) => {
                     return Err(HookError::Killed {
@@ -135,11 +153,14 @@ impl HookPipeline {
                         reason,
                     });
                 }
-                Err(HookError::Timeout { hook, timeout_ms }) => {
+                Err(HookError::Timeout {
+                    hook: reported_hook,
+                    timeout_ms,
+                }) => {
                     meters.timeouts.add(
                         1,
                         &[
-                            KeyValue::new("hook", hook.clone()),
+                            KeyValue::new("hook", reported_hook),
                             KeyValue::new("phase", "before"),
                             KeyValue::new("operation", operation.to_string()),
                         ],
@@ -147,19 +168,23 @@ impl HookPipeline {
                     meters.denials.add(
                         1,
                         &[
-                            KeyValue::new("hook", hook.clone()),
+                            KeyValue::new("hook", hook.name().to_string()),
                             KeyValue::new("phase", "before"),
                             KeyValue::new("operation", operation.to_string()),
                         ],
                     );
                     let reason = format!("hook timeout after {timeout_ms}ms (fail closed)");
-                    return Ok((Verdict::Deny(reason), current_context));
+                    return Ok((
+                        Verdict::Deny(reason),
+                        current_context,
+                        Some(hook.name().to_string()),
+                    ));
                 }
                 Err(e) => return Err(e),
             }
         }
 
-        Ok((Verdict::continue_unchanged(), current_context))
+        Ok((Verdict::continue_unchanged(), current_context, None))
     }
 
     /// Run after-phase hooks in reverse order (onion model).

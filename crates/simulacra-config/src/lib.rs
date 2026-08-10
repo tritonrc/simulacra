@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use simulacra_types::{CapabilityToken, NetworkPermission, PathPattern};
 use thiserror::Error;
@@ -36,10 +37,12 @@ pub enum ConfigError {
 }
 
 /// Top-level configuration, corresponding to the entire `simulacra.toml` file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SimulacraConfig {
     pub project: ProjectConfig,
     pub agent_types: HashMap<String, AgentTypeConfig>,
+    #[serde(default)]
+    pub child_placements: HashMap<String, ChildPlacementConfig>,
     #[serde(default)]
     pub integrations: HashMap<String, IntegrationConfig>,
     #[serde(default)]
@@ -70,6 +73,92 @@ pub struct SimulacraConfig {
     /// `--no-catalog`.
     #[serde(default)]
     pub catalog: CatalogConfig,
+}
+
+#[derive(Deserialize)]
+struct RawSimulacraConfig {
+    project: ProjectConfig,
+    agent_types: HashMap<String, toml::Value>,
+    #[serde(default)]
+    child_placements: HashMap<String, toml::Value>,
+    #[serde(default)]
+    integrations: HashMap<String, IntegrationConfig>,
+    #[serde(default)]
+    tenants: HashMap<String, TenantConfig>,
+    #[serde(default)]
+    mcp: Option<McpConfig>,
+    #[serde(default)]
+    task: Option<TaskConfig>,
+    #[serde(default)]
+    vfs: VfsConfig,
+    #[serde(default)]
+    tiers: TierMap,
+    #[serde(default)]
+    wasm: Option<WasmConfig>,
+    #[serde(default)]
+    hooks: Option<HooksConfig>,
+    #[serde(default)]
+    memory: Option<MemoryConfig>,
+    #[serde(default)]
+    catalog: CatalogConfig,
+}
+
+impl<'de> Deserialize<'de> for SimulacraConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawSimulacraConfig::deserialize(deserializer)?;
+        let agent_types = deserialize_named_configs(raw.agent_types, "agent_types")?;
+        let child_placements = deserialize_named_configs(raw.child_placements, "child_placements")?;
+        Ok(Self {
+            project: raw.project,
+            agent_types,
+            child_placements,
+            integrations: raw.integrations,
+            tenants: raw.tenants,
+            mcp: raw.mcp,
+            task: raw.task,
+            vfs: raw.vfs,
+            tiers: raw.tiers,
+            wasm: raw.wasm,
+            hooks: raw.hooks,
+            memory: raw.memory,
+            catalog: raw.catalog,
+        })
+    }
+}
+
+fn deserialize_named_configs<T, E>(
+    values: HashMap<String, toml::Value>,
+    section: &str,
+) -> Result<HashMap<String, T>, E>
+where
+    T: for<'de> Deserialize<'de>,
+    E: serde::de::Error,
+{
+    values
+        .into_iter()
+        .map(|(name, value)| {
+            value
+                .try_into()
+                .map(|parsed| (name.clone(), parsed))
+                .map_err(|error| E::custom(contextual_config_error(section, &name, &error)))
+        })
+        .collect()
+}
+
+fn contextual_config_error(section: &str, name: &str, error: &toml::de::Error) -> String {
+    let message = error.to_string();
+    let field = message
+        .split_once("unknown field `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(field, _)| field)
+        .or_else(|| message.contains("unknown variant").then_some("backend"));
+    match field {
+        Some(field) => format!("{section}.{name}.{field}: {message}"),
+        None => format!("{section}.{name}: {message}"),
+    }
 }
 
 /// S042 §"simulacra-cli bootstrap import": `[catalog]` section.
@@ -190,18 +279,42 @@ impl SimulacraConfig {
     /// or by hand can call this to enforce the same invariants as
     /// `from_file`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        // Agent type validation.
+        // Root agents remain native; their model is always required.
         for (name, agent_type) in &self.agent_types {
-            match agent_type.backend {
+            if agent_type.model.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "agent_types.{name}.model: root agent requires a non-blank model"
+                )));
+            }
+        }
+
+        for (name, placement) in &self.child_placements {
+            let path = format!("child_placements.{name}");
+            match placement.backend {
                 AgentBackend::Native => {
-                    if agent_type.model.trim().is_empty() {
+                    if placement
+                        .model
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
                         return Err(ConfigError::Validation(format!(
-                            "agent type '{name}': native backend requires non-empty model"
+                            "{path}.model: native placement requires a non-blank model"
+                        )));
+                    }
+                    if placement
+                        .acp_profile
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "{path}.acp_profile: native placement requires acp_profile to be absent or blank"
                         )));
                     }
                 }
                 AgentBackend::Acp => {
-                    if agent_type
+                    if placement
                         .acp_profile
                         .as_deref()
                         .map(str::trim)
@@ -209,7 +322,16 @@ impl SimulacraConfig {
                         .is_empty()
                     {
                         return Err(ConfigError::Validation(format!(
-                            "agent type '{name}': ACP backend requires non-empty acp_profile"
+                            "{path}.acp_profile: acp placement requires a non-blank acp_profile"
+                        )));
+                    }
+                    if placement
+                        .model
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        return Err(ConfigError::Validation(format!(
+                            "{path}.model: acp placement requires model to be absent or blank"
                         )));
                     }
                 }
@@ -283,13 +405,10 @@ pub struct ProjectConfig {
 
 /// Configuration for a single agent type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTypeConfig {
     #[serde(default)]
-    pub backend: AgentBackend,
-    #[serde(default)]
     pub model: String,
-    #[serde(default)]
-    pub acp_profile: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
@@ -301,14 +420,40 @@ pub struct AgentTypeConfig {
     #[serde(default)]
     pub max_sub_agents: Option<u32>,
     #[serde(default)]
-    pub can_spawn: Vec<String>,
+    pub allowed_child_placements: Vec<String>,
     #[serde(default)]
     pub restart_policy: Option<String>,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesConfig>,
 }
 
-/// Child runtime backend for a configured agent type.
+/// Host-configured execution and capability profile for a child agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildPlacementConfig {
+    #[serde(default)]
+    pub backend: AgentBackend,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub acp_profile: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Option<CapabilitiesConfig>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub max_cost: Option<Decimal>,
+    #[serde(default)]
+    pub max_sub_agents: Option<u32>,
+    #[serde(default)]
+    pub allowed_child_placements: Vec<String>,
+}
+
+/// Child runtime backend for a configured placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentBackend {
@@ -319,6 +464,7 @@ pub enum AgentBackend {
 
 /// Capability grants for an agent type.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilitiesConfig {
     #[serde(default)]
     pub network: Vec<String>,
@@ -619,10 +765,10 @@ pub fn validate_mcp_server(config: &McpServerConfig) -> Result<(), ConfigError> 
 /// Maps the config-level capability grants into the domain-level token
 /// that the runtime uses for capability enforcement.
 ///
-/// `can_spawn` lives on `AgentTypeConfig` (not the capabilities block), so
+/// `allowed_child_placements` lives on `AgentTypeConfig` (not the capabilities block), so
 /// it is copied onto the resulting token regardless of whether a
 /// `[agent_types.X.capabilities]` block is present. Without this, an agent
-/// that has `can_spawn = ["worker"]` but no capabilities block would have
+/// that has `allowed_child_placements = ["worker"]` but no capabilities block would have
 /// its spawn grant silently dropped.
 pub fn build_capability_token(agent_type: &AgentTypeConfig) -> CapabilityToken {
     let mut token = match &agent_type.capabilities {
@@ -646,7 +792,7 @@ pub fn build_capability_token(agent_type: &AgentTypeConfig) -> CapabilityToken {
                 .iter()
                 .map(|s| PathPattern(s.clone()))
                 .collect(),
-            spawn_types: Vec::new(),
+            spawn_placements: Vec::new(),
             skill_patterns: caps
                 .skill_patterns
                 .iter()
@@ -656,8 +802,24 @@ pub fn build_capability_token(agent_type: &AgentTypeConfig) -> CapabilityToken {
         },
         None => CapabilityToken::default(),
     };
-    token.spawn_types = agent_type.can_spawn.clone();
+    token.spawn_placements = agent_type.allowed_child_placements.clone();
     token
+}
+
+/// Build the host capability envelope for a configured child placement.
+pub fn build_child_placement_capability(placement: &ChildPlacementConfig) -> CapabilityToken {
+    let surrogate = AgentTypeConfig {
+        model: placement.model.clone().unwrap_or_default(),
+        system_prompt: None,
+        skills: placement.skills.clone(),
+        max_turns: placement.max_turns,
+        max_tokens: placement.max_tokens,
+        max_sub_agents: placement.max_sub_agents,
+        allowed_child_placements: placement.allowed_child_placements.clone(),
+        restart_policy: None,
+        capabilities: placement.capabilities.clone(),
+    };
+    build_capability_token(&surrogate)
 }
 
 /// Map `MemoryCapabilityConfig` → `simulacra_types::MemoryCapability`. Invalid
@@ -717,7 +879,7 @@ skills = []
 max_turns = 50
 max_tokens = 100_000
 max_sub_agents = 5
-can_spawn = ["coder", "reviewer"]
+allowed_child_placements = ["coder", "reviewer"]
 restart_policy = "retry_twice_then_fail"
 
 [agent_types.planner.capabilities]
@@ -750,7 +912,7 @@ task = "Review PR #42"
         assert_eq!(planner.max_turns, Some(50));
         assert_eq!(planner.max_tokens, Some(100_000));
         assert_eq!(planner.max_sub_agents, Some(5));
-        assert_eq!(planner.can_spawn, vec!["coder", "reviewer"]);
+        assert_eq!(planner.allowed_child_placements, vec!["coder", "reviewer"]);
         assert_eq!(
             planner.restart_policy.as_deref(),
             Some("retry_twice_then_fail")
@@ -806,165 +968,18 @@ url = "http://localhost:3000"
         );
     }
 
-    #[test]
-    fn s056_agent_backend_defaults_to_native_and_existing_native_configs_parse_unchanged() {
-        let toml_str = r#"
-[project]
-name = "s056"
-
-[agent_types.worker]
-model = "claude-sonnet-4-20250514"
-system_prompt = "prompts/worker.md"
-can_spawn = ["reviewer"]
-"#;
-
-        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
-        config.validate().expect("native config should validate");
-
-        let worker = config.agent_types.get("worker").expect("worker agent");
-        assert_eq!(worker.backend, AgentBackend::Native);
-        assert_eq!(worker.model, "claude-sonnet-4-20250514");
-        assert_eq!(worker.acp_profile, None);
-        assert_eq!(worker.can_spawn, vec!["reviewer"]);
-    }
-
-    #[test]
-    fn s056_agent_backend_native_explicitly_selects_native_runtime() {
-        let toml_str = r#"
-[project]
-name = "s056"
-
-[agent_types.worker]
-backend = "native"
-model = "claude-sonnet-4-20250514"
-"#;
-
-        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
-        config.validate().expect("native config should validate");
-
-        assert_eq!(
-            config.agent_types.get("worker").expect("worker").backend,
-            AgentBackend::Native
-        );
-    }
-
-    #[test]
-    fn s056_acp_agent_type_does_not_require_model_but_requires_profile() {
-        let toml_str = r#"
-[project]
-name = "s056"
-
-[agent_types.remote_reviewer]
-backend = "acp"
-acp_profile = "codex-local"
-"#;
-
-        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
-        config.validate().expect("ACP config should validate");
-
-        let agent = config
-            .agent_types
-            .get("remote_reviewer")
-            .expect("remote_reviewer agent");
-        assert_eq!(agent.backend, AgentBackend::Acp);
-        assert_eq!(agent.model, "");
-        assert_eq!(agent.acp_profile.as_deref(), Some("codex-local"));
-    }
-
-    #[test]
-    fn s056_native_agent_type_rejects_empty_model() {
-        let toml_str = r#"
-[project]
-name = "s056"
-
-[agent_types.worker]
-backend = "native"
-model = "   "
-"#;
-
-        let config: SimulacraConfig = toml::from_str(toml_str).expect("config should parse");
-        let err = config
-            .validate()
-            .expect_err("native backend must reject an empty model");
-        let message = err.to_string();
-
-        assert!(message.contains("worker"));
-        assert!(message.contains("native backend requires non-empty model"));
-    }
-
-    #[test]
-    fn s056_acp_agent_type_rejects_missing_or_empty_profile() {
-        let missing_profile = r#"
-[project]
-name = "s056"
-
-[agent_types.remote_reviewer]
-backend = "acp"
-"#;
-
-        let config: SimulacraConfig = toml::from_str(missing_profile).expect("config should parse");
-        let err = config
-            .validate()
-            .expect_err("ACP backend must reject missing acp_profile");
-        assert!(
-            err.to_string()
-                .contains("ACP backend requires non-empty acp_profile")
-        );
-
-        let empty_profile = r#"
-[project]
-name = "s056"
-
-[agent_types.remote_reviewer]
-backend = "acp"
-acp_profile = "   "
-"#;
-
-        let config: SimulacraConfig = toml::from_str(empty_profile).expect("config should parse");
-        let err = config
-            .validate()
-            .expect_err("ACP backend must reject empty acp_profile");
-        assert!(
-            err.to_string()
-                .contains("ACP backend requires non-empty acp_profile")
-        );
-    }
-
-    #[test]
-    fn s056_unknown_backend_value_is_rejected_with_actionable_error() {
-        let toml_str = r#"
-[project]
-name = "s056"
-
-[agent_types.worker]
-backend = "remote"
-model = "claude-sonnet-4-20250514"
-"#;
-
-        let err =
-            toml::from_str::<SimulacraConfig>(toml_str).expect_err("unknown backend is rejected");
-        let message = err.to_string();
-
-        assert!(message.contains("backend"));
-        assert!(message.contains("remote"));
-        assert!(message.contains("native"));
-        assert!(message.contains("acp"));
-    }
-
     // ── C1: build_capability_token ──────────────────────────────────────
 
     #[test]
     fn build_capability_token_without_capabilities_returns_default() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "test-model".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: None,
         };
@@ -978,22 +993,20 @@ model = "claude-sonnet-4-20250514"
         assert!(!token.python);
         assert!(token.paths_read.is_empty());
         assert!(token.paths_write.is_empty());
-        assert!(token.spawn_types.is_empty());
+        assert!(token.spawn_placements.is_empty());
         assert!(token.skill_patterns.is_empty());
     }
 
     #[test]
     fn build_capability_token_maps_network_permissions() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec!["net:api.github.com".into(), "net:*.stripe.com".into()],
@@ -1025,15 +1038,13 @@ model = "claude-sonnet-4-20250514"
     #[test]
     fn build_capability_token_maps_mcp_tools() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec![],
@@ -1057,15 +1068,13 @@ model = "claude-sonnet-4-20250514"
     #[test]
     fn build_capability_token_maps_boolean_capabilities() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec![],
@@ -1091,15 +1100,13 @@ model = "claude-sonnet-4-20250514"
     #[test]
     fn build_capability_token_maps_path_patterns() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec![],
@@ -1125,44 +1132,40 @@ model = "claude-sonnet-4-20250514"
     }
 
     #[test]
-    fn build_capability_token_preserves_can_spawn_without_capabilities_block() {
-        // Regression guard: `can_spawn` lives on AgentTypeConfig, not inside
-        // the [capabilities] block. An agent that configures `can_spawn =
+    fn build_capability_token_preserves_allowed_child_placements_without_capabilities_block() {
+        // Regression guard: `allowed_child_placements` lives on AgentTypeConfig, not inside
+        // the [capabilities] block. An agent that configures `allowed_child_placements =
         // ["worker"]` without a capabilities block should still end up with
-        // `token.spawn_types == ["worker"]`. Without this behaviour the
+        // `token.spawn_placements == ["worker"]`. Without this behaviour the
         // planner/supervisor would refuse the spawn at runtime even though
         // the config clearly authorises it.
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec!["worker".into(), "reviewer".into()],
+            allowed_child_placements: vec!["worker".into(), "reviewer".into()],
             restart_policy: None,
             capabilities: None,
         };
 
         let token = build_capability_token(&agent);
 
-        assert_eq!(token.spawn_types, vec!["worker", "reviewer"]);
+        assert_eq!(token.spawn_placements, vec!["worker", "reviewer"]);
     }
 
     #[test]
-    fn build_capability_token_maps_spawn_types_from_can_spawn() {
+    fn build_capability_token_maps_spawn_placements_from_allowed_child_placements() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec!["coder".into(), "reviewer".into()],
+            allowed_child_placements: vec!["coder".into(), "reviewer".into()],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec![],
@@ -1180,21 +1183,19 @@ model = "claude-sonnet-4-20250514"
 
         let token = build_capability_token(&agent);
 
-        assert_eq!(token.spawn_types, vec!["coder", "reviewer"]);
+        assert_eq!(token.spawn_placements, vec!["coder", "reviewer"]);
     }
 
     #[test]
     fn build_capability_token_maps_skill_patterns_from_capabilities() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "m".into(),
-            acp_profile: None,
             system_prompt: None,
             skills: vec!["rust-dev".into()],
             max_turns: None,
             max_tokens: None,
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec![],
@@ -1255,15 +1256,13 @@ skill_patterns = ["skill:rust-*", "reviewer"]
     #[test]
     fn build_capability_token_with_all_fields_populated() {
         let agent = AgentTypeConfig {
-            backend: AgentBackend::Native,
             model: "claude-sonnet-4-20250514".into(),
-            acp_profile: None,
             system_prompt: Some("prompt.md".into()),
             skills: vec!["skill:code-review".into()],
             max_turns: Some(50),
             max_tokens: Some(100_000),
             max_sub_agents: Some(5),
-            can_spawn: vec!["worker".into()],
+            allowed_child_placements: vec!["worker".into()],
             restart_policy: Some("retry".into()),
             capabilities: Some(CapabilitiesConfig {
                 network: vec!["net:api.anthropic.com".into()],
@@ -1295,7 +1294,7 @@ skill_patterns = ["skill:rust-*", "reviewer"]
             token.paths_write,
             vec![PathPattern("/workspace/src/**".into())]
         );
-        assert_eq!(token.spawn_types, vec!["worker"]);
+        assert_eq!(token.spawn_placements, vec!["worker"]);
         assert_eq!(token.skill_patterns, vec!["skill:code-review"]);
     }
 
@@ -1634,7 +1633,7 @@ model = "m"
         assert!(agent.max_turns.is_none());
         assert!(agent.max_tokens.is_none());
         assert!(agent.max_sub_agents.is_none());
-        assert!(agent.can_spawn.is_empty());
+        assert!(agent.allowed_child_placements.is_empty());
         assert!(agent.restart_policy.is_none());
         assert!(agent.capabilities.is_none());
     }

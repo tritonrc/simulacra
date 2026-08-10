@@ -20,13 +20,13 @@ impl InMemoryJournalStorage {
 }
 
 /// Validate schema version of a journal entry.
-/// Returns an error if the entry's schema version exceeds the current version.
+/// Returns an error unless the entry uses the one supported schema version.
 fn validate_schema_version(entry: &JournalEntry) -> Result<(), JournalError> {
-    if entry.schema_version > JOURNAL_SCHEMA_VERSION {
+    if entry.schema_version != JOURNAL_SCHEMA_VERSION {
         tracing::error!(
-            "schema version mismatch: expected {} but found {}",
-            JOURNAL_SCHEMA_VERSION,
-            entry.schema_version
+            expected = JOURNAL_SCHEMA_VERSION,
+            got = entry.schema_version,
+            "journal schema version mismatch; start a new session"
         );
         return Err(JournalError::SchemaVersionMismatch {
             expected: JOURNAL_SCHEMA_VERSION,
@@ -38,6 +38,7 @@ fn validate_schema_version(entry: &JournalEntry) -> Result<(), JournalError> {
 
 impl JournalStorage for InMemoryJournalStorage {
     fn append(&self, entry: JournalEntry) -> Result<(), JournalError> {
+        validate_schema_version(&entry)?;
         let mut entries = self
             .entries
             .write()
@@ -66,6 +67,7 @@ impl JournalStorage for InMemoryJournalStorage {
             .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
         let mut total = TokenUsage::default();
         for entry in entries.iter().filter(|e| e.agent_id == *agent_id) {
+            validate_schema_version(entry)?;
             if let JournalEntryKind::LlmResponse { token_usage, .. } = &entry.entry {
                 total.input_tokens = total.input_tokens.saturating_add(token_usage.input_tokens);
                 total.output_tokens = total
@@ -103,6 +105,9 @@ impl JournalStorage for InMemoryJournalStorage {
             .entries
             .write()
             .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
+        for existing in entries.iter().filter(|entry| entry.agent_id == *agent_id) {
+            validate_schema_version(existing)?;
+        }
         let agent_count = entries.iter().filter(|e| e.agent_id == *agent_id).count();
         if after_entry > agent_count {
             return Err(JournalError::InvalidCheckpointIndex(after_entry));
@@ -120,11 +125,14 @@ impl JournalStorage for InMemoryJournalStorage {
             .entries
             .read()
             .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
-        let agent_entries: Vec<JournalEntry> = entries
+        let agent_entries = entries
             .iter()
-            .filter(|e| e.agent_id == *agent_id)
-            .cloned()
-            .collect();
+            .filter(|entry| entry.agent_id == *agent_id)
+            .map(|entry| {
+                validate_schema_version(entry)?;
+                Ok(entry.clone())
+            })
+            .collect::<Result<Vec<_>, JournalError>>()?;
 
         if checkpoint_idx >= agent_entries.len() {
             return Err(JournalError::InvalidCheckpointIndex(checkpoint_idx));
@@ -153,24 +161,17 @@ impl JournalStorage for InMemoryJournalStorage {
             .entries
             .read()
             .map_err(|e| JournalError::Storage(format!("lock poisoned: {e}")))?;
-        let agent_entries: Vec<JournalEntry> = entries
+        let agent_entries = entries
             .iter()
-            .filter(|e| e.agent_id == *agent_id)
-            .cloned()
-            .collect();
+            .filter(|entry| entry.agent_id == *agent_id)
+            .map(|entry| {
+                validate_schema_version(entry)?;
+                Ok(entry.clone())
+            })
+            .collect::<Result<Vec<_>, JournalError>>()?;
 
         if start_index > agent_entries.len() {
             return Err(JournalError::InvalidCheckpointIndex(start_index));
-        }
-
-        // Validate schema version on each entry (same as read_all)
-        for entry in &agent_entries[start_index..] {
-            if entry.schema_version != JOURNAL_SCHEMA_VERSION {
-                return Err(JournalError::SchemaVersionMismatch {
-                    expected: JOURNAL_SCHEMA_VERSION,
-                    got: entry.schema_version,
-                });
-            }
         }
 
         Ok(agent_entries[start_index..].to_vec())

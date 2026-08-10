@@ -1,8 +1,8 @@
 
 use rust_decimal::Decimal;
 use simulacra_config::{
-    AgentTypeConfig, CapabilitiesConfig, CatalogConfig, ProjectConfig, SimulacraConfig, TierMap,
-    VfsConfig,
+    AgentBackend, AgentTypeConfig, CapabilitiesConfig, CatalogConfig, ChildPlacementConfig,
+    ProjectConfig, SimulacraConfig, VfsConfig,
 };
 use simulacra_runtime::{
     AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor, AgentTaskFactory,
@@ -254,7 +254,6 @@ fn write_http_response(stream: &mut TcpStream, response: &CannedResponse) -> std
 #[derive(Debug, Clone)]
 struct CapturedSpan {
     name: String,
-    parent_name: Option<String>,
     fields: HashMap<String, String>,
 }
 
@@ -278,14 +277,13 @@ where
         &self,
         attrs: &tracing::span::Attributes<'_>,
         _id: &tracing::span::Id,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut fields = HashMap::new();
         let mut visitor = FieldVisitor(&mut fields);
         attrs.record(&mut visitor);
         self.spans.lock().unwrap().push(CapturedSpan {
             name: attrs.metadata().name().to_string(),
-            parent_name: ctx.lookup_current().map(|span| span.name().to_string()),
             fields,
         });
     }

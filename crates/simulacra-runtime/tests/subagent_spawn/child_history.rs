@@ -11,21 +11,21 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
                 content: "child system".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
-            provider_content: vec![],
+                provider_content: vec![],
             },
             Message {
                 role: Role::User,
                 content: "child task".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
-            provider_content: vec![],
+                provider_content: vec![],
             },
             Message {
                 role: Role::Assistant,
                 content: "child result".into(),
                 tool_calls: vec![],
                 tool_call_id: None,
-            provider_content: vec![],
+                provider_content: vec![],
             },
         ],
         token_usage: TokenUsage {
@@ -34,7 +34,7 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };
@@ -57,7 +57,7 @@ async fn child_internal_messages_are_not_appended_to_parent_conversation_history
 }
 
 #[test]
-fn agent_task_factory_runs_a_real_child_agent_loop_with_the_child_prompt_and_model() {
+fn agent_task_factory_runs_a_real_child_agent_loop_with_the_default_prompt_and_placement_model() {
     let _env_lock = openai_env_guard();
     let server = FakeOpenAiServer::new(CannedResponse::json(serde_json::json!({
         "id": "resp-1",
@@ -103,7 +103,7 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_child_prompt_and_mod
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
-            acp_child_runtime: None,
+        acp_child_runtime: None,
     };
     let spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));
 
@@ -126,8 +126,8 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_child_prompt_and_mod
             .messages
             .first()
             .map(|message| message.content.as_str()),
-        Some("You are the child researcher."),
-        "child execution should run through AgentLoop::run(task) so the configured system prompt is present"
+        Some(DEFAULT_SYSTEM_PROMPT),
+        "a native placement without caller instructions should use the native default prompt"
     );
     assert_eq!(
         output.messages.get(1).map(|message| message.role.clone()),
@@ -144,10 +144,7 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_child_prompt_and_mod
 
     let request = server.first_request_json();
     assert_eq!(request["model"], "child-model");
-    assert_eq!(
-        request["messages"][0]["content"],
-        "You are the child researcher."
-    );
+    assert_eq!(request["messages"][0]["content"], DEFAULT_SYSTEM_PROMPT);
 
     let child_entries = journal
         .read_all(&spawn.agent_id)
@@ -218,7 +215,7 @@ fn agent_task_factory_applies_child_cell_and_tool_hooks_before_provider_call() {
             Ok(())
         })),
         child_provider_factory: None,
-            acp_child_runtime: None,
+        acp_child_runtime: None,
     };
     let spawn = spawn_config("child-hooks-1", "parent-agent", child_budget(32, 1, 0));
 
@@ -308,7 +305,7 @@ fn agent_task_factory_intersects_child_type_capability_with_the_spawn_override()
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
-            acp_child_runtime: None,
+        acp_child_runtime: None,
     };
     let mut spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));
     spawn.capability = Some(CapabilityToken::default());
@@ -353,11 +350,9 @@ fn widened_child_capabilities_are_rejected_before_the_child_task_starts() {
         capability: Some(child),
         budget: child_budget(10, 1, 1),
         restart_strategy: RestartStrategy::LetCrash,
-        agent_type: Some(String::new()),
+        placement: "researcher".into(),
         task: String::new(),
-        system_prompt: None,
-        tier: None,
-        resolved_tier: None,
+        instructions: None,
     });
 
     assert!(
@@ -369,18 +364,21 @@ fn widened_child_capabilities_are_rejected_before_the_child_task_starts() {
 
 #[test]
 fn child_may_spawn_descendants_only_from_its_own_remaining_budget() {
-    let child_supervisor = AgentSupervisor::new(
+    let child_supervisor = AgentSupervisor::with_task_factory(
         CapabilityToken {
-            spawn_types: vec!["reviewer".into()],
+            spawn_placements: vec!["reviewer".into()],
             ..Default::default()
         },
         child_budget(10, 2, 1),
+        Arc::new(NoopFactory),
     );
     let mut child_supervisor = child_supervisor;
+    install_spawn_test_journal(&mut child_supervisor);
 
-    let result = child_supervisor.spawn_agent(spawn_config(
+    let result = child_supervisor.spawn_agent(spawn_config_with_placement(
         "grandchild-1",
         "child-1",
+        "reviewer",
         child_budget(11, 1, 1),
     ));
 
@@ -448,7 +446,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
                 tool_call_id: Some("call-1".into()),
 
                 tool_name: "spawn_agent".into(),
-                content: r#"{"child_id":"child-1","agent_type":"researcher","exit_reason":"completed","message":"done","token_usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
+                content: r#"{"child_id":"child-1","placement":"researcher","exit_reason":"completed","message":"done","token_usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
                 is_error: false,
             },
         ),
@@ -459,7 +457,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
         content: "delegate".into(),
         tool_calls: vec![],
         tool_call_id: None,
-            provider_content: vec![],
+        provider_content: vec![],
     }];
 
     let result = tokio::runtime::Builder::new_current_thread()

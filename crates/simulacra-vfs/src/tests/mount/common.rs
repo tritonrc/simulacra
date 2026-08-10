@@ -11,6 +11,7 @@ pub(super) fn test_config(
             description: None,
         },
         agent_types,
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,
@@ -31,15 +32,13 @@ pub(super) fn test_config(
 
 pub(super) fn empty_agent_type() -> simulacra_config::AgentTypeConfig {
     simulacra_config::AgentTypeConfig {
-        backend: Default::default(),
         model: "test-model".to_string(),
-        acp_profile: None,
         system_prompt: None,
         skills: vec![],
         max_turns: None,
         max_tokens: None,
         max_sub_agents: None,
-        can_spawn: vec![],
+        allowed_child_placements: vec![],
         restart_policy: None,
         capabilities: None,
     }

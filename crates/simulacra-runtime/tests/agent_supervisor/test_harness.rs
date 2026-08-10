@@ -6,8 +6,8 @@ use simulacra_runtime::{
 };
 #[cfg(feature = "spawn")]
 use simulacra_runtime::{
-    ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool, ListChildAgentTool,
-    WaitChildAgentTool,
+    CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool, JoinChildAgentTool,
+    ListChildAgentTool, NoopActivitySink, SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
 };
 use simulacra_tool::ToolRegistry;
 use simulacra_types::{
@@ -23,21 +23,29 @@ use tokio::sync::Notify;
 use tracing_subscriber::layer::SubscriberExt;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "spawn"), allow(dead_code))]
 struct CapturedSpan {
+    id: String,
     name: String,
+    parent_name: Option<String>,
+    opened_sequence: usize,
+    closed_sequence: Option<usize>,
     fields: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "spawn"), allow(dead_code))]
 struct CapturedEvent {
     level: String,
     current_span: Option<String>,
+    sequence: usize,
     fields: HashMap<String, String>,
 }
 
 struct CaptureLayer {
     spans: Arc<Mutex<Vec<CapturedSpan>>>,
     events: Arc<Mutex<Vec<CapturedEvent>>>,
+    sequence: AtomicUsize,
 }
 
 impl<S> tracing_subscriber::Layer<S> for CaptureLayer
@@ -47,14 +55,23 @@ where
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
-        _id: &tracing::span::Id,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut fields = HashMap::new();
         let mut visitor = FieldVisitor(&mut fields);
         attrs.record(&mut visitor);
+        let parent_name = attrs
+            .parent()
+            .and_then(|parent_id| ctx.span(parent_id))
+            .or_else(|| ctx.lookup_current())
+            .map(|parent| parent.name().to_string());
         self.spans.lock().unwrap().push(CapturedSpan {
+            id: format!("{id:?}"),
             name: attrs.metadata().name().to_string(),
+            parent_name,
+            opened_sequence: self.sequence.fetch_add(1, Ordering::SeqCst),
+            closed_sequence: None,
             fields,
         });
     }
@@ -90,8 +107,23 @@ where
         self.events.lock().unwrap().push(CapturedEvent {
             level: event.metadata().level().to_string(),
             current_span: ctx.lookup_current().map(|span| span.name().to_string()),
+            sequence: self.sequence.fetch_add(1, Ordering::SeqCst),
             fields,
         });
+    }
+
+    fn on_close(&self, id: tracing::span::Id, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+        let id = format!("{id:?}");
+        let closed_sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
+        if let Some(span) = self
+            .spans
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|span| span.id == id)
+        {
+            span.closed_sequence = Some(closed_sequence);
+        }
     }
 }
 
@@ -131,6 +163,7 @@ fn setup_capture() -> (
     let subscriber = tracing_subscriber::registry::Registry::default().with(CaptureLayer {
         spans: Arc::clone(&spans),
         events: Arc::clone(&events),
+        sequence: AtomicUsize::new(0),
     });
     (subscriber, spans, events)
 }

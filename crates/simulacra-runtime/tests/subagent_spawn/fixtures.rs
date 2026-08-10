@@ -1,6 +1,6 @@
 fn default_capability() -> CapabilityToken {
     CapabilityToken {
-        spawn_types: vec!["researcher".into(), "reviewer".into()],
+        spawn_placements: vec!["researcher".into(), "reviewer".into()],
         ..Default::default()
     }
 }
@@ -9,12 +9,16 @@ fn default_budget() -> ResourceBudget {
     ResourceBudget::new(100, 10, Decimal::new(100, 0), 2)
 }
 
+fn install_spawn_test_journal(supervisor: &mut AgentSupervisor) {
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
+}
+
 fn child_budget(max_tokens: u64, max_turns: u32, max_sub_agents: u32) -> ResourceBudget {
     child_budget_with_cost(max_tokens, max_turns, Decimal::new(10, 0), max_sub_agents)
 }
 
 fn spawn_config(agent_id: &str, parent_id: &str, budget: ResourceBudget) -> SpawnConfig {
-    spawn_config_with_agent_type(agent_id, parent_id, "researcher", budget)
+    spawn_config_with_placement(agent_id, parent_id, "researcher", budget)
 }
 
 fn child_budget_with_cost(
@@ -26,10 +30,10 @@ fn child_budget_with_cost(
     ResourceBudget::new(max_tokens, max_turns, max_cost, max_sub_agents)
 }
 
-fn spawn_config_with_agent_type(
+fn spawn_config_with_placement(
     agent_id: &str,
     parent_id: &str,
-    agent_type: &str,
+    placement: &str,
     budget: ResourceBudget,
 ) -> SpawnConfig {
     SpawnConfig {
@@ -38,11 +42,9 @@ fn spawn_config_with_agent_type(
         capability: None,
         budget,
         restart_strategy: RestartStrategy::LetCrash,
-        agent_type: Some(agent_type.into()),
+        placement: placement.into(),
         task: "delegate task".into(),
-        system_prompt: None,
-        tier: None,
-        resolved_tier: None,
+        instructions: None,
     }
 }
 
@@ -62,7 +64,7 @@ fn child_success_output() -> AgentLoopOutput {
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::new(15, 2),
     }
@@ -78,6 +80,10 @@ fn child_success_output() -> AgentLoopOutput {
 struct NoopFactory;
 
 impl TaskFactory for NoopFactory {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        validate_configured_test_placement(config)
+    }
+
     fn create_task(
         &self,
         _config: SpawnConfig,
@@ -88,7 +94,7 @@ impl TaskFactory for NoopFactory {
                 exit_reason: ExitReason::Complete,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+                reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             })
@@ -100,7 +106,7 @@ impl TaskFactory for NoopFactory {
 struct SpawnSnapshot {
     agent_id: String,
     parent_id: String,
-    agent_type: String,
+    placement: String,
     task: String,
     max_tokens: u64,
     max_turns: u32,
@@ -215,6 +221,10 @@ impl RecordingTaskFactory {
 }
 
 impl TaskFactory for RecordingTaskFactory {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        validate_configured_test_placement(config)
+    }
+
     fn create_task(&self, config: SpawnConfig, _cancellation: CancellationToken) -> BoxTaskFuture {
         // Capture journal state at the moment child execution begins.
         if let Some((ref journal, ref parent_id)) = *self.inner.journal_ref.lock().unwrap() {
@@ -225,10 +235,7 @@ impl TaskFactory for RecordingTaskFactory {
         self.inner.started.lock().unwrap().push(SpawnSnapshot {
             agent_id: config.agent_id.0.clone(),
             parent_id: config.parent_id.0.clone(),
-            agent_type: config
-                .agent_type
-                .clone()
-                .unwrap_or_else(|| "generic".to_string()),
+            placement: config.placement.clone(),
             task: config.task.clone(),
             max_tokens: config.budget.max_tokens,
             max_turns: config.budget.max_turns,
@@ -248,7 +255,7 @@ impl TaskFactory for RecordingTaskFactory {
                     exit_reason: ExitReason::Complete,
                     messages: vec![],
                     token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+                    reported_tool_uses: None,
                     used_turns: 0,
                     used_cost: Decimal::ZERO,
                 })
@@ -261,6 +268,15 @@ impl TaskFactory for RecordingTaskFactory {
             factory.inner.completed_notify.notify_waiters();
             result
         })
+    }
+}
+
+fn validate_configured_test_placement(config: &SpawnConfig) -> Result<(), RuntimeError> {
+    match config.placement.as_str() {
+        "in_process" | "researcher" | "reviewer" | "workspace" => Ok(()),
+        placement => Err(RuntimeError::Session(format!(
+            "unknown child placement {placement:?}; configured test placements: in_process, researcher, reviewer, workspace"
+        ))),
     }
 }
 
@@ -289,7 +305,7 @@ impl Tool for SummarySpawnTool {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({
                 "child_id": "child-1",
-                "agent_type": "researcher",
+                "placement": "researcher",
                 "exit_reason": "completed",
                 "message": "done",
                 "token_usage": {"input_tokens": 3, "output_tokens": 2}
@@ -333,19 +349,34 @@ fn build_loop(
 fn task_factory_config(child_capabilities: CapabilitiesConfig) -> SimulacraConfig {
     let mut agent_types = HashMap::new();
     agent_types.insert(
-        "researcher".into(),
+        "parent".into(),
         AgentTypeConfig {
-            backend: Default::default(),
             model: "child-model".into(),
-            acp_profile: None,
             system_prompt: Some("You are the child researcher.".into()),
             skills: vec![],
             max_turns: Some(3),
             max_tokens: Some(64),
             max_sub_agents: Some(1),
-            can_spawn: vec![],
+            allowed_child_placements: vec!["researcher".into()],
             restart_policy: None,
+            capabilities: None,
+        },
+    );
+
+    let mut child_placements = HashMap::new();
+    child_placements.insert(
+        "researcher".into(),
+        ChildPlacementConfig {
+            backend: AgentBackend::Native,
+            model: Some("child-model".into()),
+            acp_profile: None,
+            skills: vec![],
             capabilities: Some(child_capabilities),
+            max_turns: Some(3),
+            max_tokens: Some(64),
+            max_cost: None,
+            max_sub_agents: Some(1),
+            allowed_child_placements: vec![],
         },
     );
 
@@ -355,6 +386,7 @@ fn task_factory_config(child_capabilities: CapabilitiesConfig) -> SimulacraConfi
             description: None,
         },
         agent_types,
+        child_placements,
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,
@@ -370,21 +402,44 @@ fn task_factory_config(child_capabilities: CapabilitiesConfig) -> SimulacraConfi
 
 async fn run_spawn_tool_call(
     arguments: serde_json::Value,
-    can_spawn: &[&str],
+    allowed_placements: &[&str],
     supervisor_reply: Result<AgentLoopOutput, RuntimeError>,
+) -> (Result<serde_json::Value, ToolError>, SpawnConfig) {
+    let caller_capability = CapabilityToken {
+        spawn_placements: allowed_placements
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        ..Default::default()
+    };
+    run_spawn_tool_call_with_caller_capability(
+        arguments,
+        allowed_placements,
+        supervisor_reply,
+        caller_capability,
+    )
+    .await
+}
+
+async fn run_spawn_tool_call_with_caller_capability(
+    arguments: serde_json::Value,
+    allowed_placements: &[&str],
+    supervisor_reply: Result<AgentLoopOutput, RuntimeError>,
+    caller_capability: CapabilityToken,
 ) -> (Result<serde_json::Value, ToolError>, SpawnConfig) {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
     let tool = SpawnAgentTool {
         sender,
-        can_spawn: can_spawn.iter().map(|value| (*value).to_string()).collect(),
+        allowed_placements: allowed_placements
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
         activity_sink: Arc::new(NoopActivitySink),
         parent_id: AgentId("parent-agent".into()),
-        tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
-        parent_model: "parent-model".into(),
         guidance: None,
     };
-    let call_future = tool.call(arguments, &CapabilityToken::default());
+    let call_future = tool.call(arguments, &caller_capability);
     let receive_future = async move {
         let message = receiver
             .recv()
@@ -400,10 +455,8 @@ async fn run_spawn_tool_call(
                 let captured = (*config).clone();
                 let reply = supervisor_reply.map(|_| SpawnAck {
                     child_id: captured.agent_id.clone(),
-                    agent_type: captured
-                        .agent_type
-                        .clone()
-                        .unwrap_or_else(|| "generic".to_string()),
+                    placement: captured.placement.clone(),
+                    backend: AgentBackend::Native,
                 });
                 result_tx
                     .send(reply)
@@ -440,7 +493,10 @@ async fn run_join_tool_call_with_status_metadata(
     tool_uses: u64,
 ) -> Result<serde_json::Value, ToolError> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = JoinChildAgentTool { sender };
+    let tool = JoinChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call_future = tool.call(
         serde_json::json!({ "child_id": "child-1" }),
         &CapabilityToken::default(),
@@ -456,7 +512,7 @@ async fn run_join_tool_call_with_status_metadata(
                 result_tx
                     .send(Ok(ChildTerminalResult {
                         child_id,
-                        agent_type: "researcher".into(),
+                        placement: "researcher".into(),
                         status: status.to_string(),
                         elapsed_ms,
                         tool_uses,

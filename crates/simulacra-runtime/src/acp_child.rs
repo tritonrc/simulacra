@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use simulacra_types::{AgentId, CapabilityToken, ResourceBudget};
 
 use crate::{ActivitySink, AgentInputQueue, AgentLoopOutput, CancellationToken, RuntimeError};
@@ -11,12 +12,13 @@ pub type AcpChildFuture =
     Pin<Box<dyn Future<Output = Result<AgentLoopOutput, RuntimeError>> + Send + 'static>>;
 
 /// Opaque request passed to an injected ACP child runtime.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpChildRequest {
     pub child_id: AgentId,
     pub parent_id: AgentId,
-    pub agent_type: String,
+    pub placement: String,
     pub acp_profile: String,
+    pub instructions: Option<String>,
     pub task: String,
     pub budget: ResourceBudget,
     pub capability: CapabilityToken,

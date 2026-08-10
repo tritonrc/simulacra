@@ -64,17 +64,17 @@ mod activity_event_type {
         };
         let _child_spawned = ActivityEvent::ChildSpawned {
             child_id: "c-1".into(),
-            agent_type: "researcher".into(),
+            placement: "in_process".into(),
             task: "find bugs".into(),
         };
         let _child_activity = ActivityEvent::ChildActivity {
             child_id: "c-1".into(),
-            agent_type: "researcher".into(),
+            placement: "in_process".into(),
             event: Box::new(ActivityEvent::TurnComplete),
         };
         let _child_finished = ActivityEvent::ChildFinished {
             child_id: "c-1".into(),
-            agent_type: "researcher".into(),
+            placement: "in_process".into(),
             exit_reason: "done".into(),
             duration_ms: 1000,
             tool_uses: 5,
@@ -213,7 +213,7 @@ mod activity_event_type {
     fn json_roundtrip_child_finished() {
         let event = ActivityEvent::ChildFinished {
             child_id: "c-7".into(),
-            agent_type: "coder".into(),
+            placement: "workspace".into(),
             exit_reason: "complete".into(),
             duration_ms: 45000,
             tool_uses: 21,
@@ -236,10 +236,10 @@ mod activity_event_type {
         };
         let wrapped = ActivityEvent::ChildActivity {
             child_id: "child-1".into(),
-            agent_type: "researcher".into(),
+            placement: "in_process".into(),
             event: Box::new(ActivityEvent::ChildActivity {
                 child_id: "grandchild-1".into(),
-                agent_type: "coder".into(),
+                placement: "workspace".into(),
                 event: Box::new(inner),
             }),
         };
@@ -250,6 +250,7 @@ mod activity_event_type {
         // Verify nesting structure is present in the JSON
         assert!(json.contains("\"child_id\":\"grandchild-1\""));
         assert!(json.contains("\"child_id\":\"child-1\""));
+        assert!(!json.contains("agent_type"));
     }
 
     /// TurnComplete (unit variant) roundtrips.
@@ -277,7 +278,7 @@ mod activity_event_type {
     fn clone_produces_identical_serialization() {
         let event = ActivityEvent::ChildActivity {
             child_id: "c-1".into(),
-            agent_type: "explorer".into(),
+            placement: "in_process".into(),
             event: Box::new(ActivityEvent::ToolOutput {
                 tool_call_id: "tc-5".into(),
                 line: "output line".into(),
@@ -415,7 +416,7 @@ mod activity_sink_trait {
         let parent_sink: Arc<dyn ActivitySink> = Arc::new(ChannelActivitySink::new(tx));
 
         let forwarding =
-            ForwardingActivitySink::new("child-42".into(), "researcher".into(), parent_sink);
+            ForwardingActivitySink::new("child-42".into(), "in_process".into(), parent_sink);
 
         forwarding.emit(ActivityEvent::Token {
             text: "from child".into(),
@@ -425,7 +426,8 @@ mod activity_sink_trait {
         let json = serde_json::to_string(&received).unwrap();
         assert!(json.contains("\"type\":\"ChildActivity\""));
         assert!(json.contains("\"child_id\":\"child-42\""));
-        assert!(json.contains("\"agent_type\":\"researcher\""));
+        assert!(json.contains("\"placement\":\"in_process\""));
+        assert!(!json.contains("agent_type"));
         assert!(json.contains("\"from child\""));
     }
 
@@ -438,23 +440,38 @@ mod activity_sink_trait {
 
         let child_sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
             "child-1".into(),
-            "researcher".into(),
+            "in_process".into(),
             root_sink,
         ));
 
         let grandchild_sink =
-            ForwardingActivitySink::new("grandchild-1".into(), "coder".into(), child_sink);
+            ForwardingActivitySink::new("grandchild-1".into(), "workspace".into(), child_sink);
 
         grandchild_sink.emit(ActivityEvent::TurnComplete);
 
         let received = rx.try_recv().expect("should receive doubly-wrapped event");
-        let json = serde_json::to_string(&received).unwrap();
-
-        // Outer wrapping from child
-        assert!(json.contains("\"child_id\":\"child-1\""));
-        // Inner wrapping from grandchild
-        assert!(json.contains("\"child_id\":\"grandchild-1\""));
-        // The innermost event
-        assert!(json.contains("\"type\":\"TurnComplete\""));
+        match received {
+            ActivityEvent::ChildActivity {
+                child_id,
+                placement,
+                event,
+            } => {
+                assert_eq!(child_id, "child-1");
+                assert_eq!(placement, "in_process");
+                match *event {
+                    ActivityEvent::ChildActivity {
+                        child_id,
+                        placement,
+                        event,
+                    } => {
+                        assert_eq!(child_id, "grandchild-1");
+                        assert_eq!(placement, "workspace");
+                        assert!(matches!(*event, ActivityEvent::TurnComplete));
+                    }
+                    other => panic!("expected exactly one grandchild wrapper, got {other:?}"),
+                }
+            }
+            other => panic!("expected exactly one child wrapper at the root, got {other:?}"),
+        }
     }
 }

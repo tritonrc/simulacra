@@ -17,4 +17,11 @@ pub enum SkillError {
          no valid /skills/{skill}/SKILL.md found"
     )]
     UndiscoverableSkill { agent_type: String, skill: String },
+
+    /// A child placement references a skill that was not found in the VFS.
+    #[error(
+        "placement {placement:?} references undiscoverable skill {skill:?}: \
+         no valid /skills/{skill}/SKILL.md found"
+    )]
+    UndiscoverablePlacementSkill { placement: String, skill: String },
 }

@@ -64,6 +64,7 @@ fn base_config() -> SimulacraConfig {
             description: None,
         },
         agent_types: HashMap::new(),
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,
@@ -79,15 +80,13 @@ fn base_config() -> SimulacraConfig {
 
 fn agent_with(model: &str, prompt: Option<&str>) -> AgentTypeConfig {
     AgentTypeConfig {
-        backend: Default::default(),
         model: model.into(),
-        acp_profile: None,
         system_prompt: prompt.map(str::to_owned),
         skills: vec![],
         max_turns: None,
         max_tokens: None,
         max_sub_agents: None,
-        can_spawn: vec![],
+        allowed_child_placements: vec![],
         restart_policy: None,
         capabilities: None,
     }

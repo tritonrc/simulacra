@@ -13,6 +13,11 @@ impl AgentLoop {
     }
 
     async fn run_inner(&mut self, task: &str) -> Result<AgentLoopOutput, RuntimeError> {
+        if let Some(replay) = self.replay.as_ref() {
+            replay
+                .validate_schema_version()
+                .map_err(RuntimeError::Journal)?;
+        }
         // Default conversation: [system, user(task)]. Overridden below if the
         // replay journal carries a checkpoint with captured messages.
         let mut messages = vec![
@@ -93,7 +98,20 @@ impl AgentLoop {
             self.config.max_turns
         };
         for _turn in 0..effective_max_turns {
-            let turn = self.execute_turn(&mut messages, true).await?;
+            let turn = match self.execute_turn(&mut messages, true).await {
+                Ok(turn) => turn,
+                Err(RuntimeError::HookKill { hook, reason }) => {
+                    return Ok(AgentLoopOutput {
+                        exit_reason: ExitReason::PolicyKill { hook, reason },
+                        messages,
+                        token_usage: total_usage,
+                        reported_tool_uses: None,
+                        used_turns: self.budget.used_turns,
+                        used_cost: self.budget.used_cost,
+                    });
+                }
+                Err(error) => return Err(error),
+            };
             total_usage.input_tokens = total_usage
                 .input_tokens
                 .saturating_add(turn.token_usage.input_tokens);

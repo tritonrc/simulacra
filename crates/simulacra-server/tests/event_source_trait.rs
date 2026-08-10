@@ -165,6 +165,7 @@ async fn protocol_adapter_routes_mounts_custom_routes() {
             description: None,
         },
         agent_types: HashMap::new(),
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,

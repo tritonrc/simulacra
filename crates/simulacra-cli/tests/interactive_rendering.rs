@@ -9,10 +9,12 @@ use simulacra_cli::interactive::{
     InteractiveInput, InteractiveOutput, InteractiveSession, InteractiveSessionConfig, StreamEvent,
 };
 use simulacra_cli::{CliArgs, CliMode, bootstrap};
-use simulacra_runtime::{InMemorySessionStorage, SessionStorage};
+use simulacra_runtime::{
+    InMemorySessionStorage, MessagePriority, SessionStorage, SupervisorMessage, SupervisorPayload,
+};
 use simulacra_types::{
-    FinishReason, Message, Provider, ProviderError, ProviderResponse, Role, TokenUsage,
-    ToolCallMessage, ToolDefinition, VirtualFs,
+    ActivityEvent, AgentId, FinishReason, Message, Provider, ProviderError, ProviderResponse, Role,
+    TokenUsage, ToolCallMessage, ToolDefinition, VirtualFs,
 };
 use simulacra_vfs::MemoryFs;
 
@@ -129,7 +131,7 @@ name = "simulacra-s018"
 model = "claude-sonnet-4-20250514"
 max_turns = 7
 max_tokens = 4321
-can_spawn = ["researcher"]
+allowed_child_placements = ["researcher"]
 
 [agent_types.default.capabilities]
 shell = true
@@ -137,13 +139,13 @@ javascript = true
 paths_read = ["/workspace/**"]
 paths_write = ["/workspace/**"]
 
-[agent_types.researcher]
+[child_placements.researcher]
+backend = "native"
 model = "gpt-5.4"
-system_prompt = "You are the child researcher."
 max_turns = 3
 max_tokens = 222
 
-[agent_types.researcher.capabilities]
+[child_placements.researcher.capabilities]
 paths_read = ["/workspace/**"]
 
 [task]
@@ -172,11 +174,11 @@ fn build_session() -> InteractiveSession<FakeProvider, TestIo> {
     .expect("bootstrap should succeed");
     let storage: Arc<dyn SessionStorage> = Arc::new(InMemorySessionStorage::new());
 
-    let can_spawn = boot
+    let allowed_child_placements = boot
         .config
         .agent_types
         .get("default")
-        .map(|a| a.can_spawn.clone())
+        .map(|a| a.allowed_child_placements.clone())
         .unwrap_or_default();
     let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
     InteractiveSession::new(
@@ -192,7 +194,7 @@ fn build_session() -> InteractiveSession<FakeProvider, TestIo> {
             task: Some("interactive parent task".into()),
             requested_session_id: None,
             tool_definitions: boot.tool_definitions.clone(),
-            can_spawn,
+            allowed_child_placements,
             skill_catalog: vec![],
         },
     )
@@ -200,6 +202,25 @@ fn build_session() -> InteractiveSession<FakeProvider, TestIo> {
 
 fn contains_text(lines: &[String], needle: &str) -> bool {
     lines.iter().any(|line| line.contains(needle))
+}
+
+fn accepted_child(child_id: &str) -> ActivityEvent {
+    ActivityEvent::ChildSpawned {
+        child_id: child_id.into(),
+        placement: "researcher".into(),
+        task: "bounded delegated work".into(),
+    }
+}
+
+fn finished_child(child_id: &str, exit_reason: &str) -> ActivityEvent {
+    ActivityEvent::ChildFinished {
+        child_id: child_id.into(),
+        placement: "researcher".into(),
+        exit_reason: exit_reason.into(),
+        duration_ms: 1,
+        tool_uses: 0,
+        token_count: 1,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +233,7 @@ fn interactive_sessions_register_spawn_agent_and_list_it_in_tools_output() {
 
     let view = session.dispatch_command("/tools");
 
-    let stock_spawn_description = "Spawn a supervised child agent for a concrete, bounded, independent subtask. Do not delegate immediate critical-path blockers when the parent cannot make progress until the answer returns. This tool returns a live child handle, not a final answer. After spawning, continue non-overlapping parent work; use child_status for cheap nonblocking inspection, wait_child_agent for bounded polling or wait-any orchestration, join_child_agent when the terminal result is needed, and close_child_agent only to clean up a terminal child handle.";
+    let stock_spawn_description = "I can start a supervised child for one concrete, bounded, independent task. Choose where I run it with placement and shape how it works with instructions; placement supplies an environment and capabilities, not a role. I return a live handle, not the child's final answer.";
     assert!(
         contains_text(&view.visible_output, stock_spawn_description),
         "CLI bootstrap must register spawn_agent with the complete stock description"
@@ -233,9 +254,9 @@ fn interactive_sessions_register_spawn_agent_and_list_it_in_tools_output() {
         );
     }
     for expected in [
-        "concrete, bounded, independent subtask",
-        "returns a live child handle, not a final answer",
-        "join_child_agent when the terminal result is needed",
+        "concrete, bounded, independent task",
+        "placement supplies an environment and capabilities, not a role",
+        "return a live handle, not the child's final answer",
     ] {
         assert!(
             contains_text(&view.visible_output, expected),
@@ -254,7 +275,7 @@ fn parent_spawn_tool_results_are_the_only_child_visible_messages_added_to_parent
     session.start();
     session.view.messages.push(Message {
         role: Role::Tool,
-        content: r#"{"child_id":"child-1","agent_type":"researcher","message":"summary"}"#.into(),
+        content: r#"{"child_id":"child-1","placement":"researcher","message":"summary"}"#.into(),
         tool_calls: vec![],
         tool_call_id: Some("call-1".into()),
         provider_content: vec![],
@@ -277,8 +298,9 @@ fn parent_spawn_tool_results_are_the_only_child_visible_messages_added_to_parent
 // ---------------------------------------------------------------------------
 
 #[test]
-fn repl_shows_subagent_work_with_a_child_specific_prefix() {
+fn repl_shows_subagent_work_with_a_generic_child_prefix() {
     let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-repl"));
 
     let view = session.process_streaming_events(vec![
         StreamEvent::Token("delegated output".into()),
@@ -286,40 +308,234 @@ fn repl_shows_subagent_work_with_a_child_specific_prefix() {
     ]);
 
     assert!(
-        contains_text(&view.visible_output, "[agent:researcher/")
+        contains_text(&view.visible_output, "[agent:Child]")
             && !contains_text(&view.visible_output, "[tool]"),
-        "child-visible output should use a stable child prefix distinct from tool blocks"
+        "child-visible output should use a generic child prefix distinct from tool blocks"
     );
+    assert!(!contains_text(&view.visible_output, "researcher"));
+    session.process_activity_event(&finished_child("child-repl", "completed"));
+    assert!(!session.status_line().contains("delegating"));
 }
 
 #[test]
 fn spinner_status_text_indicates_delegation_while_a_child_is_running() {
-    let session = build_session();
+    let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-spinner"));
 
     assert!(
-        session.status_line().contains("delegating to researcher"),
-        "interactive status text should indicate delegation while a child runs"
+        session.status_line().contains("delegating to Child")
+            && !session.status_line().contains("researcher"),
+        "interactive status text should indicate generic child delegation without treating placement as identity"
     );
 }
 
 #[test]
-fn child_failures_and_cancellations_are_shown_to_the_user_before_the_parent_turn_resumes() {
+fn interactive_session_with_authorized_placements_starts_without_an_active_child() {
+    let session = build_session();
+
+    assert!(
+        !session.status_line().contains("delegating"),
+        "placement authorization alone must not fabricate an active child"
+    );
+}
+
+#[test]
+fn child_failure_output_uses_the_child_prefix_until_its_terminal_lifecycle_event() {
     let mut session = build_session();
-    let cancelled = session.cancel_tool_execution();
+    session.process_activity_event(&accepted_child("child-failed"));
     let failed = session.process_streaming_events(vec![
-        StreamEvent::ToolCall(ToolCallMessage {
-            id: "call-1".into(),
-            name: "spawn_agent".into(),
-            arguments: serde_json::json!({"agent_type":"researcher"}),
-        }),
+        StreamEvent::Token("error: child failed".into()),
         StreamEvent::Done,
     ]);
 
     assert!(
-        contains_text(&cancelled.visible_output, "[agent:researcher/")
-            && contains_text(&failed.visible_output, "[agent:researcher/")
-            && contains_text(&failed.visible_output, "error"),
-        "child failures and cancellations should be rendered with the child prefix before control returns to the parent"
+        failed.visible_output.iter().any(|frame| {
+            frame.starts_with("[agent:Child]") && frame.contains("error: child failed")
+        }),
+        "child output should retain the generic child prefix while the child is live"
+    );
+    session.process_activity_event(&finished_child("child-failed", "failed"));
+    assert!(!session.status_line().contains("delegating"));
+}
+
+#[test]
+fn interactive_session_tracks_all_concurrent_children_and_removes_only_exact_terminal_ids() {
+    let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-a"));
+    session.process_activity_event(&accepted_child("child-b"));
+    assert!(session.status_line().contains("delegating"));
+
+    session.process_activity_event(&finished_child("child-b", "completed"));
+    assert!(
+        session.status_line().contains("delegating"),
+        "child-a remains live when child-b terminates"
+    );
+    session.process_activity_event(&finished_child("not-an-accepted-child", "failed"));
+    assert!(
+        session.status_line().contains("delegating"),
+        "a nonmatching terminal id has no effect"
+    );
+    session.process_activity_event(&finished_child("child-a", "cancelled"));
+    assert!(!session.status_line().contains("delegating"));
+}
+
+#[test]
+fn every_child_finished_outcome_removes_its_exact_accepted_id() {
+    for (index, exit_reason) in [
+        "completed",
+        "max_turns",
+        "budget_exhausted",
+        "failed",
+        "guardrail_tripped",
+        "policy_kill",
+        "cancelled",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let child_id = format!("child-terminal-{index}");
+        let mut session = build_session();
+        session.process_activity_event(&accepted_child(&child_id));
+        session.process_activity_event(&finished_child(&child_id, exit_reason));
+        assert!(
+            !session.status_line().contains("delegating"),
+            "terminal outcome {exit_reason} must remove exactly {child_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancellation_uses_the_explicit_join_child_signal_and_waits_for_ok_acknowledgement() {
+    let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-a"));
+    session.process_activity_event(&accepted_child("child-b"));
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+    session.set_supervisor_control(control_tx, AgentId("interactive-root".into()));
+    session.process_activity_event(&ActivityEvent::ToolStart {
+        tool_call_id: "join-selected-a".into(),
+        name: "join_child_agent".into(),
+        arguments: serde_json::json!({"child_id": "child-a"}),
+    });
+
+    let acknowledgement = async {
+        let control = control_rx
+            .recv()
+            .await
+            .expect("selected join cancellation should reach the supervisor");
+        assert_eq!(control.agent_id.0, "interactive-root");
+        assert_eq!(control.priority, MessagePriority::Signal);
+        match control.payload {
+            SupervisorPayload::CancelChild(child_id, acknowledgement) => {
+                assert_eq!(
+                    child_id.0, "child-a",
+                    "only the join-selected child is cancellable"
+                );
+                acknowledgement
+                    .send(Ok(()))
+                    .expect("interactive cancellation task should await the acknowledgement");
+            }
+            payload => panic!("expected signal-priority CancelChild, got {payload:?}"),
+        }
+    };
+    let (requested, ()) = tokio::join!(session.cancel_selected_child(), acknowledgement);
+
+    assert!(
+        contains_text(
+            &requested.visible_output,
+            "cancellation requested (child-a)"
+        ),
+        "only an Ok acknowledgement may render cancellation-requested output"
+    );
+    assert!(
+        requested.tool_results_to_model.iter().any(|message| {
+            message.role == Role::Tool
+                && message.content.contains("child-a")
+                && message.content.contains("cancellation_requested")
+        }),
+        "an Ok acknowledgement should be the sole basis for the model-facing request result"
+    );
+
+    session.process_activity_event(&finished_child("child-b", "completed"));
+    assert!(
+        session.status_line().contains("delegating"),
+        "the selected child remains live until its own matching ChildFinished event"
+    );
+    session.process_activity_event(&finished_child("child-a", "cancelled"));
+    assert!(
+        !session.status_line().contains("delegating"),
+        "the matching terminal ChildFinished event, not the acknowledgement, ends the child lifecycle"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_without_an_explicit_join_sends_no_control_or_output() {
+    let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-a"));
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<SupervisorMessage>(1);
+    session.set_supervisor_control(control_tx, AgentId("interactive-root".into()));
+    let before = session.snapshot();
+
+    let after = session.cancel_selected_child().await;
+
+    assert!(
+        control_rx.try_recv().is_err(),
+        "activity order must not select a child or send CancelChild without a join"
+    );
+    assert_eq!(after.visible_output, before.visible_output);
+    assert_eq!(
+        after.tool_results_to_model.len(),
+        before.tool_results_to_model.len()
+    );
+}
+
+#[tokio::test]
+async fn cancellation_error_acknowledgement_reports_an_error_without_claiming_success() {
+    let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-a"));
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+    session.set_supervisor_control(control_tx, AgentId("interactive-root".into()));
+    session.process_activity_event(&ActivityEvent::ToolStart {
+        tool_call_id: "join-selected-a".into(),
+        name: "join_child_agent".into(),
+        arguments: serde_json::json!({"child_id": "child-a"}),
+    });
+
+    let acknowledgement = async {
+        let control = control_rx
+            .recv()
+            .await
+            .expect("selected join cancellation should reach the supervisor");
+        match control.payload {
+            SupervisorPayload::CancelChild(child_id, acknowledgement) => {
+                assert_eq!(child_id.0, "child-a");
+                acknowledgement
+                    .send(Err("child is already terminal".into()))
+                    .expect("interactive cancellation task should await the acknowledgement");
+            }
+            payload => panic!("expected CancelChild, got {payload:?}"),
+        }
+    };
+    let (view, ()) = tokio::join!(session.cancel_selected_child(), acknowledgement);
+    assert!(
+        view.error
+            .as_deref()
+            .is_some_and(|error| error.contains("child is already terminal")),
+        "an Err acknowledgement must be surfaced as an interactive error"
+    );
+    assert!(
+        !contains_text(&view.visible_output, "cancellation requested"),
+        "an Err acknowledgement must not render a successful cancellation request"
+    );
+    assert!(
+        view.tool_results_to_model
+            .iter()
+            .all(|message| !message.content.contains("cancellation_requested")),
+        "an Err acknowledgement must not fabricate a model-facing success"
+    );
+    session.process_activity_event(&finished_child("child-a", "failed"));
+    assert!(
+        !session.status_line().contains("delegating"),
+        "a child remains live after cancellation acknowledgement failure until its matching terminal event"
     );
 }
 
@@ -328,7 +544,7 @@ fn child_failures_and_cancellations_are_shown_to_the_user_before_the_parent_turn
 // ---------------------------------------------------------------------------
 
 #[test]
-fn can_spawn_is_reflected_into_the_effective_capability_token_spawn_types() {
+fn allowed_child_placements_are_reflected_into_the_effective_capability_token() {
     let config = TempConfig::write(&interactive_config_toml());
     let boot = bootstrap(&CliArgs {
         config_path: config.path_string(),
@@ -346,7 +562,7 @@ fn can_spawn_is_reflected_into_the_effective_capability_token_spawn_types() {
     })
     .expect("bootstrap should succeed");
 
-    assert_eq!(boot.capability_token.spawn_types, vec!["researcher"]);
+    assert_eq!(boot.capability_token.spawn_placements, vec!["researcher"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -361,7 +577,7 @@ fn spawn_agent_tool_call_is_auto_approved_without_user_confirmation() {
     let spawn_call = ToolCallMessage {
         id: "call-spawn-1".into(),
         name: "spawn_agent".into(),
-        arguments: serde_json::json!({"agent_type":"researcher","task":"do research"}),
+        arguments: serde_json::json!({"placement":"researcher","task":"do research"}),
     };
     let view = session.handle_tool_approval(vec![spawn_call], &[], true);
 
@@ -385,7 +601,7 @@ fn spawn_agent_auto_approval_generates_tool_result_message() {
     let spawn_call = ToolCallMessage {
         id: "call-spawn-2".into(),
         name: "spawn_agent".into(),
-        arguments: serde_json::json!({"agent_type":"researcher","task":"investigate"}),
+        arguments: serde_json::json!({"placement":"researcher","task":"investigate"}),
     };
     let view = session.handle_tool_approval(vec![spawn_call], &[], true);
 
@@ -412,7 +628,7 @@ fn non_spawn_tools_still_require_approval_when_mixed_with_spawn_agent() {
     let spawn_call = ToolCallMessage {
         id: "call-spawn-3".into(),
         name: "spawn_agent".into(),
-        arguments: serde_json::json!({"agent_type":"researcher","task":"research"}),
+        arguments: serde_json::json!({"placement":"researcher","task":"research"}),
     };
     let shell_call = ToolCallMessage {
         id: "call-shell-1".into(),
@@ -439,22 +655,22 @@ fn non_spawn_tools_still_require_approval_when_mixed_with_spawn_agent() {
 }
 
 // ---------------------------------------------------------------------------
-// can_spawn config is reflected in session
+// Child placement config is reflected in the session.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn session_config_can_spawn_matches_agent_type_config() {
+fn session_allowed_child_placements_match_agent_type_config() {
     let session = build_session();
 
     assert_eq!(
-        session.config.can_spawn,
+        session.config.allowed_child_placements,
         vec!["researcher".to_string()],
-        "can_spawn from the default agent type should be reflected in the session config"
+        "allowed placements from the default agent type should be reflected in the session config"
     );
 }
 
 #[test]
-fn empty_can_spawn_config_produces_empty_spawn_types() {
+fn omitted_allowed_child_placements_produce_empty_spawn_authorization() {
     let toml = r#"[project]
 name = "simulacra-s018-no-spawn"
 
@@ -488,19 +704,19 @@ task = "no spawn task"
     .expect("bootstrap should succeed");
 
     assert!(
-        boot.capability_token.spawn_types.is_empty(),
-        "omitting can_spawn should produce empty spawn_types in the capability token"
+        boot.capability_token.spawn_placements.is_empty(),
+        "omitting allowed child placements should produce empty spawn authorization"
     );
 
-    let can_spawn = boot
+    let allowed_child_placements = boot
         .config
         .agent_types
         .get("default")
-        .map(|a| a.can_spawn.clone())
+        .map(|a| a.allowed_child_placements.clone())
         .unwrap_or_default();
     assert!(
-        can_spawn.is_empty(),
-        "omitting can_spawn in config should produce an empty can_spawn list"
+        allowed_child_placements.is_empty(),
+        "omitting allowed child placements should produce an empty authorization list"
     );
 }
 
@@ -525,7 +741,7 @@ fn status_line_without_active_child_shows_budget_only() {
             task: None,
             requested_session_id: None,
             tool_definitions: vec![],
-            can_spawn: vec![], // no can_spawn => no active_child_type
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         },
     );
@@ -546,15 +762,16 @@ fn status_line_without_active_child_shows_budget_only() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn spawn_agent_tool_call_in_stream_sets_active_child_type_for_subsequent_tokens() {
+fn spawn_agent_tool_call_in_stream_sets_active_child_for_subsequent_tokens() {
     let mut session = build_session();
+    session.process_activity_event(&accepted_child("child-stream"));
 
-    // First send a spawn_agent tool call, then a token
+    // The accepted lifecycle establishes identity; the tool call is display only.
     let view = session.process_streaming_events(vec![
         StreamEvent::ToolCall(ToolCallMessage {
             id: "call-1".into(),
             name: "spawn_agent".into(),
-            arguments: serde_json::json!({"agent_type":"researcher"}),
+            arguments: serde_json::json!({"placement":"researcher"}),
         }),
         StreamEvent::Token("child working...".into()),
         StreamEvent::Done,
@@ -564,105 +781,96 @@ fn spawn_agent_tool_call_in_stream_sets_active_child_type_for_subsequent_tokens(
     assert!(
         view.visible_output
             .iter()
-            .any(|line| line.contains("[agent:researcher/") && line.contains("child working...")),
-        "tokens after spawn_agent tool call should be prefixed with the child agent identity"
+            .any(|line| line.contains("[agent:Child]") && line.contains("child working...")),
+        "tokens after spawn_agent tool call should use the generic child prefix"
     );
+    session.process_activity_event(&finished_child("child-stream", "completed"));
+    assert!(!session.status_line().contains("delegating"));
 }
 
-// ---------------------------------------------------------------------------
-// Cancel tool execution produces child-prefixed cancellation
-// ---------------------------------------------------------------------------
-
 #[test]
-fn cancel_tool_execution_produces_error_tool_result_with_cancellation_content() {
+fn spawn_agent_attempt_alone_does_not_attribute_following_parent_tokens_to_a_child() {
     let mut session = build_session();
 
-    let view = session.cancel_tool_execution();
+    let view = session.process_streaming_events(vec![
+        StreamEvent::ToolCall(ToolCallMessage {
+            id: "rejected-spawn".into(),
+            name: "spawn_agent".into(),
+            arguments: serde_json::json!({"placement":"researcher"}),
+        }),
+        StreamEvent::Token("parent continues after rejected spawn".into()),
+        StreamEvent::Done,
+    ]);
 
-    // Should produce a tool result for the model indicating cancellation
+    assert!(contains_text(
+        &view.visible_output,
+        "parent continues after rejected spawn"
+    ));
     assert!(
-        !view.tool_results_to_model.is_empty(),
-        "cancelling tool execution should produce a tool result message"
-    );
-    let result = &view.tool_results_to_model[0];
-    assert_eq!(result.role, Role::Tool);
-    assert!(
-        result.content.contains("cancelled"),
-        "cancellation tool result should contain 'cancelled'"
-    );
-}
-
-#[test]
-fn cancel_tool_execution_shows_child_prefix_when_child_is_active() {
-    let mut session = build_session();
-
-    let view = session.cancel_tool_execution();
-
-    assert!(
-        view.visible_output
-            .iter()
-            .any(|line| line.contains("[agent:researcher/") && line.contains("cancelled")),
-        "cancellation output should use the child prefix when a child type is active"
+        !view.visible_output.iter().any(|line| {
+            line.contains("[agent:Child]") && line.contains("parent continues after rejected spawn")
+        }),
+        "a tool-call attempt is not an accepted ChildSpawned lifecycle event"
     );
 }
 
 // ---------------------------------------------------------------------------
-// CapabilityToken spawn_types attenuation
+// CapabilityToken placement attenuation
 // ---------------------------------------------------------------------------
 
 #[test]
-fn capability_token_spawn_types_subset_check_rejects_wider_child() {
+fn capability_token_spawn_placements_subset_check_rejects_wider_child() {
     use simulacra_types::CapabilityToken;
 
     let parent = CapabilityToken {
-        spawn_types: vec!["researcher".into()],
+        spawn_placements: vec!["researcher".into()],
         ..Default::default()
     };
     let child = CapabilityToken {
-        spawn_types: vec!["researcher".into(), "reviewer".into()],
+        spawn_placements: vec!["researcher".into(), "reviewer".into()],
         ..Default::default()
     };
 
     assert!(
         !child.is_subset_of(&parent),
-        "a child with more spawn_types than the parent must be rejected"
+        "a child with more spawn placements than the parent must be rejected"
     );
 }
 
 #[test]
-fn capability_token_spawn_types_subset_check_accepts_narrower_child() {
+fn capability_token_spawn_placements_subset_check_accepts_narrower_child() {
     use simulacra_types::CapabilityToken;
 
     let parent = CapabilityToken {
-        spawn_types: vec!["researcher".into(), "reviewer".into()],
+        spawn_placements: vec!["researcher".into(), "reviewer".into()],
         ..Default::default()
     };
     let child = CapabilityToken {
-        spawn_types: vec!["researcher".into()],
+        spawn_placements: vec!["researcher".into()],
         ..Default::default()
     };
 
     assert!(
         child.is_subset_of(&parent),
-        "a child with fewer spawn_types than the parent should be accepted"
+        "a child with fewer spawn placements than the parent should be accepted"
     );
 }
 
 #[test]
-fn capability_token_empty_spawn_types_is_subset_of_any_parent() {
+fn capability_token_empty_spawn_placements_is_subset_of_any_parent() {
     use simulacra_types::CapabilityToken;
 
     let parent = CapabilityToken {
-        spawn_types: vec!["researcher".into()],
+        spawn_placements: vec!["researcher".into()],
         ..Default::default()
     };
     let child = CapabilityToken {
-        spawn_types: vec![],
+        spawn_placements: vec![],
         ..Default::default()
     };
 
     assert!(
         child.is_subset_of(&parent),
-        "a child with empty spawn_types should be a subset of any parent"
+        "a child with empty spawn placements should be a subset of any parent"
     );
 }

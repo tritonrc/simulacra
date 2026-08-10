@@ -9,7 +9,43 @@ pub type BoxTaskFuture =
 pub trait TaskFactory: Send + Sync {
     /// Validate that the factory can accept this spawn before the supervisor
     /// returns a live child handle.
-    fn validate_spawn_config(&self, _config: &SpawnConfig) -> Result<(), RuntimeError> {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Session(format!(
+            "unknown child placement {:?}",
+            config.placement
+        )))
+    }
+
+    /// Resolve the runtime backend selected by the opaque placement.
+    /// This is reached only after explicit placement validation succeeds.
+    fn placement_backend(&self, _config: &SpawnConfig) -> AgentBackend {
+        AgentBackend::Native
+    }
+
+    /// Apply policy shaping after ordinary validation but before the
+    /// supervisor reserves budget or records an accepted spawn.
+    fn prepare_spawn_config(&self, _config: &mut SpawnConfig) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// Apply policy shaping using the authenticated immediate caller's
+    /// effective capability. Placement-aware factories override this method;
+    /// placement-agnostic factories retain their existing preparation hook.
+    fn prepare_spawn_config_for_caller(
+        &self,
+        config: &mut SpawnConfig,
+        _caller_capability: &CapabilityToken,
+    ) -> Result<(), RuntimeError> {
+        self.prepare_spawn_config(config)
+    }
+
+    /// Run policy completion handling after the child runtime returns and
+    /// before its terminal result is cached or journaled by the supervisor.
+    fn after_spawn(
+        &self,
+        _config: &SpawnConfig,
+        _result: &SpawnResult,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
 
@@ -31,6 +67,20 @@ pub trait TaskFactory: Send + Sync {
             let _input_queue = input_queue;
             task.await
         })
+    }
+
+    /// Create a task using the supervisor's authoritative budget handle for
+    /// this child. Native runtimes override this to share live usage with
+    /// descendant-spawn accounting; simpler factories may use the value-only
+    /// compatibility path.
+    fn create_task_with_input_and_budget(
+        &self,
+        config: SpawnConfig,
+        cancellation: CancellationToken,
+        input_queue: AgentInputQueue,
+        _budget: Arc<Mutex<ResourceBudget>>,
+    ) -> BoxTaskFuture {
+        self.create_task_with_input(config, cancellation, input_queue)
     }
 }
 
@@ -78,6 +128,7 @@ impl PartialOrd for MessagePriority {
 #[derive(Debug)]
 pub struct SupervisorMessage {
     pub priority: MessagePriority,
+    /// Immutable identity of the immediate caller that submitted this message.
     pub agent_id: AgentId,
     pub payload: SupervisorPayload,
 }
@@ -89,14 +140,15 @@ pub type SpawnResult = Result<AgentLoopOutput, RuntimeError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnAck {
     pub child_id: AgentId,
-    pub agent_type: String,
+    pub placement: String,
+    pub backend: AgentBackend,
 }
 
 /// Cached terminal child result returned by join_child_agent.
 #[derive(Debug, Clone)]
 pub struct ChildTerminalResult {
     pub child_id: AgentId,
-    pub agent_type: String,
+    pub placement: String,
     pub status: String,
     pub elapsed_ms: u64,
     pub tool_uses: u64,
@@ -123,9 +175,10 @@ pub(crate) fn final_assistant_message(output: &AgentLoopOutput) -> Option<String
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildMetadata {
     pub child_id: AgentId,
-    pub agent_type: String,
+    pub placement: String,
     pub task: String,
     pub parent_id: AgentId,
+    pub capability: CapabilityToken,
     pub started_at_ms: u64,
     pub finished_at_ms: Option<u64>,
 }
@@ -144,7 +197,7 @@ pub enum ChildAgentStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildStatus {
     pub child_id: AgentId,
-    pub agent_type: String,
+    pub placement: String,
     pub status: ChildAgentStatus,
     pub ready: bool,
     pub elapsed_ms: u64,
@@ -154,7 +207,7 @@ pub struct ChildStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildRosterEntry {
     pub child_id: String,
-    pub agent_type: String,
+    pub placement: String,
     pub task: String,
     pub status: ChildAgentStatus,
     pub ready: bool,
@@ -165,7 +218,7 @@ pub struct ChildRosterEntry {
 #[derive(Debug, Clone)]
 pub struct WaitChildResult {
     pub child_id: AgentId,
-    pub agent_type: Option<String>,
+    pub placement: Option<String>,
     pub status: String,
     pub ready: bool,
     pub terminal: Option<ChildTerminalResult>,
@@ -299,12 +352,7 @@ impl CancellationToken {
 
 /// Configuration for spawning a child agent.
 ///
-/// For interactive sub-agent delegation (S018), `agent_type` and `task` carry
-/// the configured child type name and the delegated task text passed to
-/// `AgentLoop::run(task)`. The child receives a fresh Provider instance
-/// selected from the `agent_type` configuration, with its own system_prompt,
-/// and its effective capabilities are the intersection of parent, child-type
-/// config, and any optional override.
+/// Placement-backed child request crossing the tool/supervisor boundary.
 #[derive(Debug, Clone)]
 pub struct SpawnConfig {
     pub agent_id: AgentId,
@@ -312,23 +360,10 @@ pub struct SpawnConfig {
     pub capability: Option<CapabilityToken>,
     pub budget: ResourceBudget,
     pub restart_strategy: RestartStrategy,
-    /// The configured child agent type name from simulacra.toml.
-    /// `None` when the parent spawns a generic agent with an inline system_prompt.
-    #[allow(dead_code)]
-    pub agent_type: Option<String>,
+    /// Opaque configured child placement key from `child_placements`.
+    pub placement: String,
     /// The delegated task text passed to the child AgentLoop::run(task).
-    #[allow(dead_code)]
     pub task: String,
-    /// Inline system prompt for generic sub-agents (max 8 KB).
-    /// Present only when `agent_type` is `None`.
-    #[allow(dead_code)]
-    pub system_prompt: Option<String>,
-    /// Model capability tier (e.g. "reasoning", "balanced", "fast").
-    /// Resolved to a concrete model via `[tiers]` in simulacra.toml.
-    #[allow(dead_code)]
-    pub tier: Option<String>,
-    /// Resolved tier label for observability. When `tier` is omitted for a
-    /// generic child, this records the parent's tier name without changing the
-    /// inherited model selection.
-    pub resolved_tier: Option<String>,
+    /// Optional caller-supplied shaping instructions, preserved byte-for-byte.
+    pub instructions: Option<String>,
 }

@@ -15,7 +15,7 @@ async fn spawn_agent_tool_exit_reason_max_turns_uses_snake_case_format_per_spec(
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 3,
         used_cost: Decimal::ZERO,
     };
@@ -98,18 +98,21 @@ fn agent_task_factory_performs_three_way_capability_intersection_parent_config_a
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
-            acp_child_runtime: None,
+        acp_child_runtime: None,
     };
 
     // Override grants: shell=true, javascript=false
     // Parent grants: shell=false (via default CapabilityToken)
     // Intersection: shell should be false (parent denies), javascript should be false (override denies)
-    let mut spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));
+    let mut spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 1));
     spawn.capability = Some(CapabilityToken {
         shell: true,
         javascript: false,
         ..Default::default()
     });
+    factory
+        .prepare_spawn_config_for_caller(&mut spawn, &CapabilityToken::default())
+        .expect("the fixture should resolve the real three-way capability intersection");
 
     let output = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -145,6 +148,7 @@ async fn child_budget_exactly_equals_parent_remaining_budget_is_accepted() {
     parent_budget.used_tokens = 90;
     let mut supervisor =
         AgentSupervisor::with_task_factory(default_capability(), parent_budget, Arc::new(factory));
+    install_spawn_test_journal(&mut supervisor);
 
     // Request exactly 10 tokens when parent has exactly 10 remaining
     let result = supervisor.spawn_agent(spawn_config(
@@ -170,6 +174,7 @@ async fn child_budget_one_token_over_parent_remaining_is_rejected() {
         parent_budget,
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     // Request 11 tokens when parent has exactly 10 remaining
     let result = supervisor.spawn_agent(spawn_config(
@@ -193,6 +198,7 @@ async fn child_turns_exactly_equals_parent_remaining_turns_is_accepted() {
     parent_budget.used_turns = 8;
     let mut supervisor =
         AgentSupervisor::with_task_factory(default_capability(), parent_budget, Arc::new(factory));
+    install_spawn_test_journal(&mut supervisor);
 
     // Request exactly 2 turns when parent has exactly 2 remaining
     let result = supervisor.spawn_agent(spawn_config(
@@ -218,6 +224,7 @@ async fn child_turns_one_over_parent_remaining_is_rejected() {
         parent_budget,
         Arc::new(factory.clone()),
     );
+    install_spawn_test_journal(&mut supervisor);
 
     // Request 3 turns when parent has exactly 2 remaining
     let result = supervisor.spawn_agent(spawn_config(
@@ -264,7 +271,7 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_has_no_assista
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     };
@@ -286,7 +293,7 @@ async fn spawn_agent_tool_returns_empty_message_when_child_output_messages_list_
         exit_reason: ExitReason::Complete,
         messages: vec![],
         token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 0,
         used_cost: Decimal::ZERO,
     };
@@ -318,18 +325,19 @@ async fn join_child_agent_returns_structured_terminal_success_metadata() {
             cache_read_input_tokens: 0,
             cache_write_input_tokens: 0,
         },
-            reported_tool_uses: None,
+        reported_tool_uses: None,
         used_turns: 1,
         used_cost: Decimal::ZERO,
     };
 
     let result = run_join_tool_call_with_metadata(Ok(output), 123, 2).await;
 
+    let value = result.expect("join should return structured terminal JSON");
     assert_eq!(
-        result.expect("join should return structured terminal JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-1",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "completed",
             "ready": true,
             "exit_reason": "completed",
@@ -344,17 +352,19 @@ async fn join_child_agent_returns_structured_terminal_success_metadata() {
             "vfs_changes": []
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 #[tokio::test]
 async fn join_child_agent_returns_structured_terminal_failure_metadata() {
     let result = run_join_tool_call_with_metadata(Err("boom".into()), 123, 0).await;
 
+    let value = result.expect("join should return structured failure JSON");
     assert_eq!(
-        result.expect("join should return structured failure JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-1",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "failed",
             "ready": true,
             "exit_reason": "failed",
@@ -369,6 +379,7 @@ async fn join_child_agent_returns_structured_terminal_failure_metadata() {
             "vfs_changes": []
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 #[tokio::test]
@@ -376,11 +387,12 @@ async fn join_child_agent_preserves_cancelled_terminal_status_metadata() {
     let result =
         run_join_tool_call_with_status_metadata(Err("cancelled".into()), "cancelled", 123, 0).await;
 
+    let value = result.expect("join should return structured cancellation JSON");
     assert_eq!(
-        result.expect("join should return structured cancellation JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-1",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "cancelled",
             "ready": true,
             "exit_reason": "cancelled",
@@ -395,6 +407,7 @@ async fn join_child_agent_preserves_cancelled_terminal_status_metadata() {
             "vfs_changes": []
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -407,18 +420,16 @@ async fn spawn_agent_tool_returns_error_when_supervisor_drops_result_channel() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<SupervisorMessage>(1);
     let tool = SpawnAgentTool {
         sender,
-        can_spawn: vec!["researcher".into()],
+        allowed_placements: vec!["researcher".into()],
         activity_sink: Arc::new(NoopActivitySink),
         parent_id: AgentId("parent-agent".into()),
-        tiers: Default::default(),
         parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
-        parent_model: "parent-model".into(),
         guidance: None,
     };
 
     let call_future = tool.call(
         serde_json::json!({
-            "agent_type": "researcher",
+            "placement": "researcher",
             "task": "check",
             "budget": {
                 "max_tokens": 10,
@@ -427,7 +438,10 @@ async fn spawn_agent_tool_returns_error_when_supervisor_drops_result_channel() {
                 "max_sub_agents": 0
             }
         }),
-        &CapabilityToken::default(),
+        &CapabilityToken {
+            spawn_placements: vec!["researcher".into()],
+            ..Default::default()
+        },
     );
 
     let drop_future = async move {
@@ -458,157 +472,52 @@ async fn spawn_agent_tool_returns_error_when_supervisor_drops_result_channel() {
 // These test the actual SpawnAgentTool (not a fake) for definition correctness.
 // ---------------------------------------------------------------------------
 
-fn make_real_spawn_agent_tool() -> SpawnAgentTool {
-    let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    SpawnAgentTool {
-        sender,
-        can_spawn: vec!["researcher".into()],
-        activity_sink: Arc::new(NoopActivitySink),
-        parent_id: AgentId("parent-agent".into()),
-        tiers: Default::default(),
-        parent_budget: Arc::new(Mutex::new(ResourceBudget::new(0, 0, Decimal::ZERO, 0))),
-        parent_model: "parent-model".into(),
-        guidance: None,
-    }
-}
-
-#[test]
-fn real_spawn_agent_tool_definition_includes_model_visible_orchestration_guidance() {
-    let tool = make_real_spawn_agent_tool();
-    let definition = tool.definition();
-
-    assert_eq!(definition.name, "spawn_agent");
-    for expected in [
-        "concrete, bounded, independent subtask",
-        "Do not delegate immediate critical-path blockers",
-        "returns a live child handle, not a final answer",
-        "continue non-overlapping parent work",
-        "child_status for cheap nonblocking inspection",
-        "wait_child_agent for bounded polling or wait-any orchestration",
-        "join_child_agent when the terminal result is needed",
-        "close_child_agent only to clean up a terminal child handle",
-    ] {
-        assert!(
-            definition.description.contains(expected),
-            "spawn_agent description should guide model behavior with phrase {expected:?}; got {:?}",
-            definition.description
-        );
-    }
-}
-
-#[test]
-fn real_spawn_agent_tool_definition_exposes_agent_type_task_budget_and_capabilities() {
-    let tool = make_real_spawn_agent_tool();
-    let definition = tool.definition();
-    let properties = definition
-        .input_schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-        .expect("schema should expose properties");
-
-    for field in ["agent_type", "task", "budget", "capabilities"] {
-        assert!(
-            properties.contains_key(field),
-            "real spawn_agent schema should expose {field}"
-        );
-    }
-
-    let agent_type_description = properties
-        .get("agent_type")
-        .and_then(|schema| schema.get("description"))
-        .and_then(serde_json::Value::as_str)
-        .expect("agent_type schema should include a model-visible description");
-    assert!(
-        agent_type_description.contains("configured child agent type"),
-        "agent_type description should describe configured child agent types; got {agent_type_description:?}"
-    );
-    assert!(
-        !agent_type_description.contains("simulacra.toml"),
-        "agent_type description should not assume a TOML-backed embedding; got {agent_type_description:?}"
-    );
-}
-
-#[test]
-fn real_spawn_agent_tool_budget_schema_requires_all_fields_and_disallows_extras() {
-    let tool = make_real_spawn_agent_tool();
-    let definition = tool.definition();
-    let budget = definition
-        .input_schema
-        .pointer("/properties/budget")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-
-    assert_eq!(
-        budget.get("required"),
-        Some(&serde_json::json!([
-            "max_tokens",
-            "max_turns",
-            "max_cost",
-            "max_sub_agents"
-        ]))
-    );
-    assert_eq!(
-        budget.get("additionalProperties"),
-        Some(&serde_json::Value::Bool(false))
-    );
-}
-
-#[test]
-fn real_spawn_agent_tool_capabilities_schema_matches_spec_shape() {
-    let tool = make_real_spawn_agent_tool();
-    let definition = tool.definition();
-    let capabilities = definition
-        .input_schema
-        .pointer("/properties/capabilities/properties")
-        .and_then(serde_json::Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
-    for field in [
-        "network",
-        "mcp_tools",
-        "shell",
-        "javascript",
-        "python",
-        "paths_write",
-        "paths_read",
-        "spawn_types",
-    ] {
-        assert!(
-            capabilities.contains_key(field),
-            "real spawn_agent capability override schema should include {field}"
-        );
-    }
-}
-
 fn make_real_steer_child_agent_tool() -> SteerChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    SteerChildAgentTool { sender }
+    SteerChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
 }
 
 fn make_real_join_child_agent_tool() -> JoinChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    JoinChildAgentTool { sender }
+    JoinChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
 }
 
 fn make_real_child_status_tool() -> ChildStatusTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    ChildStatusTool { sender }
+    ChildStatusTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
 }
 
 fn make_real_list_child_agent_tool() -> ListChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    ListChildAgentTool { sender }
+    ListChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
 }
 
 fn make_real_wait_child_agent_tool() -> WaitChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    WaitChildAgentTool { sender }
+    WaitChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
 }
 
 fn make_real_close_child_agent_tool() -> CloseChildAgentTool {
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
-    CloseChildAgentTool { sender }
+    CloseChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
 }
 
 #[test]
@@ -660,7 +569,10 @@ async fn steer_child_agent_tool_rejects_empty_child_id_and_blank_message() {
 #[tokio::test]
 async fn steer_child_agent_tool_sends_command_and_returns_queued_status() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = SteerChildAgentTool { sender };
+    let tool = SteerChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_id": "child-1", "message": "look at tests" }),
         &CapabilityToken::default(),
@@ -778,7 +690,10 @@ fn s054_child_orchestration_tool_descriptions_provide_model_visible_guidance() {
 fn s054_child_orchestration_tools_have_documented_schemas() {
     let status = make_real_child_status_tool().definition();
     assert_eq!(status.name, "child_status");
-    assert_eq!(status.input_schema["required"], serde_json::json!(["child_id"]));
+    assert_eq!(
+        status.input_schema["required"],
+        serde_json::json!(["child_id"])
+    );
     assert_eq!(status.input_schema["additionalProperties"], false);
     assert_eq!(
         status.input_schema["properties"]["child_id"]["type"],
@@ -815,21 +730,29 @@ fn s054_child_orchestration_tools_have_documented_schemas() {
     );
     for unsupported_top_level_keyword in ["oneOf", "allOf", "anyOf"] {
         assert!(
-            wait.input_schema.get(unsupported_top_level_keyword).is_none(),
+            wait.input_schema
+                .get(unsupported_top_level_keyword)
+                .is_none(),
             "wait_child_agent schema should avoid top-level {unsupported_top_level_keyword} for Anthropic compatibility; runtime validation still enforces exactly one wait target"
         );
     }
 
     let close = make_real_close_child_agent_tool().definition();
     assert_eq!(close.name, "close_child_agent");
-    assert_eq!(close.input_schema["required"], serde_json::json!(["child_id"]));
+    assert_eq!(
+        close.input_schema["required"],
+        serde_json::json!(["child_id"])
+    );
     assert_eq!(close.input_schema["additionalProperties"], false);
 }
 
 #[tokio::test]
 async fn s054_child_orchestration_tools_reject_invalid_arguments() {
     let status = make_real_child_status_tool()
-        .call(serde_json::json!({ "child_id": "" }), &CapabilityToken::default())
+        .call(
+            serde_json::json!({ "child_id": "" }),
+            &CapabilityToken::default(),
+        )
         .await;
     assert!(matches!(
         status,
@@ -919,7 +842,10 @@ async fn s054_child_orchestration_tools_reject_invalid_arguments() {
 #[tokio::test]
 async fn child_status_tool_sends_command_and_returns_status_json() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = ChildStatusTool { sender };
+    let tool = ChildStatusTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_id": "child-1" }),
         &CapabilityToken::default(),
@@ -936,7 +862,7 @@ async fn child_status_tool_sends_command_and_returns_status_json() {
                 result_tx
                     .send(Ok(simulacra_runtime::ChildStatus {
                         child_id,
-                        agent_type: "researcher".into(),
+                        placement: "researcher".into(),
                         status: ChildAgentStatus::Running,
                         ready: false,
                         elapsed_ms: 12,
@@ -948,22 +874,27 @@ async fn child_status_tool_sends_command_and_returns_status_json() {
     };
 
     let (result, ()) = tokio::join!(call, receive);
+    let value = result.expect("child_status should return status JSON");
     assert_eq!(
-        result.expect("child_status should return status JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-1",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "running",
             "ready": false,
             "elapsed_ms": 12
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 #[tokio::test]
 async fn list_child_agents_tool_sends_command_and_returns_roster_json() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = ListChildAgentTool { sender };
+    let tool = ListChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(serde_json::json!({}), &CapabilityToken::default());
     let receive = async move {
         let message = receiver
@@ -976,7 +907,7 @@ async fn list_child_agents_tool_sends_command_and_returns_roster_json() {
                 result_tx
                     .send(Ok(vec![simulacra_runtime::ChildRosterEntry {
                         child_id: "child-1".into(),
-                        agent_type: "researcher".into(),
+                        placement: "researcher".into(),
                         task: "inspect lifecycle".into(),
                         status: ChildAgentStatus::Running,
                         ready: false,
@@ -989,12 +920,13 @@ async fn list_child_agents_tool_sends_command_and_returns_roster_json() {
     };
 
     let (result, ()) = tokio::join!(call, receive);
+    let value = result.expect("list_child_agents should return roster JSON");
     assert_eq!(
-        result.expect("list_child_agents should return roster JSON"),
+        value,
         serde_json::json!([
             {
                 "child_id": "child-1",
-                "agent_type": "researcher",
+                "placement": "researcher",
                 "task": "inspect lifecycle",
                 "status": "running",
                 "ready": false,
@@ -1002,12 +934,16 @@ async fn list_child_agents_tool_sends_command_and_returns_roster_json() {
             }
         ])
     );
+    assert!(value[0].get("agent_type").is_none());
 }
 
 #[tokio::test]
 async fn wait_child_agent_tool_sends_wait_children_command_and_returns_running_json() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = WaitChildAgentTool { sender };
+    let tool = WaitChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_ids": ["child-1", "child-2"], "timeout_ms": 25 }),
         &CapabilityToken::default(),
@@ -1055,7 +991,10 @@ async fn wait_child_agent_tool_sends_wait_children_command_and_returns_running_j
 #[tokio::test]
 async fn wait_child_agent_tool_sends_command_and_returns_running_or_terminal_json() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = WaitChildAgentTool { sender };
+    let tool = WaitChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_id": "child-1", "timeout_ms": 0 }),
         &CapabilityToken::default(),
@@ -1073,7 +1012,7 @@ async fn wait_child_agent_tool_sends_command_and_returns_running_or_terminal_jso
                 result_tx
                     .send(Ok(simulacra_runtime::WaitChildResult {
                         child_id,
-                        agent_type: None,
+                        placement: None,
                         status: "running".into(),
                         ready: false,
                         terminal: None,
@@ -1098,7 +1037,10 @@ async fn wait_child_agent_tool_sends_command_and_returns_running_or_terminal_jso
 #[tokio::test]
 async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_join_shape() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = WaitChildAgentTool { sender };
+    let tool = WaitChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_id": "child-1", "timeout_ms": 50 }),
         &CapabilityToken::default(),
@@ -1116,12 +1058,12 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
                 result_tx
                     .send(Ok(simulacra_runtime::WaitChildResult {
                         child_id: child_id.clone(),
-                        agent_type: Some("researcher".into()),
+                        placement: Some("researcher".into()),
                         status: "completed".into(),
                         ready: true,
                         terminal: Some(ChildTerminalResult {
                             child_id,
-                            agent_type: "researcher".into(),
+                            placement: "researcher".into(),
                             status: "completed".into(),
                             elapsed_ms: 42,
                             tool_uses: 0,
@@ -1140,7 +1082,7 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
                                     cache_read_input_tokens: 0,
                                     cache_write_input_tokens: 0,
                                 },
-            reported_tool_uses: None,
+                                reported_tool_uses: None,
                                 used_turns: 1,
                                 used_cost: Decimal::ZERO,
                             }),
@@ -1153,11 +1095,12 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
     };
 
     let (result, ()) = tokio::join!(call, receive);
+    let value = result.expect("terminal wait should be non-error JSON");
     assert_eq!(
-        result.expect("terminal wait should be non-error JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-1",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "completed",
             "ready": true,
             "exit_reason": "completed",
@@ -1172,12 +1115,16 @@ async fn wait_child_agent_tool_returns_terminal_success_json_without_consuming_j
             "vfs_changes": []
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 #[tokio::test]
 async fn wait_child_agent_tool_returns_failed_terminal_json() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = WaitChildAgentTool { sender };
+    let tool = WaitChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_id": "child-1", "timeout_ms": 50 }),
         &CapabilityToken::default(),
@@ -1192,12 +1139,12 @@ async fn wait_child_agent_tool_returns_failed_terminal_json() {
                 result_tx
                     .send(Ok(simulacra_runtime::WaitChildResult {
                         child_id: child_id.clone(),
-                        agent_type: Some("researcher".into()),
+                        placement: Some("researcher".into()),
                         status: "failed".into(),
                         ready: true,
                         terminal: Some(ChildTerminalResult {
                             child_id,
-                            agent_type: "researcher".into(),
+                            placement: "researcher".into(),
                             status: "failed".into(),
                             elapsed_ms: 42,
                             tool_uses: 0,
@@ -1211,11 +1158,12 @@ async fn wait_child_agent_tool_returns_failed_terminal_json() {
     };
 
     let (result, ()) = tokio::join!(call, receive);
+    let value = result.expect("failed terminal wait should be non-error JSON");
     assert_eq!(
-        result.expect("failed terminal wait should be non-error JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-1",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "failed",
             "ready": true,
             "exit_reason": "failed",
@@ -1230,12 +1178,16 @@ async fn wait_child_agent_tool_returns_failed_terminal_json() {
             "vfs_changes": []
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 #[tokio::test]
 async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = WaitChildAgentTool { sender };
+    let tool = WaitChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_ids": ["child-1", "child-2"], "timeout_ms": 50 }),
         &CapabilityToken::default(),
@@ -1254,7 +1206,7 @@ async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
                         ready: true,
                         terminal: Some(ChildTerminalResult {
                             child_id: AgentId("child-2".into()),
-                            agent_type: "researcher".into(),
+                            placement: "researcher".into(),
                             status: "failed".into(),
                             elapsed_ms: 42,
                             tool_uses: 0,
@@ -1268,11 +1220,12 @@ async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
     };
 
     let (result, ()) = tokio::join!(call, receive);
+    let value = result.expect("failed wait-any terminal should be non-error JSON");
     assert_eq!(
-        result.expect("failed wait-any terminal should be non-error JSON"),
+        value,
         serde_json::json!({
             "child_id": "child-2",
-            "agent_type": "researcher",
+            "placement": "researcher",
             "status": "failed",
             "ready": true,
             "exit_reason": "failed",
@@ -1287,12 +1240,16 @@ async fn wait_child_agent_tool_returns_failed_wait_children_terminal_json() {
             "vfs_changes": []
         })
     );
+    assert!(value.get("agent_type").is_none());
 }
 
 #[tokio::test]
 async fn close_child_agent_tool_sends_command_and_returns_closed_status() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
-    let tool = CloseChildAgentTool { sender };
+    let tool = CloseChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    };
     let call = tool.call(
         serde_json::json!({ "child_id": "child-1" }),
         &CapabilityToken::default(),
@@ -1328,6 +1285,7 @@ async fn s054_child_orchestration_tools_report_closed_supervisor_channels() {
 
     let result = ChildStatusTool {
         sender: sender.clone(),
+        caller_id: AgentId("parent-agent".into()),
     }
     .call(
         serde_json::json!({ "child_id": "child-1" }),
@@ -1341,6 +1299,7 @@ async fn s054_child_orchestration_tools_report_closed_supervisor_channels() {
 
     let result = ListChildAgentTool {
         sender: sender.clone(),
+        caller_id: AgentId("parent-agent".into()),
     }
     .call(serde_json::json!({}), &CapabilityToken::default())
     .await;
@@ -1351,6 +1310,7 @@ async fn s054_child_orchestration_tools_report_closed_supervisor_channels() {
 
     let result = WaitChildAgentTool {
         sender: sender.clone(),
+        caller_id: AgentId("parent-agent".into()),
     }
     .call(
         serde_json::json!({ "child_id": "child-1", "timeout_ms": 0 }),
@@ -1362,12 +1322,15 @@ async fn s054_child_orchestration_tools_report_closed_supervisor_channels() {
         Err(ToolError::ExecutionFailed(message)) if message.contains("supervisor channel closed")
     ));
 
-    let result = CloseChildAgentTool { sender }
-        .call(
-            serde_json::json!({ "child_id": "child-1" }),
-            &CapabilityToken::default(),
-        )
-        .await;
+    let result = CloseChildAgentTool {
+        sender,
+        caller_id: AgentId("parent-agent".into()),
+    }
+    .call(
+        serde_json::json!({ "child_id": "child-1" }),
+        &CapabilityToken::default(),
+    )
+    .await;
     assert!(matches!(
         result,
         Err(ToolError::ExecutionFailed(message)) if message.contains("supervisor channel closed")

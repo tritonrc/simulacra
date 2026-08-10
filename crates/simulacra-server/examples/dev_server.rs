@@ -142,6 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             description: None,
         },
         agent_types: Default::default(),
+        child_placements: Default::default(),
         integrations: Default::default(),
         tenants: config_tenants,
         mcp: dev_mcp_url.map(|url| simulacra_config::McpConfig {

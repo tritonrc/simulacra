@@ -86,9 +86,7 @@ async fn main() {
     agent_types.insert(
         "default".to_string(),
         simulacra_config::AgentTypeConfig {
-            backend: Default::default(),
             model: "claude-sonnet-4-6".into(),
-            acp_profile: None,
             system_prompt: None,
             max_turns: Some(5),
             max_tokens: Some(30000),
@@ -108,7 +106,7 @@ async fn main() {
             }),
             skills: vec![],
             restart_policy: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
         },
     );
 
@@ -136,6 +134,7 @@ async fn main() {
             description: None,
         },
         agent_types,
+        child_placements: HashMap::new(),
         integrations,
         tenants: HashMap::new(),
         mcp: None,

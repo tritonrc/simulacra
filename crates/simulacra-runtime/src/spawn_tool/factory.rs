@@ -24,66 +24,92 @@ impl ActivitySink for CountingActivitySink {
     }
 }
 
-/// Factory that creates child AgentLoop instances for the supervisor.
 pub struct AgentTaskFactory {
     pub config: SimulacraConfig,
     pub provider_kind: ProviderKind,
     pub vfs: Arc<dyn VirtualFs>,
     pub journal: Arc<dyn JournalStorage>,
-    /// S019: Parent's activity sink for creating ForwardingActivitySink
-    /// on child agent spawns.
     pub activity_sink: Arc<dyn ActivitySink>,
-    /// Parent's capability token for three-way capability intersection.
-    /// The effective child capability = config_cap ∩ spawn_override ∩ parent_cap.
-    #[allow(dead_code)]
     pub parent_capability: CapabilityToken,
-    /// Effective tenant/host MCP server grant resolved by the embedding
-    /// runtime. This is independent of per-tool capability patterns.
     pub allowed_mcp_servers: Option<Vec<String>>,
-    /// Supervisor channel sender — passed to child `SpawnAgentTool` instances
-    /// so children with `spawn_types` can spawn their own descendants (S018 §173).
     pub supervisor_sender: Option<tokio::sync::mpsc::Sender<SupervisorMessage>>,
-    /// The parent agent's model, used as fallback for generic sub-agents
-    /// when no tier is specified or the tier is not found in config.
     pub parent_model: String,
-    /// Governance hook pipeline, shared with child agents (S026).
     pub pipeline: Option<Arc<simulacra_hooks::pipeline::HookPipeline>>,
-    /// Script executor for bounded concurrency control, shared across all agents.
-    /// When present, child `AgentCell`s receive this executor so JS/Python/WASM
-    /// scripts share the same concurrency semaphore as the root agent.
     pub script_executor: Option<simulacra_sandbox::ScriptExecutor>,
-    /// Optional caller-provided hook for inheriting host mediation context
-    /// that lives above the runtime crate, such as integration-backed fetch().
     pub child_cell_configurator: Option<ChildCellConfigurator>,
-    /// Optional caller-provided hook for registering extra mediated tools that
-    /// are feature- or crate-local to the embedding binary, such as `py_exec`.
     pub child_tool_registrar: Option<ChildToolRegistrar>,
-    /// Optional provider factory for child agents. Production callers leave
-    /// this unset so children use the normal provider adapter; tests and
-    /// headless harnesses can inject scripted child providers.
     pub child_provider_factory: Option<ChildProviderFactory>,
-    /// Optional ACP runtime for agent types configured with `backend = "acp"`.
     pub acp_child_runtime: Option<Arc<dyn AcpChildRuntime>>,
 }
 
 impl crate::TaskFactory for AgentTaskFactory {
     fn validate_spawn_config(&self, spawn_config: &SpawnConfig) -> Result<(), RuntimeError> {
-        let Some(agent_type_name) = spawn_config.agent_type.as_deref() else {
-            return Ok(());
-        };
-        let Some(agent_type_config) = self.config.agent_types.get(agent_type_name) else {
-            return Ok(());
-        };
-        if agent_type_config.backend == AgentBackend::Acp && self.acp_child_runtime.is_none() {
+        let placement = self
+            .config
+            .child_placements
+            .get(&spawn_config.placement)
+            .ok_or_else(|| unknown_placement_error(&self.config, &spawn_config.placement))?;
+        validate_placement_budget(&spawn_config.budget, placement)?;
+        if placement.backend == AgentBackend::Acp && self.acp_child_runtime.is_none() {
             return Err(RuntimeError::AcpChildRuntimeMissing {
-                agent_type: agent_type_name.to_string(),
-                acp_profile: agent_type_config
+                placement: spawn_config.placement.clone(),
+                acp_profile: placement
                     .acp_profile
                     .clone()
                     .unwrap_or_else(|| "<missing>".to_string()),
             });
         }
         Ok(())
+    }
+
+    fn placement_backend(&self, spawn_config: &SpawnConfig) -> AgentBackend {
+        self.config
+            .child_placements
+            .get(&spawn_config.placement)
+            .map_or(AgentBackend::Native, |placement| placement.backend)
+    }
+
+    fn prepare_spawn_config(&self, spawn_config: &mut SpawnConfig) -> Result<(), RuntimeError> {
+        self.prepare_spawn_config_for_caller(spawn_config, &self.parent_capability)
+    }
+
+    fn prepare_spawn_config_for_caller(
+        &self,
+        spawn_config: &mut SpawnConfig,
+        caller_capability: &CapabilityToken,
+    ) -> Result<(), RuntimeError> {
+        let placement = self
+            .config
+            .child_placements
+            .get(&spawn_config.placement)
+            .ok_or_else(|| unknown_placement_error(&self.config, &spawn_config.placement))?;
+        let effective_capability = effective_spawn_capability(
+            placement,
+            spawn_config.capability.as_ref(),
+            caller_capability,
+        );
+        run_spawn_before_hook(
+            self.pipeline.as_ref(),
+            &self.journal,
+            spawn_config,
+            placement.backend,
+            effective_capability,
+        )?;
+        validate_placement_budget(&spawn_config.budget, placement)
+    }
+
+    fn after_spawn(
+        &self,
+        spawn_config: &SpawnConfig,
+        result: &crate::SpawnResult,
+    ) -> Result<(), RuntimeError> {
+        run_spawn_after_hook(
+            self.pipeline.as_ref(),
+            &self.journal,
+            spawn_config,
+            self.placement_backend(spawn_config),
+            result,
+        )
     }
 
     fn create_task(
@@ -101,12 +127,22 @@ impl crate::TaskFactory for AgentTaskFactory {
         cancellation: CancellationToken,
         input_queue: AgentInputQueue,
     ) -> BoxTaskFuture {
-        let agent_type_config = spawn_config
-            .agent_type
-            .as_ref()
-            .and_then(|at| self.config.agent_types.get(at))
-            .cloned();
+        let budget = Arc::new(Mutex::new(spawn_config.budget.clone()));
+        self.create_task_with_input_and_budget(spawn_config, cancellation, input_queue, budget)
+    }
 
+    fn create_task_with_input_and_budget(
+        &self,
+        spawn_config: SpawnConfig,
+        cancellation: CancellationToken,
+        input_queue: AgentInputQueue,
+        child_budget: Arc<Mutex<ResourceBudget>>,
+    ) -> BoxTaskFuture {
+        let placement_config = self
+            .config
+            .child_placements
+            .get(&spawn_config.placement)
+            .cloned();
         let provider_kind = self.provider_kind.clone();
         let vfs = Arc::clone(&self.vfs);
         let journal = Arc::clone(&self.journal);
@@ -114,8 +150,6 @@ impl crate::TaskFactory for AgentTaskFactory {
         let parent_sink = Arc::clone(&self.activity_sink);
         let parent_capability = self.parent_capability.clone();
         let supervisor_sender = self.supervisor_sender.clone();
-        let tiers_config = self.config.tiers.clone();
-        let parent_model = self.parent_model.clone();
         let pipeline = self.pipeline.clone();
         let script_executor = self.script_executor.clone();
         let child_cell_configurator = self.child_cell_configurator.clone();
@@ -126,170 +160,59 @@ impl crate::TaskFactory for AgentTaskFactory {
         let allowed_mcp_servers = self.allowed_mcp_servers.clone();
 
         Box::pin(async move {
-            let mut input_queue = Some(input_queue);
-            // === GENERIC MODE ===
-            if spawn_config.agent_type.is_none() {
-                let system_prompt = spawn_config
-                    .system_prompt
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+            let placement_config = placement_config
+                .ok_or_else(|| unknown_placement_error(&runtime_config, &spawn_config.placement))?;
+            let placement_name = spawn_config.placement.clone();
+            // Supervisor preparation resolves placement ∩ immediate caller ∩
+            // optional caller attenuation, then hooks may narrow it further.
+            // Once present, that token is authoritative and must not be
+            // recomputed (notably, omitted-memory inheritance is model-input
+            // behavior and must not regrant memory removed by a hook).
+            let effective_capability = spawn_config.capability.clone().unwrap_or_else(|| {
+                effective_spawn_capability(&placement_config, None, &parent_capability)
+            });
 
-                tracing::info!(
-                    simulacra.agent.system_prompt_length = system_prompt.len(),
-                    "generic agent spawned with inline system prompt"
-                );
-
-                let model =
-                    resolve_tier_model(spawn_config.tier.as_deref(), &tiers_config, &parent_model);
-
-                // Two-way capability intersection: parent ∩ override (no config layer).
-                // W1: when the override doesn't author memory, inherit parent memory
-                // before intersecting so the child doesn't silently lose memory access.
-                let mut effective_capability = match spawn_config.capability {
-                    Some(ref override_cap) => {
-                        let override_with_memory =
-                            inherit_memory_when_override_unset(override_cap, &parent_capability);
-                        parent_capability.intersect(&override_with_memory)
-                    }
-                    None => parent_capability.clone(),
-                };
-                // Generic agents are leaf workers — explicitly zero out spawn_types
-                // so the capability token reflects the invariant (not just the tool registry).
-                effective_capability.spawn_types = vec![];
-
-                let child_config = AgentLoopConfig {
-                    agent_id: spawn_config.agent_id.clone(),
-                    system_prompt,
-                    model: model.clone(),
-                    max_turns: spawn_config.budget.max_turns,
-                    capability: effective_capability,
-                };
-
-                let provider = build_child_provider(
-                    child_provider_factory.as_ref(),
-                    &provider_kind,
-                    &child_config.model,
-                )?;
-                let child_env = build_child_environment(ChildEnvironmentSpec {
-                    inherited_vfs: Arc::clone(&vfs),
-                    inherited_journal: Arc::clone(&journal),
-                    spawn_config: &spawn_config,
-                    child_config: &child_config,
-                    agent_type_name: "generic",
-                    pipeline: pipeline.clone(),
-                    script_executor: script_executor.clone(),
-                    cell_configurator: child_cell_configurator.clone(),
-                    tool_registrar: child_tool_registrar.clone(),
-                    spawn_tool: None,
-                    parent_sink,
-                    runtime_config: None,
-                    skill_names: &[],
-                    allowed_mcp_servers: None,
-                })?;
-
-                run_spawn_before_hook(
-                    pipeline.as_ref(),
-                    "generic",
-                    &child_config.system_prompt,
-                    &spawn_config.budget,
-                )?;
-
-                let mut child_loop = AgentLoop::new(
-                    child_config,
-                    provider,
-                    child_env.registry,
-                    Box::new(simulacra_context::ObservationMaskingStrategy::new(5)),
-                    child_env.proc.journal,
-                    spawn_config.budget,
-                    Some(child_env.sink),
-                    pipeline.clone(),
-                );
-                child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
-                child_loop.set_cancellation_token(cancellation.clone());
-                if let Some(input_queue) = input_queue.take() {
-                    child_loop.set_input_queue(input_queue);
-                }
-
-                let result = child_loop.run(&task).await;
-                run_spawn_after_hook(pipeline.as_ref(), "generic", &result);
-
-                return result;
-            }
-
-            // === CONFIGURED MODE (existing path, agent_type is Some) ===
-            let agent_type_config = agent_type_config.ok_or_else(|| {
-                RuntimeError::Session(format!(
-                    "unknown agent_type: {}",
-                    spawn_config.agent_type.as_deref().unwrap_or("<generic>")
-                ))
-            })?;
-
-            let agent_type_name = spawn_config
-                .agent_type
-                .clone()
-                .unwrap_or_else(|| "generic".to_string());
-            let capability = build_capability_token(&agent_type_config);
-            let effective_capability = match spawn_config.capability {
-                Some(ref override_cap) => {
-                    let override_with_memory =
-                        inherit_memory_when_override_unset(override_cap, &capability);
-                    capability
-                        .intersect(&override_with_memory)
-                        .intersect(&parent_capability)
-                }
-                None => capability.intersect(&parent_capability),
-            };
-
-            if agent_type_config.backend == AgentBackend::Acp {
-                let hook_system_prompt = agent_type_config.system_prompt.as_deref().unwrap_or("");
-                run_spawn_before_hook(
-                    pipeline.as_ref(),
-                    &agent_type_name,
-                    hook_system_prompt,
-                    &spawn_config.budget,
-                )?;
-
-                let acp_profile = agent_type_config
+            if placement_config.backend == AgentBackend::Acp {
+                let acp_profile = placement_config
                     .acp_profile
                     .clone()
                     .filter(|profile| !profile.trim().is_empty())
                     .ok_or_else(|| {
                         RuntimeError::Session(format!(
-                            "agent_type {agent_type_name} uses ACP backend but has no acp_profile"
+                            "placement {placement_name:?} has no acp_profile"
                         ))
                     })?;
                 let runtime =
                     acp_child_runtime.ok_or_else(|| RuntimeError::AcpChildRuntimeMissing {
-                        agent_type: agent_type_name.clone(),
+                        placement: placement_name.clone(),
                         acp_profile: acp_profile.clone(),
                     })?;
+                let immediate_parent_sink = parent_sink
+                    .immediate_parent_sink(&spawn_config.parent_id)
+                    .unwrap_or_else(|| Arc::clone(&parent_sink));
                 let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
                     spawn_config.agent_id.0.clone(),
-                    agent_type_name.clone(),
-                    parent_sink,
+                    placement_name.clone(),
+                    immediate_parent_sink,
                 ));
+                parent_sink.register_child_sink(spawn_config.agent_id.clone(), Arc::clone(&sink));
                 let tool_finishes = Arc::new(AtomicU64::new(0));
                 let sink: Arc<dyn ActivitySink> =
                     Arc::new(CountingActivitySink::new(sink, Arc::clone(&tool_finishes)));
                 let request = AcpChildRequest {
                     child_id: spawn_config.agent_id.clone(),
                     parent_id: spawn_config.parent_id.clone(),
-                    agent_type: agent_type_name.clone(),
+                    placement: placement_name.clone(),
                     acp_profile,
+                    instructions: spawn_config.instructions.clone(),
                     task: task.clone(),
                     budget: spawn_config.budget.clone(),
                     capability: effective_capability,
                 };
-                let Some(acp_input_queue) = input_queue.take() else {
-                    return Err(RuntimeError::Session(
-                        "ACP child input queue already consumed".into(),
-                    ));
-                };
                 let result = runtime
-                    .start_child(request, cancellation, sink, acp_input_queue)
-                    .await;
-                run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);
+                    .start_child(request, cancellation, sink, input_queue)
+                    .await
+                    .map_err(RuntimeError::acp_child_runtime);
                 let mut output = result?;
                 let activity_tool_uses = tool_finishes.load(std::sync::atomic::Ordering::Relaxed);
                 if activity_tool_uses > 0 {
@@ -305,15 +228,20 @@ impl crate::TaskFactory for AgentTaskFactory {
                 return Ok(output);
             }
 
-            let model = agent_type_config.model.clone();
-            let system_prompt = agent_type_config
-                .system_prompt
+            let model = placement_config.model.clone().unwrap_or_default();
+            let system_prompt = spawn_config
+                .instructions
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
-
-            // Check before moving effective_capability into child_config.
-            let child_can_spawn = !effective_capability.spawn_types.is_empty();
-
+            let mut descendant_placements = effective_capability
+                .spawn_placements
+                .iter()
+                .filter(|placement| runtime_config.child_placements.contains_key(*placement))
+                .cloned()
+                .collect::<Vec<_>>();
+            descendant_placements.sort();
+            descendant_placements.dedup();
+            let child_has_spawn_placements = !descendant_placements.is_empty();
             let child_config = AgentLoopConfig {
                 agent_id: spawn_config.agent_id.clone(),
                 system_prompt,
@@ -321,46 +249,36 @@ impl crate::TaskFactory for AgentTaskFactory {
                 max_turns: spawn_config.budget.max_turns,
                 capability: effective_capability,
             };
-
             let provider = build_child_provider(
                 child_provider_factory.as_ref(),
                 &provider_kind,
                 &child_config.model,
             )?;
-            let spawn_tool = if child_can_spawn {
-                supervisor_sender.clone().map(|sender| ChildSpawnToolSpec {
+            let spawn_tool = if child_has_spawn_placements {
+                supervisor_sender.map(|sender| ChildSpawnToolSpec {
                     sender,
-                    can_spawn: agent_type_config.can_spawn.clone(),
-                    tiers: tiers_config.clone(),
-                    parent_model: child_config.model.clone(),
+                    allowed_placements: descendant_placements,
                 })
             } else {
                 None
             };
             let child_env = build_child_environment(ChildEnvironmentSpec {
-                inherited_vfs: Arc::clone(&vfs),
-                inherited_journal: Arc::clone(&journal),
+                inherited_vfs: vfs,
+                inherited_journal: journal,
                 spawn_config: &spawn_config,
                 child_config: &child_config,
-                agent_type_name: &agent_type_name,
+                budget: child_budget,
+                placement_name: &placement_name,
                 pipeline: pipeline.clone(),
-                script_executor: script_executor.clone(),
-                cell_configurator: child_cell_configurator.clone(),
-                tool_registrar: child_tool_registrar.clone(),
+                script_executor,
+                cell_configurator: child_cell_configurator,
+                tool_registrar: child_tool_registrar,
                 spawn_tool,
                 parent_sink,
                 runtime_config: Some(&runtime_config),
-                skill_names: &agent_type_config.skills,
+                skill_names: &placement_config.skills,
                 allowed_mcp_servers: allowed_mcp_servers.as_deref(),
             })?;
-
-            run_spawn_before_hook(
-                pipeline.as_ref(),
-                &agent_type_name,
-                &child_config.system_prompt,
-                &spawn_config.budget,
-            )?;
-
             let mut child_loop = AgentLoop::new(
                 child_config,
                 provider,
@@ -373,16 +291,73 @@ impl crate::TaskFactory for AgentTaskFactory {
             );
             child_loop.set_proc_budget_mirror(child_env.proc.budget, child_env.proc.turn);
             child_loop.set_cancellation_token(cancellation);
-            if let Some(input_queue) = input_queue.take() {
-                child_loop.set_input_queue(input_queue);
-            }
-
-            let result = child_loop.run(&task).await;
-            run_spawn_after_hook(pipeline.as_ref(), &agent_type_name, &result);
-
-            result
+            child_loop.set_input_queue(input_queue);
+            child_loop.run(&task).await
         })
     }
+}
+
+fn effective_spawn_capability(
+    placement: &simulacra_config::ChildPlacementConfig,
+    requested: Option<&CapabilityToken>,
+    parent: &CapabilityToken,
+) -> CapabilityToken {
+    let configured = build_child_placement_capability(placement);
+    match requested {
+        Some(requested) => configured.intersect(requested).intersect(parent),
+        None => configured.intersect(parent),
+    }
+}
+
+fn unknown_placement_error(config: &SimulacraConfig, requested: &str) -> RuntimeError {
+    let mut available = config.child_placements.keys().cloned().collect::<Vec<_>>();
+    available.sort();
+    let available_suffix = if available.is_empty() {
+        String::new()
+    } else {
+        format!("; available placements: {}", available.join(", "))
+    };
+    RuntimeError::Session(format!(
+        "unknown child placement {requested:?}{available_suffix}"
+    ))
+}
+
+fn validate_placement_budget(
+    requested: &ResourceBudget,
+    placement: &simulacra_config::ChildPlacementConfig,
+) -> Result<(), RuntimeError> {
+    validate_placement_limit("max_tokens", requested.max_tokens, placement.max_tokens)?;
+    validate_placement_limit("max_turns", requested.max_turns, placement.max_turns)?;
+    validate_placement_limit("max_cost", requested.max_cost, placement.max_cost)?;
+    validate_placement_limit(
+        "max_sub_agents",
+        requested.max_sub_agents,
+        placement.max_sub_agents,
+    )
+}
+
+fn validate_placement_limit<T>(
+    field: &str,
+    requested: T,
+    maximum: Option<T>,
+) -> Result<(), RuntimeError>
+where
+    T: Copy + Default + PartialEq + PartialOrd + std::fmt::Display,
+{
+    let Some(maximum) = maximum.filter(|value| *value != T::default()) else {
+        return Ok(());
+    };
+    if requested == T::default() {
+        return Err(RuntimeError::Session(format!(
+            "{field} requested {requested} (unlimited), but placement limit is {maximum}"
+        )));
+    }
+    if requested > maximum {
+        return Err(RuntimeError::Session(format!(
+            "{field} requested {requested} exceeds placement limit {maximum}"
+        )));
+    }
+    Ok(())
 }
 
 fn build_child_provider(

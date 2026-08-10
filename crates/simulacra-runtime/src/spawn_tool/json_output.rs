@@ -14,7 +14,7 @@ fn child_success_json(terminal: ChildTerminalResult, output: AgentLoopOutput) ->
 
     serde_json::json!({
         "child_id": terminal.child_id.0,
-        "agent_type": terminal.agent_type,
+        "placement": terminal.placement,
         "status": terminal.status,
         "ready": true,
         "exit_reason": exit_reason_str,
@@ -33,7 +33,7 @@ fn child_success_json(terminal: ChildTerminalResult, output: AgentLoopOutput) ->
 fn child_failed_json(terminal: ChildTerminalResult, error: String) -> serde_json::Value {
     serde_json::json!({
         "child_id": terminal.child_id.0,
-        "agent_type": terminal.agent_type,
+        "placement": terminal.placement,
         "status": terminal.status,
         "ready": true,
         "exit_reason": terminal.status,
@@ -68,7 +68,7 @@ pub(super) fn child_terminal_json(
 pub(super) fn child_status_json(status: ChildStatus) -> serde_json::Value {
     serde_json::json!({
         "child_id": status.child_id.0,
-        "agent_type": status.agent_type,
+        "placement": status.placement,
         "status": status.status,
         "ready": status.ready,
         "elapsed_ms": status.elapsed_ms
@@ -82,7 +82,7 @@ pub(super) fn list_children_json(children: Vec<ChildRosterEntry>) -> serde_json:
             .map(|child| {
                 serde_json::json!({
                     "child_id": child.child_id,
-                    "agent_type": child.agent_type,
+                    "placement": child.placement,
                     "task": child.task,
                     "status": child.status,
                     "ready": child.ready,
@@ -97,11 +97,20 @@ pub(super) fn wait_child_json(wait: WaitChildResult) -> serde_json::Value {
     if let Some(terminal) = wait.terminal {
         child_terminal_json(terminal, Some(wait.status))
     } else {
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "child_id": wait.child_id.0,
             "status": "running",
             "ready": false
-        })
+        });
+        if let Some(placement) = wait.placement
+            && let serde_json::Value::Object(object) = &mut json
+        {
+            object.insert(
+                "placement".to_string(),
+                serde_json::Value::String(placement),
+            );
+        }
+        json
     }
 }
 

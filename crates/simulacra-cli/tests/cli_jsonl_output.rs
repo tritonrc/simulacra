@@ -293,13 +293,13 @@ fn spawn_agent_tool_call_response() -> ProviderResponse {
                 id: "call-spawn-researcher".into(),
                 name: "spawn_agent".into(),
                 arguments: json!({
-                    "agent_type": "researcher",
+                    "placement": "researcher",
                     "task": "summarize the fixture",
                     "budget": {
                         "max_tokens": 128,
                         "max_turns": 1,
                         "max_cost": "0",
-                        "max_sub_agents": 0
+                        "max_sub_agents": 1
                     }
                 }),
             }],
@@ -354,7 +354,7 @@ model = "claude-sonnet-4-20250514"
 max_turns = 7
 max_tokens = 4321
 max_sub_agents = 2
-can_spawn = ["researcher"]
+allowed_child_placements = ["researcher"]
 
 [agent_types.default.capabilities]
 shell = true
@@ -362,12 +362,13 @@ javascript = true
 paths_read = ["/workspace/**"]
 paths_write = ["/workspace/**"]
 
-[agent_types.researcher]
+[child_placements.researcher]
+backend = "native"
 model = "claude-sonnet-4-20250514"
 max_turns = 1
 max_tokens = 128
 
-[agent_types.researcher.capabilities]
+[child_placements.researcher.capabilities]
 paths_read = ["/workspace/**"]
 
 [task]
@@ -679,8 +680,9 @@ fn jsonl_headless_spawn_agent_returns_handle_and_emits_child_spawned_without_han
     let child_id = child_spawned["event"]["child_id"]
         .as_str()
         .expect("ChildSpawned should include child_id");
-    assert!(child_id.starts_with("child-researcher-"));
-    assert_eq!(child_spawned["event"]["agent_type"], "researcher");
+    assert!(child_id.starts_with("child-"));
+    assert_eq!(child_spawned["event"]["placement"], "researcher");
+    assert!(child_spawned["event"].get("agent_type").is_none());
     assert_eq!(child_spawned["event"]["task"], "summarize the fixture");
 
     let tool_output = lines
@@ -695,7 +697,7 @@ fn jsonl_headless_spawn_agent_returns_handle_and_emits_child_spawned_without_han
     let handle: Value =
         serde_json::from_str(tool_output_line).expect("spawn_agent tool output should be JSON");
     assert_eq!(handle["child_id"], child_id);
-    assert_eq!(handle["agent_type"], "researcher");
+    assert_eq!(handle["placement"], "researcher");
     assert_eq!(handle["status"], "running");
 
     let types = activity_types(&lines);
@@ -961,12 +963,14 @@ fn activity_envelopes_preserve_child_and_workflow_event_payloads() {
         "kind": "activity",
         "event": ActivityEvent::ChildActivity {
             child_id: "child-1".into(),
-            agent_type: "researcher".into(),
+            placement: "researcher".into(),
             event: Box::new(ActivityEvent::Token { text: "nested".into() }),
         }
     });
     assert_eq!(child["event"]["type"], "ChildActivity");
     assert_eq!(child["event"]["child_id"], "child-1");
+    assert_eq!(child["event"]["placement"], "researcher");
+    assert!(child["event"].get("agent_type").is_none());
     assert_eq!(child["event"]["event"]["type"], "Token");
     assert_eq!(child["event"]["event"]["text"], "nested");
 

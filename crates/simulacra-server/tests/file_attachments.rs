@@ -25,15 +25,13 @@ fn engine_config() -> SimulacraConfig {
     agent_types.insert(
         "worker".to_string(),
         AgentTypeConfig {
-            backend: Default::default(),
             model: "ollama:llama3".to_string(),
-            acp_profile: None,
             system_prompt: Some("You are the worker.".to_string()),
             skills: vec![],
             max_turns: Some(12),
             max_tokens: Some(8_192),
             max_sub_agents: Some(0),
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec![],
@@ -67,6 +65,7 @@ fn engine_config() -> SimulacraConfig {
             description: None,
         },
         agent_types,
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants,
         mcp: None,

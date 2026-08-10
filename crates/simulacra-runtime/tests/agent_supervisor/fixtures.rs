@@ -2,6 +2,25 @@ fn default_budget() -> ResourceBudget {
     ResourceBudget::new(100_000, 10, Decimal::new(100, 0), 5)
 }
 
+fn leaf_child_budget() -> ResourceBudget {
+    ResourceBudget::new(10_000, 2, Decimal::new(10, 0), 1)
+}
+
+fn parent_capability_for(placement: &str) -> CapabilityToken {
+    CapabilityToken {
+        spawn_placements: vec![placement.into()],
+        ..CapabilityToken::default()
+    }
+}
+
+fn worker_parent_capability() -> CapabilityToken {
+    parent_capability_for("worker")
+}
+
+fn install_test_journal(supervisor: &mut AgentSupervisor) {
+    supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
+}
+
 fn default_config() -> AgentLoopConfig {
     AgentLoopConfig {
         agent_id: AgentId("test-agent".into()),
@@ -43,11 +62,9 @@ fn spawn_config(
         capability: Some(capability),
         budget,
         restart_strategy,
-        agent_type: Some(String::new()),
+        placement: "worker".into(),
         task: String::new(),
-        system_prompt: None,
-        tier: None,
-        resolved_tier: None,
+        instructions: None,
     }
 }
 
@@ -60,6 +77,15 @@ fn spawn_config(
 struct NoopTaskFactory;
 
 impl TaskFactory for NoopTaskFactory {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        match config.placement.as_str() {
+            "worker" | "workspace" => Ok(()),
+            placement => Err(RuntimeError::Session(format!(
+                "unknown child placement {placement:?}; configured test placements: worker, workspace"
+            ))),
+        }
+    }
+
     fn create_task(&self, _config: SpawnConfig, _token: CancellationToken) -> BoxTaskFuture {
         Box::pin(async {
             Ok(AgentLoopOutput {
@@ -238,6 +264,15 @@ impl FakeTaskFactory {
 }
 
 impl TaskFactory for FakeTaskFactory {
+    fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+        match config.placement.as_str() {
+            "worker" | "researcher" => Ok(()),
+            placement => Err(RuntimeError::Session(format!(
+                "unknown child placement {placement:?}; configured test placements: researcher, worker"
+            ))),
+        }
+    }
+
     fn create_task(&self, config: SpawnConfig, cancellation: CancellationToken) -> BoxTaskFuture {
         let agent_id = config.agent_id.0.clone();
         let plan = self

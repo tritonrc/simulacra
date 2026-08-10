@@ -559,7 +559,7 @@ fn build_interactive_config(
         task: task.map(|value| value.to_string()),
         requested_session_id: requested_session_id.map(|value| value.to_string()),
         tool_definitions: boot.tool_definitions.clone(),
-        can_spawn: vec![],
+        allowed_child_placements: vec![],
         skill_catalog: vec![],
     }
 }
@@ -1181,17 +1181,15 @@ mod cancellation {
     }
 
     #[test]
-    fn ctrl_c_during_tool_execution_returns_cancelled_by_user_error_result() {
+    fn legacy_sync_tool_cancellation_never_fabricates_a_child_cancellation_result() {
         let provider = Arc::new(FakeProvider::success("ok"));
         let storage: Arc<dyn SessionStorage> = Arc::new(InMemorySessionStorage::new());
         let mut session = make_session(None, None, provider, storage);
 
         let view = session.cancel_tool_execution();
         assert!(
-            view.tool_results_to_model.iter().any(|message| {
-                message.role == Role::Tool && message.content.contains("Cancelled by user")
-            }),
-            "tool cancellation should be reported back to the model"
+            view.tool_results_to_model.is_empty(),
+            "the synchronous compatibility facade cannot await a supervisor acknowledgement or claim cancellation"
         );
     }
 
@@ -1510,7 +1508,7 @@ mod error_handling {
             task: Some("hello".into()),
             requested_session_id: Some("rate-limit-test".into()),
             tool_definitions: vec![],
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         };
         // TestIo with no lines — read_line returns None (EOF) after the task turn
@@ -1610,7 +1608,7 @@ mod error_handling {
             task: Some("hello".into()),
             requested_session_id: Some("retry-success-test".into()),
             tool_definitions: vec![],
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         };
         let io = TestIo::tty();
@@ -1680,7 +1678,7 @@ mod error_handling {
             task: Some("hello".into()),
             requested_session_id: Some("retry-exhaust-test".into()),
             tool_definitions: vec![],
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         };
         let io = TestIo::tty();
@@ -1728,7 +1726,7 @@ mod error_handling {
             task: Some("hello".into()),
             requested_session_id: Some("no-retry-test".into()),
             tool_definitions: vec![],
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         };
         let io = TestIo::tty();
@@ -1782,7 +1780,7 @@ mod error_handling {
             task: Some("hello".into()),
             requested_session_id: Some("server-err-retry-test".into()),
             tool_definitions: vec![],
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         };
         let io = TestIo::tty();
@@ -1900,7 +1898,7 @@ mod integration {
             task: Some("prove delegation".into()),
             requested_session_id: Some("agent-loop-test".into()),
             tool_definitions: vec![],
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             skill_catalog: vec![],
         };
         let io = TestIo::tty();
