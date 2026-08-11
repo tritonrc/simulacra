@@ -6,6 +6,7 @@ async fn create_agent_span_uses_genai_operation_name_and_child_agent_name() {
             default_budget(),
             Arc::new(NoopFactory),
         );
+        supervisor.set_root_agent_id(AgentId("parent-agent".into()));
         install_spawn_test_journal(&mut supervisor);
         supervisor
             .spawn_agent(spawn_config(
@@ -77,6 +78,7 @@ async fn subagent_lifecycle_spans_include_parent_placement_and_backend_attribute
             default_budget(),
             Arc::new(NoopFactory),
         );
+        supervisor.set_root_agent_id(AgentId("parent-agent".into()));
         install_spawn_test_journal(&mut supervisor);
         supervisor
             .spawn_agent(spawn_config(
@@ -122,6 +124,7 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
             default_budget(),
             Arc::new(factory.clone()),
         );
+        supervisor.set_root_agent_id(AgentId("parent-agent".into()));
         install_spawn_test_journal(&mut supervisor);
         supervisor
             .spawn_agent(spawn_config(
@@ -222,6 +225,7 @@ async fn supervisor_writes_sub_agent_spawned_journal_entry_to_parent_stream_befo
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(parent_id.clone());
     supervisor.set_journal_storage(Arc::clone(&journal));
 
     supervisor
@@ -275,6 +279,7 @@ async fn supervisor_writes_sub_agent_completed_journal_entry_to_parent_stream_af
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(parent_id.clone());
     supervisor.set_journal_storage(Arc::clone(&journal));
 
     supervisor

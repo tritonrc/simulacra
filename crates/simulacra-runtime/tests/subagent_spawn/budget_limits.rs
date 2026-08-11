@@ -8,6 +8,7 @@ async fn parent_max_sub_agents_zero_means_unlimited_sub_agents_not_already_exhau
         parent_budget,
         Arc::new(NoopFactory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
@@ -32,6 +33,7 @@ async fn parent_max_tokens_zero_means_unlimited_tokens_for_child_budget_requests
         parent_budget,
         Arc::new(NoopFactory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
@@ -56,6 +58,7 @@ async fn parent_max_turns_zero_means_unlimited_turns_not_already_exhausted() {
         parent_budget,
         Arc::new(NoopFactory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
@@ -80,6 +83,7 @@ async fn parent_max_cost_zero_means_unlimited_cost_not_already_exhausted() {
         parent_budget,
         Arc::new(NoopFactory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let spawn = supervisor.spawn_agent(spawn_config(
@@ -191,6 +195,7 @@ async fn accepting_child_spawn_increments_parent_used_sub_agents() {
         default_budget(),
         Arc::new(NoopFactory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     supervisor
@@ -230,6 +235,7 @@ async fn child_token_usage_is_rolled_up_from_agent_loop_output_not_stale_spawn_b
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     supervisor
@@ -264,6 +270,7 @@ async fn child_turn_and_cost_usage_are_rolled_up_from_agent_loop_output_not_stal
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     supervisor
@@ -295,6 +302,7 @@ async fn spawn_config_passes_placement_and_task_to_the_task_factory() {
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     supervisor

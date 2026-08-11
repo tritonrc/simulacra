@@ -147,6 +147,7 @@ async fn child_budget_exactly_equals_parent_remaining_budget_is_accepted() {
     parent_budget.used_tokens = 90;
     let mut supervisor =
         AgentSupervisor::with_task_factory(default_capability(), parent_budget, Arc::new(factory));
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     // Request exactly 10 tokens when parent has exactly 10 remaining
@@ -197,6 +198,7 @@ async fn child_turns_exactly_equals_parent_remaining_turns_is_accepted() {
     parent_budget.used_turns = 8;
     let mut supervisor =
         AgentSupervisor::with_task_factory(default_capability(), parent_budget, Arc::new(factory));
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     // Request exactly 2 turns when parent has exactly 2 remaining
