@@ -156,6 +156,7 @@ async fn child_failure_is_logged_at_warn_with_child_parent_placement_and_failure
             default_budget(),
             Arc::new(factory.clone()),
         );
+        supervisor.set_root_agent_id(AgentId("parent-agent".into()));
         install_spawn_test_journal(&mut supervisor);
         // After WARNING 1's fix, spawn_agent propagates immediate child errors —
         // the return value may be Err for this test. We only care about the
@@ -350,6 +351,7 @@ async fn supervisor_writes_sub_agent_completed_with_success_false_on_child_failu
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(parent_id.clone());
     supervisor.set_journal_storage(Arc::clone(&journal));
 
     // After WARNING 1's fix, spawn_agent propagates the immediate child error.
