@@ -108,6 +108,7 @@ fn child_budget_request_exceeding_parent_remaining_budget_is_rejected_before_chi
         parent_budget,
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let result = supervisor.spawn_agent(spawn_config(
@@ -138,6 +139,7 @@ async fn child_turn_budget_request_exceeding_parent_remaining_turns_is_rejected_
         parent_budget,
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let result = supervisor.spawn_agent(spawn_config(
@@ -169,6 +171,7 @@ async fn child_cost_budget_request_exceeding_parent_remaining_cost_is_rejected_b
         parent_budget,
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     let result = supervisor.spawn_agent(spawn_config(

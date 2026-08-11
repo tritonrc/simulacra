@@ -6,6 +6,7 @@ fn supervisor_enforces_capability_attenuation_on_spawn() {
         ..CapabilityToken::default()
     };
     let mut supervisor = AgentSupervisor::new(parent_capability, default_budget());
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
 
     let err = supervisor
         .spawn_agent(spawn_config(
@@ -175,6 +176,7 @@ fn child_budget_does_not_exceed_parent_budget() {
     parent_budget.max_tokens = 10;
     parent_budget.used_tokens = 5;
     let mut supervisor = AgentSupervisor::new(parent_capability, parent_budget);
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
 
     let child_budget = ResourceBudget {
         max_tokens: 6,

@@ -192,7 +192,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                 let immediate_parent_sink = parent_sink
                     .immediate_parent_sink(&spawn_config.parent_id)
                     .unwrap_or_else(|| Arc::clone(&parent_sink));
-                let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
+                let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new_routed(
                     spawn_config.agent_id.0.clone(),
                     placement_name.clone(),
                     immediate_parent_sink,

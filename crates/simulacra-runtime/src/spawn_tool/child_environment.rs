@@ -51,7 +51,7 @@ pub(super) fn build_child_environment(
         .parent_sink
         .immediate_parent_sink(&spec.spawn_config.parent_id)
         .unwrap_or_else(|| Arc::clone(&spec.parent_sink));
-    let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
+    let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new_routed(
         spec.spawn_config.agent_id.0.clone(),
         spec.placement_name.to_string(),
         immediate_parent_sink,

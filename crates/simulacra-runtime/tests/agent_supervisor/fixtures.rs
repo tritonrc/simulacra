@@ -18,6 +18,7 @@ fn worker_parent_capability() -> CapabilityToken {
 }
 
 fn install_test_journal(supervisor: &mut AgentSupervisor) {
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
 }
 

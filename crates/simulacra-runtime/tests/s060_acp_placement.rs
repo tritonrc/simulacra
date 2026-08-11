@@ -309,6 +309,7 @@ fn acp_harness(
         Arc::clone(&parent_budget),
         factory,
     );
+    supervisor.set_root_agent_id(AgentId("parent-root".into()));
     supervisor.set_journal_storage(Arc::clone(&journal) as Arc<dyn JournalStorage>);
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     let supervisor_task = tokio::spawn(async move {

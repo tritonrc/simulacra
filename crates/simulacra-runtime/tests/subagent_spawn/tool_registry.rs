@@ -361,6 +361,7 @@ async fn placement_spawn_aborts_when_subagent_spawned_journal_append_fails() {
         default_budget(),
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     supervisor.set_journal_storage(Arc::new(FailingAppendJournal));
 
     let err = supervisor

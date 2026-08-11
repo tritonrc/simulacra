@@ -174,6 +174,7 @@ async fn child_budget_one_token_over_parent_remaining_is_rejected() {
         parent_budget,
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     // Request 11 tokens when parent has exactly 10 remaining
@@ -225,6 +226,7 @@ async fn child_turns_one_over_parent_remaining_is_rejected() {
         parent_budget,
         Arc::new(factory.clone()),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     install_spawn_test_journal(&mut supervisor);
 
     // Request 3 turns when parent has exactly 2 remaining

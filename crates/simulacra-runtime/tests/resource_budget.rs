@@ -124,6 +124,7 @@ async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
         parent_budget,
         Arc::new(NoopTaskFactory),
     );
+    supervisor.set_root_agent_id(AgentId("parent".into()));
     supervisor.set_journal_storage(Arc::new(InMemoryJournalStorage::new()));
 
     // Create a child config with some simulated usage

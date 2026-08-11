@@ -77,8 +77,8 @@ impl ActivitySink for ChannelActivitySink {
 pub struct RoutedActivitySink {
     inner: Arc<dyn ActivitySink>,
     // The router owns a child route until the supervisor tree is dropped.
-    // `ForwardingActivitySink` holds its parent weakly, which prevents this
-    // table from forming a shutdown cycle with the root router.
+    // Router-registered forwarding sinks hold their parent weakly, preventing
+    // this table from forming a shutdown cycle with the root router.
     child_sinks: Mutex<HashMap<AgentId, Arc<dyn ActivitySink>>>,
 }
 
@@ -119,15 +119,42 @@ impl ActivitySink for RoutedActivitySink {
 pub struct ForwardingActivitySink {
     child_id: String,
     placement: String,
-    parent_sink: Weak<dyn ActivitySink>,
+    parent_sink: ForwardingParentSink,
+}
+
+enum ForwardingParentSink {
+    Strong(Arc<dyn ActivitySink>),
+    Weak(Weak<dyn ActivitySink>),
 }
 
 impl ForwardingActivitySink {
+    /// Create an independently owned forwarding path.
+    ///
+    /// Direct callers need the forwarding sink itself to keep its parent alive
+    /// for as long as the path is in use; this is also the intuitive behavior
+    /// of the public constructor.
     pub fn new(child_id: String, placement: String, parent_sink: Arc<dyn ActivitySink>) -> Self {
         Self {
             child_id,
             placement,
-            parent_sink: Arc::downgrade(&parent_sink),
+            parent_sink: ForwardingParentSink::Strong(parent_sink),
+        }
+    }
+
+    /// Create a forwarding path retained by a `RoutedActivitySink` table.
+    ///
+    /// The table owns the child route, so retaining the routed parent here
+    /// would create a reference cycle. Production child construction uses this
+    /// constructor after it installs the route in that table.
+    pub(crate) fn new_routed(
+        child_id: String,
+        placement: String,
+        parent_sink: Arc<dyn ActivitySink>,
+    ) -> Self {
+        Self {
+            child_id,
+            placement,
+            parent_sink: ForwardingParentSink::Weak(Arc::downgrade(&parent_sink)),
         }
     }
 }
@@ -141,7 +168,11 @@ impl ActivitySink for ForwardingActivitySink {
             placement: self.placement.clone(),
             event: Box::new(event),
         };
-        if let Some(parent_sink) = self.parent_sink.upgrade() {
+        let parent_sink = match &self.parent_sink {
+            ForwardingParentSink::Strong(parent_sink) => Some(Arc::clone(parent_sink)),
+            ForwardingParentSink::Weak(parent_sink) => parent_sink.upgrade(),
+        };
+        if let Some(parent_sink) = parent_sink {
             parent_sink.emit(wrapped);
         }
     }
