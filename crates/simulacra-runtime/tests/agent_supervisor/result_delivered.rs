@@ -73,7 +73,7 @@ async fn inspect_delivered_test_child(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("host-control-plane".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::InspectChildResult(AgentId(child_id.into()), result_tx),
     })
     .await
@@ -1089,7 +1089,7 @@ async fn inspect_delivered_test_roster(
     let (list_tx, list_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("host-control-plane".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::InspectChildren(list_tx),
     })
     .await

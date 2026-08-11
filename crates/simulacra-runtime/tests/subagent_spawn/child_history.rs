@@ -370,6 +370,7 @@ fn child_may_spawn_descendants_only_from_its_own_remaining_budget() {
         Arc::new(NoopFactory),
     );
     let mut child_supervisor = child_supervisor;
+    child_supervisor.set_root_agent_id(AgentId("child-1".into()));
     install_spawn_test_journal(&mut child_supervisor);
 
     let result = child_supervisor.spawn_agent(spawn_config_with_placement(

@@ -481,6 +481,7 @@ async fn actor_join_journals_completion_before_terminal_result_resolves() {
         default_budget(),
         Arc::new(factory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     supervisor.set_journal_storage(Arc::clone(&journal));
     let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -654,6 +655,7 @@ fn valid_spawn_without_task_factory_has_no_spawn_side_effects() {
     let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
     let parent_id = AgentId("parent-agent".into());
     let mut supervisor = AgentSupervisor::new(worker_parent_capability(), default_budget());
+    supervisor.set_root_agent_id(parent_id.clone());
     supervisor.set_journal_storage(Arc::clone(&journal));
 
     let result = supervisor.spawn_agent(spawn_config(

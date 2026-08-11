@@ -149,7 +149,7 @@ async fn successful_child_completion_is_logged_with_child_parent_exit_reason_and
 }
 
 #[tokio::test]
-async fn child_failure_is_logged_at_warn_with_child_parent_placement_and_failure_reason() {
+async fn child_failure_is_logged_at_warn_with_child_parent_placement_and_error_category() {
     let factory =
         RecordingTaskFactory::new(vec![Err(RuntimeError::CapabilityViolation("boom".into()))]);
 
@@ -179,9 +179,10 @@ async fn child_failure_is_logged_at_warn_with_child_parent_placement_and_failure
                 && event.fields.contains_key("parent_id")
                 && event.fields.get("placement").map(String::as_str) == Some("researcher")
                 && !event.fields.contains_key("agent_type")
-                && event.fields.contains_key("failure_reason")
+                && event.fields.get("error_category").map(String::as_str) == Some("runtime")
+                && !event.fields.contains_key("failure_reason")
         }),
-        "child failures should log a WARN event with child id, parent id, placement, and failure reason without agent_type"
+        "child failures should log a WARN event with child id, parent id, placement, bounded error category, and no raw failure reason or agent_type"
     );
 }
 
