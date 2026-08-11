@@ -156,15 +156,13 @@ fn simulacra_config(base_url: &str) -> SimulacraConfig {
     agent_types.insert(
         "worker".to_string(),
         AgentTypeConfig {
-            backend: Default::default(),
             model: "ollama:llama3".to_string(),
-            acp_profile: None,
             system_prompt: Some("Use the available tools to produce the requested report.".into()),
             skills: vec![],
             max_turns: Some(8),
             max_tokens: Some(8_192),
             max_sub_agents: Some(0),
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 network: vec!["127.0.0.1".to_string()],
@@ -211,6 +209,7 @@ fn simulacra_config(base_url: &str) -> SimulacraConfig {
             description: None,
         },
         agent_types,
+        child_placements: HashMap::new(),
         integrations,
         tenants,
         mcp: None,

@@ -21,8 +21,8 @@ use simulacra_provider::{AnthropicProvider, OpenAiProvider};
 use simulacra_runtime::{
     ActivitySink, AgentHitlRuntime, AgentLoop, AgentLoopConfig, AgentLoopOutput, AgentSupervisor,
     AgentTaskFactory, CancelChildAgentTool, ChildStatusTool, CloseChildAgentTool,
-    CountingJournalStorage, InMemoryJournalStorage, JoinChildAgentTool, RequestInputTool,
-    SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
+    CountingJournalStorage, InMemoryJournalStorage, JoinChildAgentTool, ListChildAgentTool,
+    RequestInputTool, SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
 };
 use simulacra_sandbox::{AgentCell, ScriptExecutor};
 use simulacra_tool::{
@@ -268,18 +268,18 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
         }),
         ActivityEvent::ChildSpawned {
             child_id,
-            agent_type,
+            placement,
             task,
         } => json!({
             "event": "agent.child_spawned",
             "task_id": task_id,
             "child_id": child_id,
-            "agent_type": agent_type,
+            "placement": placement,
             "child_task": task,
         }),
         ActivityEvent::ChildFinished {
             child_id,
-            agent_type,
+            placement,
             exit_reason,
             duration_ms,
             ..
@@ -287,7 +287,7 @@ fn translate_activity_event(task_id: &str, event: &ActivityEvent) -> Value {
             "event": "agent.child_finished",
             "task_id": task_id,
             "child_id": child_id,
-            "agent_type": agent_type,
+            "placement": placement,
             "exit_reason": exit_reason,
             "duration_ms": duration_ms,
         }),
@@ -393,7 +393,7 @@ fn flatten_activity_event(task_id: &str, event: &ActivityEvent) -> Vec<Value> {
     match event {
         ActivityEvent::ChildActivity {
             child_id,
-            agent_type,
+            placement,
             event: inner,
         } => {
             let mut flattened = flatten_activity_event(task_id, inner);
@@ -401,7 +401,7 @@ fn flatten_activity_event(task_id: &str, event: &ActivityEvent) -> Vec<Value> {
                 // Add child attribution only if not already set (preserves innermost).
                 if evt.get("child_id").is_none() {
                     evt["child_id"] = Value::from(child_id.clone());
-                    evt["child_agent_type"] = Value::from(agent_type.clone());
+                    evt["child_placement"] = Value::from(placement.clone());
                 }
             }
             flattened
@@ -657,6 +657,10 @@ pub struct SimulacraEngine {
     /// Optional workflow runtime. When present, agents with the `workflow`
     /// capability receive the model-visible `Workflow` tool.
     workflow_runtime: Option<Arc<WorkflowRuntime>>,
+    /// Optional journal backend shared by root and child lifecycle composition.
+    /// Production defaults retain the per-task in-memory journal; tests and
+    /// embedders may inject durable storage and retain the Arc for inspection.
+    journal_storage: Option<Arc<dyn simulacra_types::JournalStorage>>,
 }
 
 /// S043 — Test-only provider factory closure. The factory receives the
@@ -767,6 +771,7 @@ impl SimulacraEngine {
             provider_factory: None,
             agent_file_store: None,
             workflow_runtime: None,
+            journal_storage: None,
         })
     }
 
@@ -807,6 +812,7 @@ impl SimulacraEngine {
             provider_factory: None,
             agent_file_store: None,
             workflow_runtime: None,
+            journal_storage: None,
         })
     }
 
@@ -861,6 +867,21 @@ impl SimulacraEngine {
     pub fn with_workflow_runtime(mut self, runtime: Arc<WorkflowRuntime>) -> Self {
         self.workflow_runtime = Some(runtime);
         self
+    }
+
+    /// Inject the journal backend used by each task and its child supervisor.
+    /// The caller may retain a clone to inspect durable lifecycle entries.
+    pub fn with_journal_storage(
+        mut self,
+        journal: Arc<dyn simulacra_types::JournalStorage>,
+    ) -> Self {
+        self.journal_storage = Some(journal);
+        self
+    }
+
+    /// Return the injected journal backend, if one was configured.
+    pub fn journal_storage(&self) -> Option<&Arc<dyn simulacra_types::JournalStorage>> {
+        self.journal_storage.as_ref()
     }
 
     /// S043 — Test accessor. Returns `true` iff a provider factory has been
@@ -1383,6 +1404,7 @@ impl SimulacraEngine {
         // `None` in production; `Some(...)` only when a test installed an
         // override via `with_provider_factory`.
         let provider_factory_for_worker = self.provider_factory.clone();
+        let journal_storage_for_worker = self.journal_storage.as_ref().map(Arc::clone);
         let workflow_runtime_for_worker = if resolved
             .capabilities
             .iter()
@@ -1531,7 +1553,10 @@ impl SimulacraEngine {
 
                 // 4. Build journal (in-memory for server mode)
                 let inner_journal: Arc<dyn simulacra_types::JournalStorage> =
-                    Arc::new(InMemoryJournalStorage::new());
+                    journal_storage_for_worker.unwrap_or_else(|| {
+                        Arc::new(InMemoryJournalStorage::new())
+                            as Arc<dyn simulacra_types::JournalStorage>
+                    });
                 let journal: Arc<dyn simulacra_types::JournalStorage> = Arc::new(
                     CountingJournalStorage::new(inner_journal, Arc::clone(&proc_journal_entries)),
                 );
@@ -1711,49 +1736,72 @@ impl SimulacraEngine {
 
                 let mut spawn_rx = None;
                 let mut supervisor_tx_for_factory = None;
-                if !capability_token.spawn_types.is_empty() {
+                let mut allowed_placements = capability_token
+                    .spawn_placements
+                    .iter()
+                    .filter(|placement| {
+                        config_for_worker.child_placements.contains_key(*placement)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                allowed_placements.sort();
+                allowed_placements.dedup();
+                if !allowed_placements.is_empty() {
                     let (spawn_tx, rx) = tokio::sync::mpsc::channel(16);
                     let spawn_sink: Arc<dyn ActivitySink> =
                         Arc::clone(&sink) as Arc<dyn ActivitySink>;
                     let spawn_tx_clone = spawn_tx.clone();
+                    let root_caller_id = AgentId(task_id.clone());
                     registry
                         .register(Box::new(SpawnAgentTool {
                             sender: spawn_tx.clone(),
-                            can_spawn: capability_token.spawn_types.clone(),
+                            allowed_placements,
                             activity_sink: spawn_sink,
-                            parent_id: AgentId(task_id.clone()),
-                            tiers: config_for_worker.tiers.clone(),
+                            parent_id: root_caller_id.clone(),
                             parent_budget: Arc::clone(&budget_arc),
-                            parent_model: model_clone.clone(),
                             guidance: None,
                         }))
                         .map_err(|e| format!("failed to register spawn_agent tool: {e}"))?;
                     registry
                         .register(Box::new(JoinChildAgentTool {
                             sender: spawn_tx.clone(),
+                            caller_id: root_caller_id.clone(),
                         }))
                         .map_err(|e| format!("failed to register join_child_agent tool: {e}"))?;
                     registry
-                        .register(Box::new(CancelChildAgentTool { sender: spawn_tx }))
+                        .register(Box::new(CancelChildAgentTool {
+                            sender: spawn_tx,
+                            caller_id: root_caller_id.clone(),
+                        }))
                         .map_err(|e| format!("failed to register cancel_child_agent tool: {e}"))?;
                     registry
                         .register(Box::new(SteerChildAgentTool {
                             sender: spawn_tx_clone.clone(),
+                            caller_id: root_caller_id.clone(),
                         }))
                         .map_err(|e| format!("failed to register steer_child_agent tool: {e}"))?;
                     registry
                         .register(Box::new(ChildStatusTool {
                             sender: spawn_tx_clone.clone(),
+                            caller_id: root_caller_id.clone(),
                         }))
                         .map_err(|e| format!("failed to register child_status tool: {e}"))?;
                     registry
+                        .register(Box::new(ListChildAgentTool {
+                            sender: spawn_tx_clone.clone(),
+                            caller_id: root_caller_id.clone(),
+                        }))
+                        .map_err(|e| format!("failed to register list_child_agents tool: {e}"))?;
+                    registry
                         .register(Box::new(WaitChildAgentTool {
                             sender: spawn_tx_clone.clone(),
+                            caller_id: root_caller_id.clone(),
                         }))
                         .map_err(|e| format!("failed to register wait_child_agent tool: {e}"))?;
                     registry
                         .register(Box::new(CloseChildAgentTool {
                             sender: spawn_tx_clone.clone(),
+                            caller_id: root_caller_id,
                         }))
                         .map_err(|e| format!("failed to register close_child_agent tool: {e}"))?;
                     spawn_rx = Some(rx);
@@ -1815,7 +1863,6 @@ impl SimulacraEngine {
                         parent_capability: capability_token.clone(),
                         allowed_mcp_servers: Some(tenant_mcp_servers.clone()),
                         supervisor_sender: supervisor_tx_for_factory,
-                        parent_model: model_clone.clone(),
                         pipeline: Some(Arc::clone(&hook_pipeline)),
                         script_executor: Some(ScriptExecutor::new(4)),
                         child_cell_configurator,
@@ -1823,11 +1870,13 @@ impl SimulacraEngine {
                         child_provider_factory,
                         acp_child_runtime: None,
                     });
-                    let mut supervisor = AgentSupervisor::with_task_factory(
+                    let mut supervisor = AgentSupervisor::with_task_factory_and_shared_budget(
                         capability_token.clone(),
-                        budget_arc.lock().unwrap().clone(),
+                        Arc::clone(&budget_arc),
                         task_factory,
                     );
+                    supervisor.set_journal_storage(Arc::clone(&journal));
+                    supervisor.set_root_agent_id(AgentId(task_id.clone()));
                     supervisor.set_activity_sink(Arc::clone(&sink) as Arc<dyn ActivitySink>);
                     tokio::spawn(async move {
                         supervisor.run_actor_loop(spawn_rx).await;
@@ -1969,7 +2018,7 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
     let mut python = false;
     let mut network: Vec<NetworkPermission> = Vec::new();
     let mut mcp_tools: Vec<String> = Vec::new();
-    let mut spawn_types: Vec<String> = Vec::new();
+    let mut spawn_placements: Vec<String> = Vec::new();
     let mut skill_patterns: Vec<String> = Vec::new();
 
     for cap in &resolved.capabilities {
@@ -1993,9 +2042,9 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
                 skill_patterns.push(other.to_owned());
             }
             other if other.starts_with("spawn:") => {
-                let agent_type = other.trim_start_matches("spawn:").trim();
-                if !agent_type.is_empty() {
-                    spawn_types.push(agent_type.to_owned());
+                let placement = other.trim_start_matches("spawn:").trim();
+                if !placement.is_empty() {
+                    spawn_placements.push(placement.to_owned());
                 }
             }
             _ => {}
@@ -2010,7 +2059,7 @@ fn build_capability_token_from_resolved(resolved: &ResolvedAgent) -> CapabilityT
         paths_read: vec![PathPattern("/**".into())],
         paths_write: vec![PathPattern("/**".into())],
         mcp_tools,
-        spawn_types,
+        spawn_placements,
         skill_patterns,
         memory: simulacra_types::MemoryCapability::default(),
     }
@@ -2180,8 +2229,8 @@ fn agent_capabilities_from_config(agent: &simulacra_config::AgentTypeConfig) -> 
             });
         }
     }
-    for agent_type in &agent.can_spawn {
-        out.push(format!("spawn:{agent_type}"));
+    for placement in &agent.allowed_child_placements {
+        out.push(format!("spawn:{placement}"));
     }
     out
 }

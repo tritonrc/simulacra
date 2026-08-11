@@ -2,9 +2,7 @@ use super::*;
 
 pub(super) struct ChildSpawnToolSpec {
     pub(super) sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
-    pub(super) can_spawn: Vec<String>,
-    pub(super) tiers: TierMap,
-    pub(super) parent_model: String,
+    pub(super) allowed_placements: Vec<String>,
 }
 
 pub(super) struct ChildEnvironmentSpec<'a> {
@@ -12,15 +10,15 @@ pub(super) struct ChildEnvironmentSpec<'a> {
     pub(super) inherited_journal: Arc<dyn JournalStorage>,
     pub(super) spawn_config: &'a SpawnConfig,
     pub(super) child_config: &'a AgentLoopConfig,
-    pub(super) agent_type_name: &'a str,
+    pub(super) budget: Arc<Mutex<ResourceBudget>>,
+    pub(super) placement_name: &'a str,
     pub(super) pipeline: Option<Arc<simulacra_hooks::pipeline::HookPipeline>>,
     pub(super) script_executor: Option<simulacra_sandbox::ScriptExecutor>,
     pub(super) cell_configurator: Option<ChildCellConfigurator>,
     pub(super) tool_registrar: Option<ChildToolRegistrar>,
     pub(super) spawn_tool: Option<ChildSpawnToolSpec>,
     pub(super) parent_sink: Arc<dyn ActivitySink>,
-    /// Full configured runtime surface used only for configured native child
-    /// skill/MCP discovery. Generic leaf children deliberately receive None.
+    /// Full configured runtime surface used for native child skill/MCP discovery.
     pub(super) runtime_config: Option<&'a simulacra_config::SimulacraConfig>,
     pub(super) skill_names: &'a [String],
     pub(super) allowed_mcp_servers: Option<&'a [String]>,
@@ -35,28 +33,35 @@ pub(super) struct ChildEnvironment {
 pub(super) fn build_child_environment(
     spec: ChildEnvironmentSpec<'_>,
 ) -> Result<ChildEnvironment, simulacra_types::ToolError> {
-    let child_proc = child_proc_runtime(
+    let child_proc = child_proc_runtime_with_budget(
         Arc::clone(&spec.inherited_vfs),
         Arc::clone(&spec.inherited_journal),
         ChildProcSpec {
             agent_id: spec.spawn_config.agent_id.clone(),
-            agent_name: spec.agent_type_name.to_string(),
+            agent_name: spec.placement_name.to_string(),
             model: spec.child_config.model.clone(),
             parent_id: spec.spawn_config.parent_id.clone(),
             capability: spec.child_config.capability.clone(),
             budget: spec.spawn_config.budget.clone(),
             pipeline: spec.pipeline.clone(),
         },
+        Arc::clone(&spec.budget),
     );
-    let cell = build_child_cell(&child_proc, spec.child_config, &spec);
-    let registry = build_child_registry(&cell, Arc::clone(&child_proc.budget), &spec)?;
-    child_proc.tools.set(registry.definitions());
-
-    let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new(
+    let immediate_parent_sink = spec
+        .parent_sink
+        .immediate_parent_sink(&spec.spawn_config.parent_id)
+        .unwrap_or_else(|| Arc::clone(&spec.parent_sink));
+    let sink: Arc<dyn ActivitySink> = Arc::new(ForwardingActivitySink::new_routed(
         spec.spawn_config.agent_id.0.clone(),
-        spec.agent_type_name.to_string(),
-        spec.parent_sink,
+        spec.placement_name.to_string(),
+        immediate_parent_sink,
     ));
+    spec.parent_sink
+        .register_child_sink(spec.spawn_config.agent_id.clone(), Arc::clone(&sink));
+
+    let cell = build_child_cell(&child_proc, spec.child_config, &spec);
+    let registry = build_child_registry(&cell, Arc::clone(&child_proc.budget), &spec, &sink)?;
+    child_proc.tools.set(registry.definitions());
 
     Ok(ChildEnvironment {
         proc: child_proc,
@@ -92,6 +97,7 @@ fn build_child_registry(
     cell: &Arc<simulacra_sandbox::AgentCell>,
     child_budget: Arc<Mutex<ResourceBudget>>,
     spec: &ChildEnvironmentSpec<'_>,
+    sink: &Arc<dyn ActivitySink>,
 ) -> Result<simulacra_tool::ToolRegistry, simulacra_types::ToolError> {
     let mut registry = simulacra_tool::ToolRegistry::new();
     simulacra_tool::register_builtins(&mut registry, Arc::clone(cell))?;
@@ -105,33 +111,43 @@ fn build_child_registry(
         let sender = spawn_tool.sender.clone();
         registry.register(Box::new(SpawnAgentTool {
             sender: sender.clone(),
-            can_spawn: spawn_tool.can_spawn.clone(),
-            activity_sink: Arc::clone(&spec.parent_sink),
+            allowed_placements: spawn_tool.allowed_placements.clone(),
+            // Descendant accepted-lifecycle events must travel through this
+            // child's forwarding sink, rather than bypassing the supervision
+            // hop to the root sink.
+            activity_sink: Arc::clone(sink),
             parent_id: spec.spawn_config.agent_id.clone(),
-            tiers: spawn_tool.tiers.clone(),
             parent_budget: child_budget,
-            parent_model: spawn_tool.parent_model.clone(),
             guidance: None,
         }))?;
         registry.register(Box::new(JoinChildAgentTool {
             sender: sender.clone(),
+            caller_id: spec.spawn_config.agent_id.clone(),
         }))?;
         registry.register(Box::new(CancelChildAgentTool {
             sender: sender.clone(),
+            caller_id: spec.spawn_config.agent_id.clone(),
         }))?;
         registry.register(Box::new(SteerChildAgentTool {
             sender: sender.clone(),
+            caller_id: spec.spawn_config.agent_id.clone(),
         }))?;
         registry.register(Box::new(ChildStatusTool {
             sender: sender.clone(),
+            caller_id: spec.spawn_config.agent_id.clone(),
         }))?;
         registry.register(Box::new(ListChildAgentTool {
             sender: sender.clone(),
+            caller_id: spec.spawn_config.agent_id.clone(),
         }))?;
         registry.register(Box::new(WaitChildAgentTool {
             sender: sender.clone(),
+            caller_id: spec.spawn_config.agent_id.clone(),
         }))?;
-        registry.register(Box::new(CloseChildAgentTool { sender }))?;
+        registry.register(Box::new(CloseChildAgentTool {
+            sender,
+            caller_id: spec.spawn_config.agent_id.clone(),
+        }))?;
     }
     Ok(registry)
 }
@@ -142,11 +158,20 @@ fn register_child_skill_mcp_catalog(
     spec: &ChildEnvironmentSpec<'_>,
     config: &simulacra_config::SimulacraConfig,
 ) -> Result<(), simulacra_types::ToolError> {
-    let skills = simulacra_tool::discover_and_filter_skills(
-        &spec.inherited_vfs,
-        spec.skill_names,
-        &spec.child_config.capability,
-        spec.agent_type_name,
+    // Configured skill identifiers are private child-shaping inputs. Skill
+    // discovery reads their paths through the VFS, whose ordinary spans carry
+    // the path; execute this bootstrap read without a tracing subscriber so a
+    // child failure cannot expose a configured skill name in telemetry.
+    let skills = tracing::dispatcher::with_default(
+        &tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
+        || {
+            simulacra_tool::discover_and_filter_skills_for_placement(
+                &spec.inherited_vfs,
+                spec.skill_names,
+                &spec.child_config.capability,
+                spec.placement_name,
+            )
+        },
     )
     .map_err(|error| simulacra_types::ToolError::ExecutionFailed(error.to_string()))?;
 
@@ -167,12 +192,7 @@ fn register_child_skill_mcp_catalog(
             .collect::<Vec<_>>();
         &derived_allowlist
     } else {
-        derived_allowlist = config
-            .tenants
-            .values()
-            .find(|tenant| tenant.agent_type == spec.agent_type_name)
-            .and_then(|tenant| tenant.mcp_servers.clone())
-            .unwrap_or_default();
+        derived_allowlist = Vec::new();
         &derived_allowlist
     };
     for skill in &skills {

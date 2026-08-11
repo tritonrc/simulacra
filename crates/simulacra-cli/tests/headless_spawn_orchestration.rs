@@ -96,13 +96,13 @@ impl Provider for ParentOrchestratorProvider {
                     "spawn-researcher",
                     "spawn_agent",
                     json!({
-                        "agent_type": "researcher",
+                        "placement": "researcher",
                         "task": "inspect the fixture and report the finding",
                         "budget": {
                             "max_tokens": 256,
                             "max_turns": 1,
                             "max_cost": "0",
-                            "max_sub_agents": 0
+                            "max_sub_agents": 1
                         }
                     }),
                 )]),
@@ -216,18 +216,19 @@ model = "claude-sonnet-4-20250514"
 max_turns = 8
 max_tokens = 4096
 max_sub_agents = 2
-can_spawn = ["researcher"]
+allowed_child_placements = ["researcher"]
 
 [agent_types.default.capabilities]
 paths_read = ["/workspace/**"]
 paths_write = ["/workspace/**"]
 
-[agent_types.researcher]
+[child_placements.researcher]
+backend = "native"
 model = "claude-sonnet-4-20250514"
 max_turns = 1
 max_tokens = 256
 
-[agent_types.researcher.capabilities]
+[child_placements.researcher.capabilities]
 paths_read = ["/workspace/**"]
 
 [task]

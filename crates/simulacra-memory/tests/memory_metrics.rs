@@ -159,11 +159,11 @@ impl TestTelemetry {
     }
 }
 
-fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+async fn test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .await
 }
 
 fn attrs<'a>(values: impl Iterator<Item = &'a KeyValue>) -> BTreeMap<String, String> {
@@ -388,7 +388,7 @@ async fn burst_writes(store: Arc<SqliteMemoryStore>, tenant: TenantId, prefix: &
 
 #[tokio::test]
 async fn embed_lag_histogram_is_emitted_on_put_event() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -444,7 +444,7 @@ async fn embed_lag_histogram_is_emitted_on_put_event() {
 
 #[tokio::test]
 async fn embed_lag_histogram_has_percentile_buckets() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -487,7 +487,7 @@ async fn embed_lag_histogram_has_percentile_buckets() {
 
 #[tokio::test]
 async fn queue_depth_gauge_reports_per_tenant() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -527,7 +527,7 @@ async fn queue_depth_gauge_reports_per_tenant() {
 
 #[tokio::test]
 async fn queue_depth_gauge_zero_when_empty() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -552,7 +552,7 @@ async fn queue_depth_gauge_zero_when_empty() {
 
 #[tokio::test]
 async fn reindex_backlog_gauge_reports_per_tenant() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -598,7 +598,7 @@ async fn reindex_backlog_gauge_reports_per_tenant() {
 
 #[tokio::test]
 async fn reindex_backlog_gauge_is_zero_when_table_empty() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -641,7 +641,7 @@ fn counter_u64(points: &[MetricPoint], metric: &str, reason: &str) -> Option<u64
 /// failure kind without blowing up series count.
 #[tokio::test]
 async fn embedder_load_failure_counter_increments_by_reason() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 
@@ -741,7 +741,7 @@ impl Drop for ReleaseOnDrop {
 /// gauge only shows depth, not rate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn overflow_counter_increments_by_kind_under_saturation() {
-    let _guard = test_lock();
+    let _guard = test_lock().await;
     let telemetry = TestTelemetry::install();
     telemetry.reset();
 

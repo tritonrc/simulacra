@@ -66,16 +66,27 @@ pub(super) struct ChildProcSpec {
     pub(super) model: String,
     pub(super) parent_id: AgentId,
     pub(super) capability: CapabilityToken,
+    #[allow(dead_code)]
     pub(super) budget: ResourceBudget,
     pub(super) pipeline: Option<Arc<simulacra_hooks::pipeline::HookPipeline>>,
 }
 
+#[cfg(test)]
 pub(super) fn child_proc_runtime(
     inherited_vfs: Arc<dyn VirtualFs>,
     inherited_journal: Arc<dyn JournalStorage>,
     spec: ChildProcSpec,
 ) -> ChildProcRuntime {
-    let budget = Arc::new(Mutex::new(spec.budget));
+    let budget = Arc::new(Mutex::new(spec.budget.clone()));
+    child_proc_runtime_with_budget(inherited_vfs, inherited_journal, spec, budget)
+}
+
+pub(super) fn child_proc_runtime_with_budget(
+    inherited_vfs: Arc<dyn VirtualFs>,
+    inherited_journal: Arc<dyn JournalStorage>,
+    spec: ChildProcSpec,
+    budget: Arc<Mutex<ResourceBudget>>,
+) -> ChildProcRuntime {
     let turn = Arc::new(AtomicU64::new(0));
     let journal_entries = Arc::new(AtomicU64::new(0));
     let tools = RuntimeSharedToolList::default();

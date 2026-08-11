@@ -159,7 +159,7 @@ fn proc_state(
                 .iter()
                 .map(|pattern| PathPattern((*pattern).to_string()))
                 .collect(),
-            spawn_types: Vec::new(),
+            spawn_placements: Vec::new(),
             skill_patterns: Vec::new(),
             memory,
         },

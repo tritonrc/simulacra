@@ -24,11 +24,16 @@ fn delivered_test_supervisor(
     tokio::sync::mpsc::Sender<SupervisorMessage>,
     tokio::task::JoinHandle<()>,
 ) {
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        CapabilityToken {
+            spawn_placements: vec!["worker".into()],
+            ..CapabilityToken::default()
+        },
         ResourceBudget::new(100_000, 10, Decimal::new(100, 0), 0),
         Arc::new(factory),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let actor = tokio::spawn(async move { supervisor.run_actor_loop(rx).await });
     (tx, actor)
@@ -42,10 +47,10 @@ async fn spawn_delivered_test_child(
         child_id,
         "parent-agent",
         CapabilityToken::default(),
-        ResourceBudget::new(1_000, 2, Decimal::ZERO, 0),
+        ResourceBudget::new(1_000, 2, Decimal::new(1, 0), 0),
         RestartStrategy::LetCrash,
     );
-    config.agent_type = Some("worker".into());
+    config.placement = "worker".into();
     config.task = format!("delivery test for {child_id}");
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
@@ -68,7 +73,7 @@ async fn inspect_delivered_test_child(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("host-control-plane".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::InspectChildResult(AgentId(child_id.into()), result_tx),
     })
     .await
@@ -142,8 +147,15 @@ async fn result_delivered_host_inspection_starts_false_is_stable_and_close_remov
     })
     .await
     .expect("close request should send");
-    close_rx.await.expect("close response should arrive").expect("close should succeed");
-    assert!(inspect_delivered_test_child(&tx, "inspect-child").await.is_err());
+    close_rx
+        .await
+        .expect("close response should arrive")
+        .expect("close should succeed");
+    assert!(
+        inspect_delivered_test_child(&tx, "inspect-child")
+            .await
+            .is_err()
+    );
 
     stop_delivered_test_supervisor(tx, actor).await;
 }
@@ -170,7 +182,13 @@ async fn result_delivered_running_probes_timeouts_and_rejected_close_do_not_mark
     })
     .await
     .expect("running status request should send");
-    assert!(!status_rx.await.expect("status response should arrive").expect("status should succeed").ready);
+    assert!(
+        !status_rx
+            .await
+            .expect("status response should arrive")
+            .expect("status should succeed")
+            .ready
+    );
 
     let roster = request_child_roster(&tx).await;
     assert_eq!(roster.len(), 1);
@@ -188,7 +206,13 @@ async fn result_delivered_running_probes_timeouts_and_rejected_close_do_not_mark
     })
     .await
     .expect("running poll should send");
-    assert!(!wait_rx.await.expect("poll response should arrive").expect("poll should succeed").ready);
+    assert!(
+        !wait_rx
+            .await
+            .expect("poll response should arrive")
+            .expect("poll should succeed")
+            .ready
+    );
 
     let (close_tx, close_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
@@ -198,7 +222,12 @@ async fn result_delivered_running_probes_timeouts_and_rejected_close_do_not_mark
     })
     .await
     .expect("running close request should send");
-    assert!(close_rx.await.expect("close response should arrive").is_err());
+    assert!(
+        close_rx
+            .await
+            .expect("close response should arrive")
+            .is_err()
+    );
 
     release.notify_waiters();
     let inspection = await_delivered_test_terminal(&tx, "running-child").await;
@@ -216,7 +245,11 @@ async fn result_delivered_child_status_covers_all_terminal_body_variants() {
         ("empty", Some(""), ExitReason::Complete),
         ("cancelled", Some("cancelled body"), ExitReason::Cancelled),
         ("cancelled-null", None, ExitReason::Cancelled),
-        ("failed", Some("partial"), ExitReason::Error("provider failed".into())),
+        (
+            "failed",
+            Some("partial"),
+            ExitReason::Error("provider failed".into()),
+        ),
     ];
     for (child_id, content, exit_reason) in &cases {
         factory.push_plan(
@@ -237,7 +270,11 @@ async fn result_delivered_child_status_covers_all_terminal_body_variants() {
 
     for (child_id, _, _) in &cases {
         spawn_delivered_test_child(&tx, child_id).await;
-        assert!(!await_delivered_test_terminal(&tx, child_id).await.result_delivered);
+        assert!(
+            !await_delivered_test_terminal(&tx, child_id)
+                .await
+                .result_delivered
+        );
 
         let (status_tx, status_rx) = tokio::sync::oneshot::channel();
         tx.send(SupervisorMessage {
@@ -247,7 +284,13 @@ async fn result_delivered_child_status_covers_all_terminal_body_variants() {
         })
         .await
         .expect("terminal status request should send");
-        assert!(status_rx.await.expect("status response should arrive").expect("status should succeed").ready);
+        assert!(
+            status_rx
+                .await
+                .expect("status response should arrive")
+                .expect("status should succeed")
+                .ready
+        );
         assert!(
             inspect_delivered_test_child(&tx, child_id)
                 .await
@@ -310,10 +353,7 @@ async fn result_delivered_immediate_status_list_wait_and_join_each_mark_delivery
                 tx.send(SupervisorMessage {
                     priority: MessagePriority::Command,
                     agent_id: AgentId("parent-agent".into()),
-                    payload: SupervisorPayload::ChildStatus(
-                        AgentId(operation.into()),
-                        result_tx,
-                    ),
+                    payload: SupervisorPayload::ChildStatus(AgentId(operation.into()), result_tx),
                 })
                 .await
                 .expect("status request should send");
@@ -348,10 +388,7 @@ async fn result_delivered_immediate_status_list_wait_and_join_each_mark_delivery
                 tx.send(SupervisorMessage {
                     priority: MessagePriority::Command,
                     agent_id: AgentId("parent-agent".into()),
-                    payload: SupervisorPayload::JoinChild(
-                        AgentId(operation.into()),
-                        result_tx,
-                    ),
+                    payload: SupervisorPayload::JoinChild(AgentId(operation.into()), result_tx),
                 })
                 .await
                 .expect("join request should send");
@@ -403,20 +440,53 @@ async fn result_delivered_roster_marks_terminal_entries_but_not_running_entries(
     spawn_delivered_test_child(&tx, "a-terminal").await;
     spawn_delivered_test_child(&tx, "b-running").await;
     spawn_delivered_test_child(&tx, "c-terminal").await;
-    assert!(!await_delivered_test_terminal(&tx, "a-terminal").await.result_delivered);
-    assert!(!await_delivered_test_terminal(&tx, "c-terminal").await.result_delivered);
+    assert!(
+        !await_delivered_test_terminal(&tx, "a-terminal")
+            .await
+            .result_delivered
+    );
+    assert!(
+        !await_delivered_test_terminal(&tx, "c-terminal")
+            .await
+            .result_delivered
+    );
 
     let roster = request_child_roster(&tx).await;
     assert_eq!(roster.len(), 3);
-    assert!(roster.iter().any(|entry| entry.child_id == "a-terminal" && entry.ready));
-    assert!(roster.iter().any(|entry| entry.child_id == "b-running" && !entry.ready));
-    assert!(roster.iter().any(|entry| entry.child_id == "c-terminal" && entry.ready));
-    assert!(inspect_delivered_test_child(&tx, "a-terminal").await.expect("terminal inspection").result_delivered);
-    assert!(inspect_delivered_test_child(&tx, "c-terminal").await.expect("second terminal inspection").result_delivered);
+    assert!(
+        roster
+            .iter()
+            .any(|entry| entry.child_id == "a-terminal" && entry.ready)
+    );
+    assert!(
+        roster
+            .iter()
+            .any(|entry| entry.child_id == "b-running" && !entry.ready)
+    );
+    assert!(
+        roster
+            .iter()
+            .any(|entry| entry.child_id == "c-terminal" && entry.ready)
+    );
+    assert!(
+        inspect_delivered_test_child(&tx, "a-terminal")
+            .await
+            .expect("terminal inspection")
+            .result_delivered
+    );
+    assert!(
+        inspect_delivered_test_child(&tx, "c-terminal")
+            .await
+            .expect("second terminal inspection")
+            .result_delivered
+    );
 
     running_release.notify_waiters();
     let running_after_completion = await_delivered_test_terminal(&tx, "b-running").await;
-    assert!(!running_after_completion.result_delivered, "a running roster entry must not pre-deliver its eventual result");
+    assert!(
+        !running_after_completion.result_delivered,
+        "a running roster entry must not pre-deliver its eventual result"
+    );
 
     stop_delivered_test_supervisor(tx, actor).await;
 }
@@ -448,7 +518,10 @@ async fn result_delivered_pending_join_and_wait_mark_only_after_successful_send(
                 .expect("pending join should send");
                 tokio::task::yield_now().await;
                 release.notify_waiters();
-                result_rx.await.expect("join response should arrive").expect("join should succeed");
+                result_rx
+                    .await
+                    .expect("join response should arrive")
+                    .expect("join should succeed");
             }
             "wait" => {
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -465,12 +538,23 @@ async fn result_delivered_pending_join_and_wait_mark_only_after_successful_send(
                 .expect("pending wait should send");
                 tokio::task::yield_now().await;
                 release.notify_waiters();
-                assert!(result_rx.await.expect("wait response should arrive").expect("wait should succeed").ready);
+                assert!(
+                    result_rx
+                        .await
+                        .expect("wait response should arrive")
+                        .expect("wait should succeed")
+                        .ready
+                );
             }
             _ => unreachable!(),
         }
 
-        assert!(inspect_delivered_test_child(&tx, operation).await.expect("inspection after delivery").result_delivered);
+        assert!(
+            inspect_delivered_test_child(&tx, operation)
+                .await
+                .expect("inspection after delivery")
+                .result_delivered
+        );
         stop_delivered_test_supervisor(tx, actor).await;
     }
 }
@@ -507,13 +591,27 @@ async fn result_delivered_wait_any_marks_only_the_selected_terminal_child() {
     .expect("pending wait-any should send");
     tokio::task::yield_now().await;
     release_b.notify_waiters();
-    let selected = wait_rx.await.expect("wait-any response should arrive").expect("wait-any should succeed");
-    assert_eq!(selected.terminal.expect("selected result").child_id.0, "wait-b");
-    assert!(inspect_delivered_test_child(&tx, "wait-b").await.expect("selected inspection").result_delivered);
+    let selected = wait_rx
+        .await
+        .expect("wait-any response should arrive")
+        .expect("wait-any should succeed");
+    assert_eq!(
+        selected.terminal.expect("selected result").child_id.0,
+        "wait-b"
+    );
+    assert!(
+        inspect_delivered_test_child(&tx, "wait-b")
+            .await
+            .expect("selected inspection")
+            .result_delivered
+    );
 
     release_a.notify_waiters();
     let unselected = await_delivered_test_terminal(&tx, "wait-a").await;
-    assert!(!unselected.result_delivered, "wait-any must not deliver an unselected child");
+    assert!(
+        !unselected.result_delivered,
+        "wait-any must not deliver an unselected child"
+    );
 
     stop_delivered_test_supervisor(tx, actor).await;
 }
@@ -533,8 +631,16 @@ async fn result_delivered_immediate_wait_any_marks_only_the_selected_cached_chil
     let (tx, actor) = delivered_test_supervisor(factory);
     spawn_delivered_test_child(&tx, "cached-a").await;
     spawn_delivered_test_child(&tx, "cached-b").await;
-    assert!(!await_delivered_test_terminal(&tx, "cached-a").await.result_delivered);
-    assert!(!await_delivered_test_terminal(&tx, "cached-b").await.result_delivered);
+    assert!(
+        !await_delivered_test_terminal(&tx, "cached-a")
+            .await
+            .result_delivered
+    );
+    assert!(
+        !await_delivered_test_terminal(&tx, "cached-b")
+            .await
+            .result_delivered
+    );
 
     let (wait_tx, wait_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
@@ -611,8 +717,16 @@ async fn result_delivered_wait_any_running_poll_and_timeout_do_not_predeliver() 
 
         release_a.notify_one();
         release_b.notify_one();
-        assert!(!await_delivered_test_terminal(&tx, "running-a").await.result_delivered);
-        assert!(!await_delivered_test_terminal(&tx, "running-b").await.result_delivered);
+        assert!(
+            !await_delivered_test_terminal(&tx, "running-a")
+                .await
+                .result_delivered
+        );
+        assert!(
+            !await_delivered_test_terminal(&tx, "running-b")
+                .await
+                .result_delivered
+        );
         stop_delivered_test_supervisor(tx, actor).await;
     }
 }
@@ -686,7 +800,14 @@ async fn result_delivered_dropped_wait_any_channels_do_not_mark_selected_results
 
 #[tokio::test]
 async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results() {
-    for operation in ["status", "list", "wait", "join", "pending-join", "pending-wait"] {
+    for operation in [
+        "status",
+        "list",
+        "wait",
+        "join",
+        "pending-join",
+        "pending-wait",
+    ] {
         let release = Arc::new(Notify::new());
         let pending = operation.starts_with("pending-");
         let factory = FakeTaskFactory::new();
@@ -700,7 +821,11 @@ async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results()
         let (tx, actor) = delivered_test_supervisor(factory);
         spawn_delivered_test_child(&tx, operation).await;
         if !pending {
-            assert!(!await_delivered_test_terminal(&tx, operation).await.result_delivered);
+            assert!(
+                !await_delivered_test_terminal(&tx, operation)
+                    .await
+                    .result_delivered
+            );
         }
 
         match operation {
@@ -711,7 +836,9 @@ async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results()
                     priority: MessagePriority::Command,
                     agent_id: AgentId("parent-agent".into()),
                     payload: SupervisorPayload::ChildStatus(AgentId(operation.into()), result_tx),
-                }).await.expect("dropped status request should send");
+                })
+                .await
+                .expect("dropped status request should send");
             }
             "list" => {
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -720,7 +847,9 @@ async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results()
                     priority: MessagePriority::Command,
                     agent_id: AgentId("parent-agent".into()),
                     payload: SupervisorPayload::ListChildren(result_tx),
-                }).await.expect("dropped list request should send");
+                })
+                .await
+                .expect("dropped list request should send");
             }
             "wait" | "pending-wait" => {
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -733,7 +862,9 @@ async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results()
                         Duration::from_secs(1),
                         result_tx,
                     ),
-                }).await.expect("dropped wait request should send");
+                })
+                .await
+                .expect("dropped wait request should send");
             }
             "join" | "pending-join" => {
                 let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -742,7 +873,9 @@ async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results()
                     priority: MessagePriority::Command,
                     agent_id: AgentId("parent-agent".into()),
                     payload: SupervisorPayload::JoinChild(AgentId(operation.into()), result_tx),
-                }).await.expect("dropped join request should send");
+                })
+                .await
+                .expect("dropped join request should send");
             }
             _ => unreachable!(),
         }
@@ -751,7 +884,10 @@ async fn result_delivered_dropped_result_channels_do_not_mark_terminal_results()
             release.notify_waiters();
         }
         let inspection = await_delivered_test_terminal(&tx, operation).await;
-        assert!(!inspection.result_delivered, "failed {operation} response send must not deliver");
+        assert!(
+            !inspection.result_delivered,
+            "failed {operation} response send must not deliver"
+        );
 
         let (recovery_tx, recovery_rx) = tokio::sync::oneshot::channel();
         tx.send(SupervisorMessage {
@@ -826,7 +962,15 @@ async fn result_delivered_pending_receivers_observe_a_linearized_monotonic_cache
         .expect("first join response should arrive")
         .expect("first join should succeed");
     assert_eq!(first_terminal.child_id.0, "concurrent-child");
-    assert_eq!(first_terminal.result.as_ref().expect("cached success").messages[0].content, "one cached body");
+    assert_eq!(
+        first_terminal
+            .result
+            .as_ref()
+            .expect("cached success")
+            .messages[0]
+            .content,
+        "one cached body"
+    );
     assert!(
         inspect_delivered_test_child(&tx, "concurrent-child")
             .await
@@ -841,14 +985,20 @@ async fn result_delivered_pending_receivers_observe_a_linearized_monotonic_cache
             .expect("join response should arrive")
             .expect("join should succeed");
         assert_eq!(terminal.child_id.0, "concurrent-child");
-        assert_eq!(terminal.result.as_ref().expect("cached success").messages[0].content, "one cached body");
+        assert_eq!(
+            terminal.result.as_ref().expect("cached success").messages[0].content,
+            "one cached body"
+        );
     }
 
     for _ in 0..16 {
         let inspection = inspect_delivered_test_child(&tx, "concurrent-child")
             .await
             .expect("repeated concurrent aftermath inspection should succeed");
-        assert!(inspection.result_delivered, "delivery must never regress to false");
+        assert!(
+            inspection.result_delivered,
+            "delivery must never regress to false"
+        );
         assert_eq!(inspection.terminal.child_id.0, "concurrent-child");
         assert_eq!(
             inspection
@@ -879,28 +1029,50 @@ async fn result_delivered_model_visible_json_remains_unchanged() {
     );
     let (tx, actor) = delivered_test_supervisor(factory);
     spawn_delivered_test_child(&tx, "json-child").await;
-    assert!(!await_delivered_test_terminal(&tx, "json-child").await.result_delivered);
+    assert!(
+        !await_delivered_test_terminal(&tx, "json-child")
+            .await
+            .result_delivered
+    );
 
     let values = vec![
-        ChildStatusTool { sender: tx.clone() }
-            .call(serde_json::json!({"child_id": "json-child"}), &CapabilityToken::default())
-            .await
-            .expect("status tool should succeed"),
-        ListChildAgentTool { sender: tx.clone() }
-            .call(serde_json::json!({}), &CapabilityToken::default())
-            .await
-            .expect("list tool should succeed"),
-        WaitChildAgentTool { sender: tx.clone() }
-            .call(
-                serde_json::json!({"child_id": "json-child", "timeout_ms": 0}),
-                &CapabilityToken::default(),
-            )
-            .await
-            .expect("wait tool should succeed"),
-        JoinChildAgentTool { sender: tx.clone() }
-            .call(serde_json::json!({"child_id": "json-child"}), &CapabilityToken::default())
-            .await
-            .expect("join tool should succeed"),
+        ChildStatusTool {
+            sender: tx.clone(),
+            caller_id: AgentId("parent-agent".into()),
+        }
+        .call(
+            serde_json::json!({"child_id": "json-child"}),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("status tool should succeed"),
+        ListChildAgentTool {
+            sender: tx.clone(),
+            caller_id: AgentId("parent-agent".into()),
+        }
+        .call(serde_json::json!({}), &CapabilityToken::default())
+        .await
+        .expect("list tool should succeed"),
+        WaitChildAgentTool {
+            sender: tx.clone(),
+            caller_id: AgentId("parent-agent".into()),
+        }
+        .call(
+            serde_json::json!({"child_id": "json-child", "timeout_ms": 0}),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("wait tool should succeed"),
+        JoinChildAgentTool {
+            sender: tx.clone(),
+            caller_id: AgentId("parent-agent".into()),
+        }
+        .call(
+            serde_json::json!({"child_id": "json-child"}),
+            &CapabilityToken::default(),
+        )
+        .await
+        .expect("join tool should succeed"),
     ];
     for value in values {
         let encoded = serde_json::to_string(&value).expect("tool JSON should encode");
@@ -917,7 +1089,7 @@ async fn inspect_delivered_test_roster(
     let (list_tx, list_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("host-control-plane".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::InspectChildren(list_tx),
     })
     .await
@@ -990,7 +1162,7 @@ async fn result_delivered_host_roster_inspection_never_marks_delivery() {
     assert_eq!(inspected.len(), roster.len());
     for (inspected_entry, model_entry) in inspected.iter().zip(&roster) {
         assert_eq!(inspected_entry.child_id, model_entry.child_id);
-        assert_eq!(inspected_entry.agent_type, model_entry.agent_type);
+        assert_eq!(inspected_entry.placement, model_entry.placement);
         assert_eq!(inspected_entry.task, model_entry.task);
         assert_eq!(inspected_entry.status, model_entry.status);
         assert_eq!(inspected_entry.ready, model_entry.ready);

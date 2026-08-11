@@ -1,6 +1,7 @@
 use super::restart::run_task_with_retries;
-use super::spawn::{count_tool_uses, status_from_spawn_result};
+use super::spawn::{await_awaiting_approval_terminal, count_tool_uses, status_from_spawn_result};
 use super::*;
+use tracing::Instrument;
 
 impl AgentSupervisor {
     /// Run the supervisor actor loop.
@@ -111,18 +112,27 @@ impl AgentSupervisor {
         task_set: &mut tokio::task::JoinSet<()>,
         config: SpawnConfig,
         factory: Arc<dyn TaskFactory>,
+        create_agent_span: Option<tracing::Span>,
+        accepted_budget: super::spawn::AcceptedBudgetReservation,
     ) {
         let agent_id = config.agent_id.clone();
         let token = CancellationToken::new(Duration::from_secs(5));
         let (input_queue, input_handle) = AgentInputQueue::new();
-        let task_future =
-            factory.create_task_with_input(config.clone(), token.clone(), input_queue);
+        let task_future = factory.create_task_with_input_and_budget(
+            config.clone(),
+            token.clone(),
+            input_queue,
+            accepted_budget.child_budget,
+        );
         let started_at_ms = now_ms();
-        let result_context = self.child_result_context(&config, Instant::now());
+        let result_context =
+            self.child_result_context(&config, Instant::now(), accepted_budget.parent_budget);
         let retry_counts = Arc::clone(&self.retry_counts_shared);
         let child_results = Arc::clone(&self.child_results);
         let cancellation_tokens = Arc::clone(&self.cancellation_tokens);
         let child_inputs = Arc::clone(&self.child_inputs);
+        let budget_reservations = Arc::clone(&self.budget_reservations);
+        let lifecycle_cancellation = token.clone();
 
         lock_mutex(&self.cancellation_tokens, "cancellation_tokens")
             .insert(agent_id.clone(), token);
@@ -138,12 +148,26 @@ impl AgentSupervisor {
             },
         );
 
-        task_set.spawn(async move {
-            let result = run_task_with_retries(factory, config, task_future, retry_counts).await;
-            let result = AgentSupervisor::process_child_result(result, &result_context);
+        let child_lifecycle = async move {
+            let result = run_task_with_retries(
+                Arc::clone(&factory),
+                config.clone(),
+                task_future,
+                retry_counts,
+            )
+            .await;
+            let result = await_awaiting_approval_terminal(result, lifecycle_cancellation).await;
+            let _after_hook_outcome = factory.after_spawn(&config, &result);
+            AgentSupervisor::settle_budget_reservation(
+                &budget_reservations,
+                &result_context.agent_id,
+                &result,
+            );
+            let result =
+                AgentSupervisor::process_child_result_after_settlement(result, &result_context);
             let terminal = ChildTerminalResult {
                 child_id: result_context.agent_id.clone(),
-                agent_type: result_context.agent_type.clone(),
+                placement: result_context.placement.clone(),
                 status: status_from_spawn_result(&result),
                 elapsed_ms: result_context.spawn_start.elapsed().as_millis() as u64,
                 tool_uses: result.as_ref().map(count_tool_uses).unwrap_or(0),
@@ -153,7 +177,12 @@ impl AgentSupervisor {
             lock_mutex(&cancellation_tokens, "cancellation_tokens")
                 .remove(&result_context.agent_id);
             lock_mutex(&child_inputs, "child_inputs").remove(&result_context.agent_id);
-        });
+        };
+        if let Some(span) = create_agent_span {
+            task_set.spawn(child_lifecycle.instrument(span));
+        } else {
+            task_set.spawn(child_lifecycle);
+        }
     }
 }
 
@@ -167,12 +196,10 @@ pub(super) fn now_ms() -> u64 {
 pub(super) fn child_metadata(config: &SpawnConfig, started_at_ms: u64) -> ChildMetadata {
     ChildMetadata {
         child_id: config.agent_id.clone(),
-        agent_type: config
-            .agent_type
-            .clone()
-            .unwrap_or_else(|| "generic".to_string()),
+        placement: config.placement.clone(),
         task: config.task.clone(),
         parent_id: config.parent_id.clone(),
+        capability: config.capability.clone().unwrap_or_default(),
         started_at_ms,
         finished_at_ms: None,
     }

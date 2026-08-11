@@ -5,68 +5,28 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing_subscriber::layer::SubscriberExt;
 
-struct PendingSpawnAgentTool;
+/// Test-local stand-in used only to verify `ToolRegistry` dispatch and tracing.
+/// Production `spawn_agent` schema and result coverage lives in simulacra-runtime.
+struct RegistrySpawnStub;
 
-impl Tool for PendingSpawnAgentTool {
+impl Tool for RegistrySpawnStub {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "spawn_agent".into(),
-            description: "Spawn a supervised child agent to handle a delegated task and return a live child handle.".into(),
+            description: "Test-local spawn-shaped registry stub.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "agent_type": {
+                    "placement": {
                         "type": "string",
-                        "description": "Name of a configured child agent type to use for the child agent"
+                        "description": "Configured child placement"
                     },
                     "task": {
                         "type": "string",
                         "description": "The task or instruction delegated to the child agent"
-                    },
-                    "budget": {
-                        "type": "object",
-                        "description": "Requested child budget. Each field is an upper bound and must fit within the parent's remaining budget.",
-                        "properties": {
-                            "max_tokens": { "type": "integer", "minimum": 0 },
-                            "max_turns": { "type": "integer", "minimum": 0 },
-                            "max_cost": { "type": "string", "description": "Decimal string, same representation as ResourceBudget.max_cost" },
-                            "max_sub_agents": { "type": "integer", "minimum": 0 }
-                        },
-                        "required": ["max_tokens", "max_turns", "max_cost", "max_sub_agents"],
-                        "additionalProperties": false
-                    },
-                    "capabilities": {
-                        "type": "object",
-                        "description": "Optional attenuated capability override. If omitted, the child receives the configured capabilities for agent_type intersected with the parent's token.",
-                        "properties": {
-                            "network": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            },
-                            "mcp_tools": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            },
-                            "shell": { "type": "boolean" },
-                            "javascript": { "type": "boolean" },
-                            "python": { "type": "boolean" },
-                            "paths_write": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            },
-                            "paths_read": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            },
-                            "spawn_types": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            }
-                        },
-                        "additionalProperties": false
                     }
                 },
-                "required": ["agent_type", "task", "budget"],
+                "required": ["placement", "task"],
                 "additionalProperties": false
             }),
         }
@@ -78,8 +38,8 @@ impl Tool for PendingSpawnAgentTool {
         _capability: &CapabilityToken,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, ToolError>> + Send + '_>>
     {
-        let agent_type = arguments
-            .get("agent_type")
+        let placement = arguments
+            .get("placement")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
@@ -92,23 +52,11 @@ impl Tool for PendingSpawnAgentTool {
         );
 
         Box::pin(async move {
-            if arguments
-                .get("simulate_error")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                Ok(json!({
-                    "child_id": child_id,
-                    "agent_type": agent_type,
-                    "error": "not implemented"
-                }))
-            } else {
-                Ok(json!({
-                    "child_id": child_id,
-                    "agent_type": agent_type,
-                    "status": "running"
-                }))
-            }
+            Ok(json!({
+                "child_id": child_id,
+                "placement": placement,
+                "status": "running"
+            }))
         })
     }
 }
@@ -193,145 +141,9 @@ fn capture_spans<T>(f: impl FnOnce() -> T) -> (T, Vec<CapturedSpan>) {
 fn registry_with_spawn_tool() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry
-        .register(Box::new(PendingSpawnAgentTool))
+        .register(Box::new(RegistrySpawnStub))
         .expect("test tool registration should succeed");
     registry
-}
-
-fn call_spawn_tool(arguments: Value) -> Value {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            registry_with_spawn_tool()
-                .call("spawn_agent", arguments, &CapabilityToken::default())
-                .await
-                .expect("spawn_agent call should produce a test value")
-        })
-}
-
-#[test]
-fn spawn_agent_definition_uses_the_documented_name_and_description() {
-    let definition = PendingSpawnAgentTool.definition();
-
-    assert_eq!(definition.name, "spawn_agent");
-    assert_eq!(
-        definition.description,
-        "Spawn a supervised child agent to handle a delegated task and return a live child handle."
-    );
-}
-
-#[test]
-fn spawn_agent_definition_exposes_agent_type_task_budget_and_optional_capabilities() {
-    let definition = PendingSpawnAgentTool.definition();
-    let properties = definition
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .expect("schema should expose properties");
-
-    for field in ["agent_type", "task", "budget", "capabilities"] {
-        assert!(
-            properties.contains_key(field),
-            "spawn_agent schema should expose {field}"
-        );
-    }
-}
-
-#[test]
-fn spawn_agent_budget_schema_requires_all_budget_fields_and_disallows_additional_properties() {
-    let definition = PendingSpawnAgentTool.definition();
-    let budget = definition
-        .input_schema
-        .pointer("/properties/budget")
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    assert_eq!(
-        budget.get("required"),
-        Some(&json!([
-            "max_tokens",
-            "max_turns",
-            "max_cost",
-            "max_sub_agents"
-        ]))
-    );
-    assert_eq!(
-        budget.get("additionalProperties"),
-        Some(&Value::Bool(false))
-    );
-}
-
-#[test]
-fn spawn_agent_capabilities_schema_matches_the_spec_shape() {
-    let definition = PendingSpawnAgentTool.definition();
-    let capabilities = definition
-        .input_schema
-        .pointer("/properties/capabilities/properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
-    for field in [
-        "network",
-        "mcp_tools",
-        "shell",
-        "javascript",
-        "python",
-        "paths_write",
-        "paths_read",
-        "spawn_types",
-    ] {
-        assert!(
-            capabilities.contains_key(field),
-            "capability override schema should include {field}"
-        );
-    }
-}
-
-#[test]
-fn successful_spawn_agent_result_includes_child_id_agent_type_and_running_status() {
-    let value = call_spawn_tool(json!({
-        "agent_type": "researcher",
-        "task": "Investigate",
-        "budget": {
-            "max_tokens": 10,
-            "max_turns": 2,
-            "max_cost": "0",
-            "max_sub_agents": 0
-        }
-    }));
-
-    for field in ["child_id", "agent_type", "status"] {
-        assert!(
-            value.get(field).is_some(),
-            "successful spawn_agent results should include {field}"
-        );
-    }
-    assert_eq!(value.get("status").and_then(Value::as_str), Some("running"));
-}
-
-#[test]
-fn failed_spawn_agent_result_has_error_shape_with_child_id_agent_type_and_error() {
-    let value = call_spawn_tool(json!({
-        "simulate_error": true,
-        "agent_type": "researcher",
-        "task": "Investigate",
-        "budget": {
-            "max_tokens": 10,
-            "max_turns": 2,
-            "max_cost": "0",
-            "max_sub_agents": 0
-        }
-    }));
-
-    for field in ["child_id", "agent_type", "error"] {
-        assert!(
-            value.get(field).is_some(),
-            "failed spawn_agent results should include {field}"
-        );
-    }
 }
 
 // NOTE: The test for ToolError::ExecutionFailed on failures is in
@@ -345,7 +157,7 @@ fn failed_spawn_agent_result_has_error_shape_with_child_id_agent_type_and_error(
 // layer where they are enforced.
 
 #[test]
-fn spawn_agent_tool_invocation_emits_the_normal_tool_span_with_gen_ai_tool_name() {
+fn test_local_spawn_shaped_tool_invocation_emits_the_normal_registry_tool_span() {
     let (_, spans) = capture_spans(|| {
         let registry = registry_with_spawn_tool();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -355,14 +167,8 @@ fn spawn_agent_tool_invocation_emits_the_normal_tool_span_with_gen_ai_tool_name(
         let _ = rt.block_on(registry.call(
             "spawn_agent",
             json!({
-                "agent_type": "researcher",
-                "task": "Investigate",
-                "budget": {
-                    "max_tokens": 10,
-                    "max_turns": 2,
-                    "max_cost": "0",
-                    "max_sub_agents": 0
-                }
+                "placement": "workspace",
+                "task": "Investigate"
             }),
             &CapabilityToken::default(),
         ));
@@ -373,6 +179,6 @@ fn spawn_agent_tool_invocation_emits_the_normal_tool_span_with_gen_ai_tool_name(
             span.name == "tool_invoke"
                 && span.fields.get("gen_ai.tool.name").map(String::as_str) == Some("spawn_agent")
         }),
-        "spawn_agent should use the standard tool invocation span surface"
+        "the registry should use the standard tool invocation span surface"
     );
 }

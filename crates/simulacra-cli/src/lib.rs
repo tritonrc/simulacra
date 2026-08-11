@@ -53,8 +53,8 @@ pub type CliError = anyhow::Error;
 pub use simulacra_runtime::ProviderKind;
 use simulacra_runtime::{
     AgentTaskFactory, CancelChildAgentTool, ChildProviderFactory, ChildStatusTool,
-    CloseChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, SpawnAgentTool,
-    SteerChildAgentTool, WaitChildAgentTool,
+    CloseChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, ListChildAgentTool,
+    SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -239,7 +239,7 @@ pub struct CliBootstrap {
     budget_arc: Arc<Mutex<ResourceBudget>>,
     #[allow(dead_code)]
     proc_turn: Arc<std::sync::atomic::AtomicU64>,
-    /// Receiver for spawn_agent messages, created when can_spawn is non-empty.
+    /// Receiver for spawn_agent messages, created when child placements are allowed.
     /// Passed to the supervisor's run_actor_loop.
     #[allow(dead_code)]
     spawn_rx: Option<tokio::sync::mpsc::Receiver<simulacra_runtime::SupervisorMessage>>,
@@ -291,7 +291,6 @@ struct SupervisorActorParts {
     budget: Arc<Mutex<ResourceBudget>>,
     parent_capability: CapabilityToken,
     supervisor_sender: Option<tokio::sync::mpsc::Sender<simulacra_runtime::SupervisorMessage>>,
-    parent_model: String,
     pipeline: Arc<HookPipeline>,
     integration_registry_for_refresh: Option<Arc<simulacra_integration::IntegrationRegistry>>,
     entry_agent: String,
@@ -1220,55 +1219,77 @@ pub fn bootstrap(args: &CliArgs) -> Result<CliBootstrap> {
         (None, None)
     };
 
-    // Register the spawn_agent tool when the entry agent has can_spawn configured.
+    // Register spawn_agent only for the root's configured and authorized placements.
     // The tool is registered in the ToolRegistry so AgentLoop can execute it.
     // It communicates with the supervisor via an mpsc channel.
     let mut spawn_rx = None;
     let mut spawn_tx_for_factory = None;
-    if !agent_type.can_spawn.is_empty() {
+    let mut allowed_placements = agent_type
+        .allowed_child_placements
+        .iter()
+        .filter(|placement| config.child_placements.contains_key(*placement))
+        .filter(|placement| capability_token.spawn_placements.contains(*placement))
+        .cloned()
+        .collect::<Vec<_>>();
+    allowed_placements.sort();
+    allowed_placements.dedup();
+    if !allowed_placements.is_empty() {
         let (spawn_tx, rx) = tokio::sync::mpsc::channel(16);
         let spawn_sink: Arc<dyn simulacra_runtime::ActivitySink> = activity_sink
             .clone()
             .unwrap_or_else(|| Arc::new(simulacra_runtime::NoopActivitySink));
         let spawn_tx_clone = spawn_tx.clone();
+        let root_caller_id = AgentId(entry_agent.clone());
         registry
             .register(Box::new(SpawnAgentTool {
                 sender: spawn_tx.clone(),
-                can_spawn: agent_type.can_spawn.clone(),
+                allowed_placements,
                 activity_sink: spawn_sink,
-                parent_id: AgentId(entry_agent.clone()),
-                tiers: config.tiers.clone(),
+                parent_id: root_caller_id.clone(),
                 parent_budget: Arc::clone(&budget_arc),
-                parent_model: model.clone(),
                 guidance: None,
             }))
             .context("failed to register spawn_agent tool")?;
         registry
             .register(Box::new(JoinChildAgentTool {
                 sender: spawn_tx.clone(),
+                caller_id: root_caller_id.clone(),
             }))
             .context("failed to register join_child_agent tool")?;
         registry
-            .register(Box::new(CancelChildAgentTool { sender: spawn_tx }))
+            .register(Box::new(CancelChildAgentTool {
+                sender: spawn_tx,
+                caller_id: root_caller_id.clone(),
+            }))
             .context("failed to register cancel_child_agent tool")?;
         registry
             .register(Box::new(SteerChildAgentTool {
                 sender: spawn_tx_clone.clone(),
+                caller_id: root_caller_id.clone(),
             }))
             .context("failed to register steer_child_agent tool")?;
         registry
             .register(Box::new(ChildStatusTool {
                 sender: spawn_tx_clone.clone(),
+                caller_id: root_caller_id.clone(),
             }))
             .context("failed to register child_status tool")?;
         registry
+            .register(Box::new(ListChildAgentTool {
+                sender: spawn_tx_clone.clone(),
+                caller_id: root_caller_id.clone(),
+            }))
+            .context("failed to register list_child_agents tool")?;
+        registry
             .register(Box::new(WaitChildAgentTool {
                 sender: spawn_tx_clone.clone(),
+                caller_id: root_caller_id.clone(),
             }))
             .context("failed to register wait_child_agent tool")?;
         registry
             .register(Box::new(CloseChildAgentTool {
                 sender: spawn_tx_clone.clone(),
+                caller_id: root_caller_id,
             }))
             .context("failed to register close_child_agent tool")?;
         spawn_rx = Some(rx);
@@ -1668,7 +1689,6 @@ fn run_booted(
         budget: Arc::clone(&boot.budget_arc),
         parent_capability: boot.capability_token.clone(),
         supervisor_sender: boot.spawn_tx.clone(),
-        parent_model: boot.model.clone(),
         pipeline: Arc::clone(&boot.pipeline),
         integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
         entry_agent: boot.entry_agent.clone(),
@@ -1779,11 +1799,11 @@ fn run_booted(
                 }
             };
 
-            let can_spawn = boot
+            let allowed_child_placements = boot
                 .config
                 .agent_types
                 .get(&boot.entry_agent)
-                .map(|a| a.can_spawn.clone())
+                .map(|a| a.allowed_child_placements.clone())
                 .unwrap_or_default();
             let session_config = InteractiveSessionConfig {
                 project_name: boot.config.project.name.clone(),
@@ -1797,7 +1817,7 @@ fn run_booted(
                 },
                 requested_session_id: args.session.clone(),
                 tool_definitions: boot.tool_definitions.clone(),
-                can_spawn,
+                allowed_child_placements,
                 skill_catalog: boot.skill_catalog.clone(),
             };
 
@@ -1818,6 +1838,9 @@ fn run_booted(
                 Arc::clone(&boot.vfs),
                 session_config,
             );
+            if let Some(sender) = boot.spawn_tx.clone() {
+                session.set_supervisor_control(sender, AgentId(boot.entry_agent.clone()));
+            }
             if let Some(catalog) = &boot.mcp_catalog {
                 session.set_skill_dependency_activator(
                     Arc::clone(catalog) as Arc<dyn simulacra_types::SkillDependencyActivator>,
@@ -2082,9 +2105,12 @@ fn start_supervisor_actor(
     activity_sink: Option<Arc<dyn simulacra_runtime::ActivitySink>>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let parts = parts?;
+    let root_agent_id = AgentId(parts.entry_agent.clone());
     let supervisor_sink: Arc<dyn simulacra_runtime::ActivitySink> = activity_sink
         .clone()
         .unwrap_or_else(|| Arc::new(simulacra_runtime::NoopActivitySink));
+    let supervisor_sink: Arc<dyn simulacra_runtime::ActivitySink> =
+        Arc::new(simulacra_runtime::RoutedActivitySink::new(supervisor_sink));
     let child_cell_configurator = parts.integration_registry_for_refresh.as_ref().map(|reg| {
         let reg = Arc::clone(reg);
         let tenant_integrations = parts
@@ -2135,16 +2161,16 @@ fn start_supervisor_actor(
             .and_then(|tenant| tenant.mcp_servers.clone())
             .unwrap_or_default()
     };
+    let supervisor_journal = Arc::clone(&parts.journal);
     let task_factory = Arc::new(AgentTaskFactory {
         config: parts.config,
         provider_kind: parts.provider_kind,
         vfs: parts.vfs,
         journal: parts.journal,
-        activity_sink: supervisor_sink,
+        activity_sink: Arc::clone(&supervisor_sink),
         parent_capability: parts.parent_capability.clone(),
         allowed_mcp_servers: Some(allowed_mcp_servers),
         supervisor_sender: parts.supervisor_sender,
-        parent_model: parts.parent_model,
         pipeline: Some(Arc::clone(&parts.pipeline)),
         script_executor: Some(simulacra_sandbox::ScriptExecutor::new(4)),
         child_cell_configurator,
@@ -2157,9 +2183,9 @@ fn start_supervisor_actor(
         parts.budget,
         task_factory,
     );
-    supervisor.set_activity_sink(activity_sink.unwrap_or_else(|| {
-        Arc::new(simulacra_runtime::NoopActivitySink) as Arc<dyn simulacra_runtime::ActivitySink>
-    }));
+    supervisor.set_journal_storage(supervisor_journal);
+    supervisor.set_root_agent_id(root_agent_id);
+    supervisor.set_activity_sink(supervisor_sink);
 
     Some(runtime.spawn(async move {
         supervisor.run_actor_loop(parts.spawn_rx).await;
@@ -2299,6 +2325,177 @@ mod budget_regression_tests {
     }
 
     #[test]
+    fn s060_production_cli_supervisor_uses_bootstrap_journal_for_child_lifecycle() {
+        use simulacra_types::JournalEntryKind;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should be created");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("temporary config directory should be created");
+            let config_path = dir.path().join("simulacra.toml");
+            std::fs::write(
+                &config_path,
+                r#"[project]
+name = "s060-cli-journal-composition"
+
+[agent_types.default]
+model = "claude-sonnet-4-20250514"
+max_turns = 4
+max_tokens = 100
+max_sub_agents = 1
+allowed_child_placements = ["in_process"]
+
+[agent_types.default.capabilities]
+paths_read = ["/workspace/**"]
+
+[child_placements.in_process]
+model = "claude-sonnet-4-20250514"
+max_turns = 1
+max_tokens = 20
+max_sub_agents = 1
+
+[child_placements.in_process.capabilities]
+paths_read = ["/workspace/**"]
+
+[task]
+entry_agent = "default"
+task = "bootstrap"
+"#,
+            )
+            .expect("temporary config should be written");
+
+            let mut boot = bootstrap(&CliArgs {
+                config_path: config_path.to_string_lossy().into_owned(),
+                task: Some("bootstrap".into()),
+                mode: Some(CliMode::Interactive),
+                verbose: false,
+                otlp_endpoint: None,
+                session: None,
+                model: None,
+                max_turns: None,
+                max_tokens: None,
+                max_cost: None,
+                no_catalog: true,
+                output_format: OutputFormat::Text,
+            })
+            .expect("spawn-capable CLI bootstrap should succeed offline");
+            let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
+            boot.journal = Arc::clone(&journal);
+            let spawn_rx = boot
+                .spawn_rx
+                .take()
+                .expect("allowed child placement should create supervisor receiver");
+            let child_provider_factory: simulacra_runtime::ChildProviderFactory =
+                Arc::new(|_, _| {
+                    Ok(Box::new(scripted_provider([response(
+                        assistant("child completed"),
+                        FinishReason::EndTurn,
+                    )])) as Box<dyn Provider>)
+                });
+            let supervisor_parts = SupervisorActorParts {
+                spawn_rx,
+                config: boot.config.clone(),
+                provider_kind: boot.provider_kind.clone(),
+                vfs: Arc::clone(&boot.vfs),
+                journal: Arc::clone(&journal),
+                budget: Arc::clone(&boot.budget_arc),
+                parent_capability: boot.capability_token.clone(),
+                supervisor_sender: boot.spawn_tx.clone(),
+                pipeline: Arc::clone(&boot.pipeline),
+                integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
+                entry_agent: boot.entry_agent.clone(),
+                child_provider_factory: Some(child_provider_factory),
+            };
+            let _supervisor_task = AbortOnDrop(
+                start_supervisor_actor(&runtime, Some(supervisor_parts), None)
+                    .expect("production CLI supervisor actor should start"),
+            );
+
+            let forged_id = AgentId("child-ffffffffffffffffffffffffffffffff".into());
+            let forged_parent = AgentId("forged-root-before-cli-exposure".into());
+            let (forged_tx, forged_rx) = tokio::sync::oneshot::channel();
+            boot.spawn_tx
+                .as_ref()
+                .expect("spawn-capable bootstrap sender")
+                .send(simulacra_runtime::SupervisorMessage {
+                    priority: simulacra_runtime::MessagePriority::Command,
+                    agent_id: forged_parent.clone(),
+                    payload: simulacra_runtime::SupervisorPayload::Spawn(
+                        Box::new(simulacra_runtime::SpawnConfig {
+                            agent_id: forged_id,
+                            parent_id: forged_parent,
+                            capability: None,
+                            budget: ResourceBudget::new(20, 1, Decimal::ZERO, 1),
+                            restart_strategy: simulacra_runtime::RestartStrategy::LetCrash,
+                            placement: "in_process".into(),
+                            task: "must be rejected before CLI exposure".into(),
+                            instructions: None,
+                        }),
+                        forged_tx,
+                    ),
+                })
+                .await
+                .expect("forged pre-exposure probe send");
+            let forged_error = forged_rx
+                .await
+                .expect("forged pre-exposure probe response")
+                .expect_err("CLI production actor must already be bound to its configured root");
+            assert!(matches!(
+                forged_error,
+                simulacra_runtime::RuntimeError::CapabilityViolation(_)
+            ));
+
+            let acknowledgement = boot
+                .tool_registry
+                .call(
+                    "spawn_agent",
+                    serde_json::json!({
+                        "placement": "in_process",
+                        "task": "complete and persist lifecycle",
+                        "budget": {
+                            "max_tokens": 20,
+                            "max_turns": 1,
+                            "max_cost": "0",
+                            "max_sub_agents": 1
+                        }
+                    }),
+                    &boot.capability_token,
+                )
+                .await
+                .expect("production CLI spawn tool should accept the child");
+            let child_id = acknowledgement["child_id"]
+                .as_str()
+                .expect("spawn acknowledgement child id")
+                .to_string();
+            boot.tool_registry
+                .call(
+                    "join_child_agent",
+                    serde_json::json!({"child_id": child_id}),
+                    &boot.capability_token,
+                )
+                .await
+                .expect("production CLI child should complete and join");
+
+            let entries = journal
+                .read_all(&AgentId(boot.entry_agent.clone()))
+                .expect("production CLI parent journal should be readable");
+            assert!(entries.iter().all(|entry| entry.schema_version == 3));
+            assert!(entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::SubAgentSpawned { child_id: spawned, .. }
+                    if spawned.0 == child_id
+            )));
+            assert!(entries.iter().any(|entry| matches!(
+                &entry.entry,
+                JournalEntryKind::SubAgentCompleted { child_id: completed, .. }
+                    if completed.0 == child_id
+            )));
+        });
+    }
+
+    #[test]
     fn interactive_supervisor_actor_spawn_uses_current_shared_parent_turn_budget() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2317,17 +2514,17 @@ name = "s006-stale-supervisor-budget"
 model = "claude-sonnet-4-20250514"
 max_turns = 3
 max_tokens = 1000
-can_spawn = ["researcher"]
+allowed_child_placements = ["researcher"]
 
 [agent_types.default.capabilities]
 paths_read = ["/workspace/**"]
 
-[agent_types.researcher]
+[child_placements.researcher]
 model = "claude-sonnet-4-20250514"
 max_turns = 2
 max_tokens = 100
 
-[agent_types.researcher.capabilities]
+[child_placements.researcher.capabilities]
 paths_read = ["/workspace/**"]
 
 [task]
@@ -2356,11 +2553,11 @@ task = "bootstrap"
             let spawn_rx = boot
                 .spawn_rx
                 .take()
-                .expect("can_spawn should create the supervisor channel");
+                .expect("allowed_child_placements should create the supervisor channel");
             let supervisor_sender = boot
                 .spawn_tx
                 .clone()
-                .expect("can_spawn should create the supervisor sender");
+                .expect("allowed_child_placements should create the supervisor sender");
             let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
             let supervisor_parts = SupervisorActorParts {
                 spawn_rx,
@@ -2371,7 +2568,6 @@ task = "bootstrap"
                 budget: Arc::clone(&boot.budget_arc),
                 parent_capability: boot.capability_token.clone(),
                 supervisor_sender: boot.spawn_tx.clone(),
-                parent_model: boot.model.clone(),
                 pipeline: Arc::clone(&boot.pipeline),
                 integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
                 entry_agent: boot.entry_agent.clone(),
@@ -2398,7 +2594,7 @@ task = "bootstrap"
                     id: "spawn-after-parent-turns".into(),
                     name: "spawn_agent".into(),
                     arguments: serde_json::json!({
-                        "agent_type": "researcher",
+                        "placement": "researcher",
                         "task": "inspect the budget",
                         "budget": {
                             "max_tokens": 100,
@@ -2483,9 +2679,9 @@ task = "bootstrap"
                 .find(|message| message.role == Role::Tool)
                 .expect("spawn_agent should append a tool result");
             assert!(
-                spawn_result
-                    .content
-                    .contains("budget exhausted: turns — used 3, limit 3"),
+                spawn_result.content.contains("max_turns")
+                    && spawn_result.content.contains("requested 2")
+                    && spawn_result.content.contains("remaining 0"),
                 "spawn should be rejected from the current shared parent budget; got: {}",
                 spawn_result.content
             );
@@ -2494,7 +2690,7 @@ task = "bootstrap"
             supervisor_sender
                 .send(simulacra_runtime::SupervisorMessage {
                     priority: simulacra_runtime::MessagePriority::Command,
-                    agent_id: AgentId("budget-regression-roster".into()),
+                    agent_id: AgentId("default".into()),
                     payload: simulacra_runtime::SupervisorPayload::ListChildren(roster_tx),
                 })
                 .await
@@ -2530,20 +2726,19 @@ name = "s006-child-rollup-budget-sync"
 model = "claude-sonnet-4-20250514"
 max_turns = 4
 max_tokens = 100
-max_cost = "0.02"
 max_sub_agents = 1
-can_spawn = ["researcher"]
+allowed_child_placements = ["researcher"]
 
 [agent_types.default.capabilities]
 paths_read = ["/workspace/**"]
 
-[agent_types.researcher]
+[child_placements.researcher]
 model = "claude-sonnet-4-20250514"
 max_turns = 1
 max_tokens = 20
 max_cost = "0.01"
 
-[agent_types.researcher.capabilities]
+[child_placements.researcher.capabilities]
 paths_read = ["/workspace/**"]
 
 [task]
@@ -2572,11 +2767,11 @@ task = "bootstrap"
             let spawn_rx = boot
                 .spawn_rx
                 .take()
-                .expect("can_spawn should create the supervisor channel");
+                .expect("allowed_child_placements should create the supervisor channel");
             let supervisor_sender = boot
                 .spawn_tx
                 .clone()
-                .expect("can_spawn should create the supervisor sender");
+                .expect("allowed_child_placements should create the supervisor sender");
             let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
             let child_provider_factory: simulacra_runtime::ChildProviderFactory =
                 Arc::new(|_, _| {
@@ -2599,7 +2794,6 @@ task = "bootstrap"
                 budget: Arc::clone(&boot.budget_arc),
                 parent_capability: boot.capability_token.clone(),
                 supervisor_sender: boot.spawn_tx.clone(),
-                parent_model: boot.model.clone(),
                 pipeline: Arc::clone(&boot.pipeline),
                 integration_registry_for_refresh: boot.integration_registry_for_refresh.clone(),
                 entry_agent: boot.entry_agent.clone(),
@@ -2617,13 +2811,13 @@ task = "bootstrap"
                     id: "spawn-child-with-usage".into(),
                     name: "spawn_agent".into(),
                     arguments: serde_json::json!({
-                        "agent_type": "researcher",
+                        "placement": "researcher",
                         "task": "complete with usage",
                         "budget": {
                             "max_tokens": 20,
                             "max_turns": 1,
                             "max_cost": "0.01",
-                            "max_sub_agents": 0
+                            "max_sub_agents": 1
                         }
                     }),
                 }],
@@ -2637,13 +2831,13 @@ task = "bootstrap"
                     id: "spawn-after-child-rollup-and-parent-turn".into(),
                     name: "spawn_agent".into(),
                     arguments: serde_json::json!({
-                        "agent_type": "researcher",
+                        "placement": "researcher",
                         "task": "must be rejected by combined usage",
                         "budget": {
                             "max_tokens": 1,
                             "max_turns": 1,
                             "max_cost": "0.001",
-                            "max_sub_agents": 0
+                            "max_sub_agents": 1
                         }
                     }),
                 }],
@@ -2711,7 +2905,7 @@ task = "bootstrap"
             supervisor_sender
                 .send(simulacra_runtime::SupervisorMessage {
                     priority: simulacra_runtime::MessagePriority::Command,
-                    agent_id: AgentId(child_id.clone()),
+                    agent_id: AgentId("default".into()),
                     payload: simulacra_runtime::SupervisorPayload::JoinChild(
                         AgentId(child_id),
                         join_tx,
@@ -2794,9 +2988,9 @@ task = "bootstrap"
                 })
                 .expect("second spawn_agent should append a tool result");
             assert!(
-                spawn_result
-                    .content
-                    .contains("budget exhausted: sub_agents — used 1, limit 1"),
+                spawn_result.content.contains("max_turns")
+                    && spawn_result.content.contains("requested 1")
+                    && spawn_result.content.contains("remaining 0"),
                 "second spawn should see combined parent plus completed-child usage; got: {}",
                 spawn_result.content
             );
@@ -2805,7 +2999,7 @@ task = "bootstrap"
             supervisor_sender
                 .send(simulacra_runtime::SupervisorMessage {
                     priority: simulacra_runtime::MessagePriority::Command,
-                    agent_id: AgentId("budget-regression-roster".into()),
+                    agent_id: AgentId("default".into()),
                     payload: simulacra_runtime::SupervisorPayload::ListChildren(roster_tx),
                 })
                 .await
@@ -3245,15 +3439,13 @@ fn default_config(task: &str) -> SimulacraConfig {
     agent_types.insert(
         "default".to_string(),
         AgentTypeConfig {
-            backend: Default::default(),
             model,
-            acp_profile: None,
             system_prompt: None,
             skills: vec![],
             max_turns: Some(50),
             max_tokens: Some(200_000),
             max_sub_agents: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
             restart_policy: None,
             capabilities: Some(CapabilitiesConfig {
                 shell: true,
@@ -3277,6 +3469,7 @@ fn default_config(task: &str) -> SimulacraConfig {
             description: None,
         },
         agent_types,
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,

@@ -15,17 +15,19 @@ use simulacra_catalog::repo::{
 };
 use simulacra_catalog::{Catalog, NewAgent, NewSkill, Skill, SkillId, Tenant};
 use simulacra_config::{
-    CatalogConfig, McpConfig, McpServerConfig, ProjectConfig, SimulacraConfig, VfsConfig,
+    AgentBackend, CatalogConfig, ChildPlacementConfig, McpConfig, McpServerConfig, ProjectConfig,
+    SimulacraConfig, VfsConfig,
 };
 use simulacra_graphql::context::{AuthenticatedPrincipal, GraphQLContext};
 use simulacra_graphql::schema::{MutationRoot, QueryRoot};
+use simulacra_runtime::InMemoryJournalStorage;
 use simulacra_server::{
     BudgetPoolConfig, EngineError, ProviderFactory, ProviderKind, SimulacraEngine, TaskHandle,
     TaskManager, TaskState, TenantConfig,
 };
 use simulacra_types::{
-    FinishReason, Message, Provider, ProviderError, ProviderResponse, ResourceBudget, Role,
-    TokenUsage, ToolCallMessage, ToolDefinition,
+    AgentId, FinishReason, JournalEntryKind, JournalStorage, Message, Provider, ProviderError,
+    ProviderResponse, ResourceBudget, Role, TokenUsage, ToolCallMessage, ToolDefinition,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -186,7 +188,8 @@ impl GenericHandoffProvider {
             "call-spawn-generic",
             "spawn_agent",
             json!({
-                "system_prompt": "You are a focused specialist sub-agent.",
+                "placement": "generic",
+                "instructions": "You are a focused specialist sub-agent.",
                 "task": "Analyze the delegated part and return a concise finding.",
                 "budget": {
                     "max_tokens": 64,
@@ -240,6 +243,133 @@ impl Provider for SharedGenericHandoffProvider {
     }
 }
 
+struct RecursiveNativeProvider {
+    model: String,
+}
+
+impl RecursiveNativeProvider {
+    fn child_id(messages: &[Message], tool_call_id: &str) -> Result<String, ProviderError> {
+        messages
+            .iter()
+            .rev()
+            .find(|message| message.tool_call_id.as_deref() == Some(tool_call_id))
+            .and_then(|message| serde_json::from_str::<Value>(&message.content).ok())
+            .and_then(|value| value["child_id"].as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                ProviderError::Other(format!(
+                    "missing child_id in {tool_call_id} acknowledgement"
+                ))
+            })
+    }
+
+    fn spawn(
+        call_id: &str,
+        placement: &str,
+        task: &str,
+        max_tokens: u64,
+        max_turns: u32,
+        model: &str,
+    ) -> ProviderResponse {
+        tool_call_response(
+            call_id,
+            "spawn_agent",
+            json!({
+                "placement": placement,
+                "instructions": "preserve recursive native activity",
+                "task": task,
+                "budget": {
+                    "max_tokens": max_tokens,
+                    "max_turns": max_turns,
+                    "max_cost": "0",
+                    "max_sub_agents": 1
+                }
+            }),
+            model,
+        )
+    }
+}
+
+impl Provider for RecursiveNativeProvider {
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [Message],
+        _tools: &'a [ToolDefinition],
+        _budget: &'a mut ResourceBudget,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            match self.model.as_str() {
+                "recursive-root-model" => {
+                    if messages
+                        .iter()
+                        .any(|message| message.tool_call_id.as_deref() == Some("root-join-middle"))
+                    {
+                        Ok(assistant_response("recursive root complete", &self.model))
+                    } else if messages
+                        .iter()
+                        .any(|message| message.tool_call_id.as_deref() == Some("root-spawn-middle"))
+                    {
+                        Ok(tool_call_response(
+                            "root-join-middle",
+                            "join_child_agent",
+                            json!({
+                                "child_id": Self::child_id(messages, "root-spawn-middle")?
+                            }),
+                            &self.model,
+                        ))
+                    } else {
+                        Ok(Self::spawn(
+                            "root-spawn-middle",
+                            "middle_native",
+                            "spawn and join one native leaf",
+                            256,
+                            5,
+                            &self.model,
+                        ))
+                    }
+                }
+                "recursive-middle-model" => {
+                    if messages
+                        .iter()
+                        .any(|message| message.tool_call_id.as_deref() == Some("middle-join-leaf"))
+                    {
+                        Ok(assistant_response("recursive middle complete", &self.model))
+                    } else if messages
+                        .iter()
+                        .any(|message| message.tool_call_id.as_deref() == Some("middle-spawn-leaf"))
+                    {
+                        Ok(tool_call_response(
+                            "middle-join-leaf",
+                            "join_child_agent",
+                            json!({
+                                "child_id": Self::child_id(messages, "middle-spawn-leaf")?
+                            }),
+                            &self.model,
+                        ))
+                    } else {
+                        Ok(Self::spawn(
+                            "middle-spawn-leaf",
+                            "leaf_native",
+                            "emit the server recursive leaf marker",
+                            64,
+                            1,
+                            &self.model,
+                        ))
+                    }
+                }
+                "recursive-leaf-model" => Ok(assistant_response(
+                    "server-recursive-leaf-marker",
+                    &self.model,
+                )),
+                other => Err(ProviderError::Other(format!(
+                    "unexpected recursive provider model {other:?}"
+                ))),
+            }
+        })
+    }
+}
+
 fn empty_config() -> SimulacraConfig {
     SimulacraConfig {
         project: ProjectConfig {
@@ -247,6 +377,7 @@ fn empty_config() -> SimulacraConfig {
             description: None,
         },
         agent_types: HashMap::new(),
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,
@@ -1103,20 +1234,19 @@ async fn catalog_spawn_capability_registers_spawn_agent_for_server_runs() {
     .await;
 
     let mut config = empty_config();
-    config.agent_types.insert(
+    config.child_placements.insert(
         "worker".to_string(),
-        simulacra_config::AgentTypeConfig {
-            backend: Default::default(),
-            model: "claude-3-5-sonnet".to_string(),
+        ChildPlacementConfig {
+            backend: AgentBackend::Native,
+            model: Some("claude-3-5-sonnet".to_string()),
             acp_profile: None,
-            system_prompt: Some("Handle delegated work.".to_string()),
             skills: vec![],
+            capabilities: None,
             max_turns: Some(2),
             max_tokens: Some(128),
+            max_cost: None,
             max_sub_agents: Some(0),
-            can_spawn: vec![],
-            restart_policy: None,
-            capabilities: None,
+            allowed_child_placements: vec![],
         },
     );
 
@@ -1173,7 +1303,7 @@ async fn catalog_spawn_capability_registers_spawn_agent_for_server_runs() {
         .expect("server should register spawn_agent");
     assert_eq!(
         spawn_definition.description,
-        "Spawn a supervised child agent for a concrete, bounded, independent subtask. Do not delegate immediate critical-path blockers when the parent cannot make progress until the answer returns. This tool returns a live child handle, not a final answer. After spawning, continue non-overlapping parent work; use child_status for cheap nonblocking inspection, wait_child_agent for bounded polling or wait-any orchestration, join_child_agent when the terminal result is needed, and close_child_agent only to clean up a terminal child handle.",
+        "I can start a supervised child for one concrete, bounded, independent task. Choose where I run it with placement and shape how it works with instructions; placement supplies an environment and capabilities, not a role. I return a live handle, not the child's final answer.",
         "server construction must use no host override and retain the stock spawn guidance"
     );
 }
@@ -1197,11 +1327,39 @@ async fn server_task_returns_live_generic_subagent_handle_and_resumes_parent() {
 
     let provider = Arc::new(GenericHandoffProvider::new());
     let provider_for_factory = Arc::clone(&provider);
-    let engine = build_engine(&catalog).with_provider_factory(Arc::new(move |_kind, _model| {
-        Ok(Box::new(SharedGenericHandoffProvider(Arc::clone(
-            &provider_for_factory,
-        ))) as Box<dyn Provider>)
-    }));
+    let mut config = empty_config();
+    config.child_placements.insert(
+        "generic".to_string(),
+        ChildPlacementConfig {
+            backend: AgentBackend::Native,
+            model: Some("gpt-4o-mini".to_string()),
+            acp_profile: None,
+            skills: vec![],
+            capabilities: None,
+            max_turns: Some(1),
+            max_tokens: Some(64),
+            max_cost: None,
+            max_sub_agents: Some(0),
+            allowed_child_placements: vec![],
+        },
+    );
+    let durable_journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
+    let engine = build_engine_with_config(&catalog, config)
+        .with_provider_factory(Arc::new(move |_kind, _model| {
+            Ok(Box::new(SharedGenericHandoffProvider(Arc::clone(
+                &provider_for_factory,
+            ))) as Box<dyn Provider>)
+        }))
+        .with_journal_storage(Arc::clone(&durable_journal));
+    assert!(
+        Arc::ptr_eq(
+            engine
+                .journal_storage()
+                .expect("server engine should retain the injected journal"),
+            &durable_journal,
+        ),
+        "server composition must retain the exact injected journal backend"
+    );
     let manager = TaskManager::new();
 
     let handle = engine
@@ -1244,6 +1402,46 @@ async fn server_task_returns_live_generic_subagent_handle_and_resumes_parent() {
         TaskState::Completed,
         "master task should complete after receiving the live child handle"
     );
+    let lifecycle_entries = {
+        let start = tokio::time::Instant::now();
+        loop {
+            let entries = durable_journal
+                .read_all(&AgentId(handle.task_id.clone()))
+                .expect("parent task journal should be readable through the injected backend");
+            if entries
+                .iter()
+                .any(|entry| matches!(entry.entry, JournalEntryKind::SubAgentCompleted { .. }))
+            {
+                break entries;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "accepted server child never produced a durable completion entry: {entries:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    assert!(
+        lifecycle_entries
+            .iter()
+            .all(|entry| entry.schema_version == 3)
+    );
+    assert_eq!(
+        lifecycle_entries
+            .iter()
+            .filter(|entry| matches!(entry.entry, JournalEntryKind::SubAgentSpawned { .. }))
+            .count(),
+        1,
+        "accepted server spawn must be durable exactly once"
+    );
+    assert_eq!(
+        lifecycle_entries
+            .iter()
+            .filter(|entry| matches!(entry.entry, JournalEntryKind::SubAgentCompleted { .. }))
+            .count(),
+        1,
+        "completed server child must be durable exactly once"
+    );
     let (events, _) = manager
         .subscribe_task(&handle.task_id)
         .expect("task event history should be readable");
@@ -1284,9 +1482,123 @@ async fn server_task_returns_live_generic_subagent_handle_and_resumes_parent() {
     assert!(
         resumed_messages
             .iter()
-            .any(|message| message.content.contains("child-generic-")),
-        "live handle should include the generated child id; messages were: {resumed_messages:?}"
+            .any(|message| message.content.contains("\"child_id\":\"child-")),
+        "live handle should include an opaque generated child id; messages were: {resumed_messages:?}"
     );
+}
+
+#[tokio::test]
+async fn server_projects_real_native_grandchild_activity_from_registered_spawn_tools() {
+    let catalog = Catalog::open_in_memory().expect("in-memory catalog");
+    let tenant = ensure_tenant(&catalog, "default").await;
+    let capabilities = vec![
+        "spawn:middle_native".to_string(),
+        "spawn:leaf_native".to_string(),
+    ];
+    let skill_ids = Vec::new();
+    catalog
+        .agents()
+        .create(
+            &tenant.id,
+            NewAgent {
+                name: "recursive-root",
+                description: Some("three-level native activity projection"),
+                system_prompt: "Delegate through the configured native placements.",
+                model: "recursive-root-model",
+                max_turns: Some(8),
+                max_tokens: Some(1024),
+                memory_pool_id: None,
+                skill_ids: &skill_ids,
+                capabilities: &capabilities,
+                channel_ids: &[],
+            },
+        )
+        .await
+        .expect("recursive root should be created");
+
+    let mut config = empty_config();
+    config.child_placements.insert(
+        "middle_native".into(),
+        ChildPlacementConfig {
+            backend: AgentBackend::Native,
+            model: Some("recursive-middle-model".into()),
+            acp_profile: None,
+            skills: vec![],
+            capabilities: None,
+            max_turns: Some(5),
+            max_tokens: Some(256),
+            max_cost: None,
+            max_sub_agents: Some(1),
+            allowed_child_placements: vec!["leaf_native".into()],
+        },
+    );
+    config.child_placements.insert(
+        "leaf_native".into(),
+        ChildPlacementConfig {
+            backend: AgentBackend::Native,
+            model: Some("recursive-leaf-model".into()),
+            acp_profile: None,
+            skills: vec![],
+            capabilities: None,
+            max_turns: Some(1),
+            max_tokens: Some(64),
+            max_cost: None,
+            max_sub_agents: Some(1),
+            allowed_child_placements: vec![],
+        },
+    );
+    let engine = build_engine_with_config(&catalog, config).with_provider_factory(Arc::new(
+        move |_kind, model| {
+            Ok(Box::new(RecursiveNativeProvider {
+                model: model.to_string(),
+            }) as Box<dyn Provider>)
+        },
+    ));
+    let manager = TaskManager::new();
+    let handle = engine
+        .spawn_task(
+            &manager,
+            "run the three-level native delegation",
+            &tenant_config("default", "recursive-root"),
+            None,
+            json!({}),
+            None,
+            None,
+        )
+        .await
+        .expect("server recursive task should start");
+    let terminal = wait_for_terminal(&manager, &handle.task_id, Duration::from_secs(5)).await;
+    let (events, _) = manager
+        .subscribe_task(&handle.task_id)
+        .expect("server event history should be readable");
+    assert_eq!(terminal.state, TaskState::Completed, "events={events:?}");
+    let leaf = events.iter().find(|event| {
+        event["event"] == "agent.message" && event["content"] == "server-recursive-leaf-marker"
+    });
+    let leaf = leaf.unwrap_or_else(|| {
+        panic!("real native grandchild output should reach server projection: {events:?}")
+    });
+    let middle_id = events
+        .iter()
+        .find(|event| {
+            event["event"] == "agent.child_spawned" && event["placement"] == "middle_native"
+        })
+        .and_then(|event| event["child_id"].as_str())
+        .expect("server should project the accepted middle child id");
+    let leaf_id = events
+        .iter()
+        .find(|event| {
+            event["event"] == "agent.child_spawned" && event["placement"] == "leaf_native"
+        })
+        .and_then(|event| event["child_id"].as_str())
+        .expect("server should project the accepted leaf child id");
+    assert_ne!(leaf_id, middle_id);
+    assert_eq!(leaf["child_placement"], "leaf_native");
+    assert_eq!(
+        leaf["child_id"], leaf_id,
+        "server leaf output must correlate to the exact accepted leaf, not its middle parent"
+    );
+    assert!(leaf.get("child_agent_type").is_none());
 }
 
 #[tokio::test]
@@ -1355,7 +1667,7 @@ async fn live_anthropic_server_generic_subagent_handoff_smoke() {
     assert!(
         events.iter().any(|event| {
             event["event"] == "agent.message"
-                && event["child_agent_type"] == "generic"
+                && event["child_placement"] == "in_process"
                 && event["content"].as_str() == Some("CHILD_OK_7F3")
         }),
         "server stream should include child-attributed output; events: {events:?}"

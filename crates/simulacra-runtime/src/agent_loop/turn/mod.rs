@@ -39,6 +39,7 @@ impl AgentLoop {
         messages: &mut Vec<Message>,
         emit_turn_complete: bool,
     ) -> Result<TurnExecution, RuntimeError> {
+        self.check_pending_spawn_hook_kill()?;
         if self.is_cancelled() {
             return Ok(Self::cancelled_execution());
         }
@@ -89,21 +90,38 @@ impl AgentLoop {
                 "message_count": step.messages().len(),
             })
             .to_string();
-            match pipeline.run_before(simulacra_hooks::verdict::Operation::Llm, &before_ctx) {
-                Ok((simulacra_hooks::Verdict::Continue(_), _)) => {}
-                Ok((simulacra_hooks::Verdict::Deny(reason), _)) => {
+            match pipeline
+                .run_before_attributed(simulacra_hooks::verdict::Operation::Llm, &before_ctx)
+            {
+                Ok((simulacra_hooks::Verdict::Continue(_), _, _)) => {}
+                Ok((simulacra_hooks::Verdict::Deny(reason), _, Some(hook))) => {
                     self.journal_entry(JournalEntryKind::HookDenial {
-                        hook_name: "llm:before".into(),
+                        hook_name: hook,
                         operation: "llm".into(),
                         reason: reason.clone(),
                     })?;
                     return Err(RuntimeError::HookDenial(reason));
                 }
-                Ok((simulacra_hooks::Verdict::Kill(_), _)) => {
-                    unreachable!("Kill is returned as Err from run_before")
+                Ok((simulacra_hooks::Verdict::Deny(_), _, None)) => {
+                    return Err(RuntimeError::HookError(
+                        "LLM before-hook denied without hook attribution".into(),
+                    ));
+                }
+                Ok((simulacra_hooks::Verdict::Kill(reason), _, Some(hook))) => {
+                    self.journal_entry(JournalEntryKind::HookKill {
+                        hook_name: hook.clone(),
+                        operation: "llm".into(),
+                        reason: reason.clone(),
+                    })?;
+                    return Err(RuntimeError::HookKill { hook, reason });
+                }
+                Ok((simulacra_hooks::Verdict::Kill(_), _, None)) => {
+                    return Err(RuntimeError::HookError(
+                        "LLM before-hook killed without hook attribution".into(),
+                    ));
                 }
                 Err(simulacra_hooks::HookError::Killed { hook, reason }) => {
-                    self.journal_entry(JournalEntryKind::HookDenial {
+                    self.journal_entry(JournalEntryKind::HookKill {
                         hook_name: hook.clone(),
                         operation: "llm".into(),
                         reason: reason.clone(),
@@ -118,17 +136,23 @@ impl AgentLoop {
 
         let provider_outcome = if self.has_replay_entry() {
             let kind = self.take_replay_entry()?;
-            ProviderCallOutcome::Response {
+            Ok(ProviderCallOutcome::Response {
                 response: replay_llm_response(&kind)?,
                 streamed: false,
-            }
+            })
         } else {
             if self.is_cancelled() {
                 active_turn.mark_cancelled();
                 return Ok(Self::cancelled_execution());
             }
-            self.call_provider(&step, &active_turn).await?
+            self.call_provider(&step, &active_turn).await
         };
+
+        // Check before propagating a provider cancellation/error so an
+        // asynchronous governance kill that arrived during the await is never
+        // hidden by the provider's concurrent terminal outcome.
+        self.check_pending_spawn_hook_kill()?;
+        let provider_outcome = provider_outcome?;
         let (response, streamed) = match provider_outcome {
             ProviderCallOutcome::Response { response, streamed } => (response, streamed),
             ProviderCallOutcome::Cancelled => return Ok(Self::cancelled_execution()),
@@ -214,6 +238,7 @@ impl AgentLoop {
         messages.push(response.message.clone());
 
         if response.message.tool_calls.is_empty() {
+            self.check_pending_spawn_hook_kill()?;
             if emit_turn_complete {
                 self.sink.emit(ActivityEvent::TurnComplete);
             }
@@ -227,7 +252,10 @@ impl AgentLoop {
         let tool_results = self
             .dispatch_tool_calls(&response.message.tool_calls, &active_turn)
             .await?;
+        self.check_pending_spawn_hook_kill()?;
         messages.extend(tool_results.iter().cloned());
+
+        self.check_pending_spawn_hook_kill()?;
 
         if emit_turn_complete {
             self.sink.emit(ActivityEvent::TurnComplete);
@@ -241,6 +269,61 @@ impl AgentLoop {
             token_usage: response.token_usage,
             budget_exhausted: None,
         })
+    }
+
+    /// Advance the per-loop journal cursor and surface the first new spawn kill.
+    /// Existing entries present when the loop was constructed are deliberately
+    /// outside the cursor, so resuming an agent cannot consume a kill belonging
+    /// to an earlier run.
+    fn check_pending_spawn_hook_kill(&mut self) -> Result<(), RuntimeError> {
+        if let Some(decision) = self.policy_kill_signal.decision() {
+            return Err(RuntimeError::HookKill {
+                hook: decision.hook,
+                reason: decision.reason,
+            });
+        }
+        let Some(frontier) = self.spawn_hook_journal_frontier else {
+            self.spawn_hook_journal_frontier = Some(
+                self.journal
+                    .read_all(&self.config.agent_id)
+                    .map_err(RuntimeError::Journal)?
+                    .len(),
+            );
+            return Ok(());
+        };
+        let entries = match self.journal.read_from(&self.config.agent_id, frontier) {
+            Ok(entries) => entries,
+            Err(error) => {
+                if let Some(decision) = self.policy_kill_signal.decision() {
+                    return Err(RuntimeError::HookKill {
+                        hook: decision.hook,
+                        reason: decision.reason,
+                    });
+                }
+                return Err(RuntimeError::Journal(error));
+            }
+        };
+        self.spawn_hook_journal_frontier = Some(frontier.saturating_add(entries.len()));
+        if let Some((hook, reason)) = entries.into_iter().find_map(|entry| match entry.entry {
+            JournalEntryKind::HookKill {
+                hook_name,
+                operation,
+                reason,
+            } if operation == "spawn" => Some((hook_name, reason)),
+            _ => None,
+        }) {
+            return Err(RuntimeError::HookKill { hook, reason });
+        }
+        // The journal read may have blocked while a child settled. Recheck the
+        // live signal after that boundary so a kill decided just after the
+        // journal snapshot cannot lose to a normal completion.
+        if let Some(decision) = self.policy_kill_signal.decision() {
+            return Err(RuntimeError::HookKill {
+                hook: decision.hook,
+                reason: decision.reason,
+            });
+        }
+        Ok(())
     }
 
     fn active_turn(&self) -> ActiveTurn {

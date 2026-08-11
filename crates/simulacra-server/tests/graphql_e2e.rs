@@ -64,6 +64,7 @@ fn empty_config() -> SimulacraConfig {
             description: None,
         },
         agent_types: HashMap::new(),
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,

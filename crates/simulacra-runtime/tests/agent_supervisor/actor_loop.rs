@@ -15,10 +15,11 @@ async fn supervisor_spawns_agent_that_runs_to_completion() {
     child_budget.used_cost = Decimal::new(15, 1);
 
     let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
     );
+    install_test_journal(&mut supervisor);
 
     let _token = supervisor
         .spawn_agent(spawn_config(
@@ -75,11 +76,13 @@ async fn supervisor_actor_loop_processes_messages_by_priority() {
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -93,13 +96,13 @@ async fn supervisor_actor_loop_processes_messages_by_priority() {
     let (signal_result_tx, _) = tokio::sync::oneshot::channel();
     let signal_message = SupervisorMessage {
         priority: MessagePriority::Signal,
-        agent_id: AgentId("signal-agent".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "signal-agent",
                 "parent-agent",
                 CapabilityToken::default(),
-                default_budget(),
+                leaf_child_budget(),
                 RestartStrategy::LetCrash,
             )),
             signal_result_tx,
@@ -108,13 +111,13 @@ async fn supervisor_actor_loop_processes_messages_by_priority() {
     let (command_result_tx, _) = tokio::sync::oneshot::channel();
     let command_message = SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("command-agent".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "command-agent",
                 "parent-agent",
                 CapabilityToken::default(),
-                default_budget(),
+                leaf_child_budget(),
                 RestartStrategy::LetCrash,
             )),
             command_result_tx,
@@ -123,13 +126,13 @@ async fn supervisor_actor_loop_processes_messages_by_priority() {
     let (work_result_tx, _) = tokio::sync::oneshot::channel();
     let work_message = SupervisorMessage {
         priority: MessagePriority::Work,
-        agent_id: AgentId("work-agent".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "work-agent",
                 "parent-agent",
                 CapabilityToken::default(),
-                default_budget(),
+                leaf_child_budget(),
                 RestartStrategy::LetCrash,
             )),
             work_result_tx,
@@ -224,15 +227,13 @@ fn s054_cancel_priority_wins_over_status_wait_and_close_commands() {
         "signal-priority cancel must be processed before S054 command-priority probes"
     );
     assert!(
-        queue
-            .into_iter()
-            .all(|message| matches!(
-                message.payload,
-                SupervisorPayload::ChildStatus(_, _)
-                    | SupervisorPayload::WaitChild(_, _, _)
-                    | SupervisorPayload::WaitChildren(_, _, _)
-                    | SupervisorPayload::CloseChild(_, _)
-            )),
+        queue.into_iter().all(|message| matches!(
+            message.payload,
+            SupervisorPayload::ChildStatus(_, _)
+                | SupervisorPayload::WaitChild(_, _, _)
+                | SupervisorPayload::WaitChildren(_, _, _)
+                | SupervisorPayload::CloseChild(_, _)
+        )),
         "remaining S054 messages should all be command-priority probes"
     );
 }
@@ -266,17 +267,18 @@ async fn supervisor_manages_multiple_concurrent_agents() {
     );
 
     let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
     );
+    install_test_journal(&mut supervisor);
 
     let _token_one = supervisor
         .spawn_agent(spawn_config(
             "agent-one",
             "parent-agent",
             CapabilityToken::default(),
-            default_budget(),
+            leaf_child_budget(),
             RestartStrategy::LetCrash,
         ))
         .expect("first child should spawn");
@@ -285,7 +287,7 @@ async fn supervisor_manages_multiple_concurrent_agents() {
             "agent-two",
             "parent-agent",
             CapabilityToken::default(),
-            default_budget(),
+            leaf_child_budget(),
             RestartStrategy::LetCrash,
         ))
         .expect("second child should spawn");
@@ -294,7 +296,7 @@ async fn supervisor_manages_multiple_concurrent_agents() {
             "agent-three",
             "parent-agent",
             CapabilityToken::default(),
-            default_budget(),
+            leaf_child_budget(),
             RestartStrategy::LetCrash,
         ))
         .expect("third child should spawn");
@@ -354,6 +356,17 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
     }
 
     impl TaskFactory for TokenRecordingFactory {
+        fn validate_spawn_config(&self, config: &SpawnConfig) -> Result<(), RuntimeError> {
+            if config.placement == "worker" {
+                Ok(())
+            } else {
+                Err(RuntimeError::Session(format!(
+                    "unknown child placement {:?}; configured test placement: worker",
+                    config.placement
+                )))
+            }
+        }
+
         fn create_task(&self, config: SpawnConfig, token: CancellationToken) -> BoxTaskFuture {
             self.tokens
                 .lock()
@@ -368,7 +381,7 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
                     exit_reason: ExitReason::Cancelled,
                     messages: vec![],
                     token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+                    reported_tool_uses: None,
                     used_turns: 0,
                     used_cost: Decimal::ZERO,
                 })
@@ -382,11 +395,13 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
         tokens: Arc::clone(&tokens),
         notify: Arc::clone(&notify),
     };
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -397,13 +412,13 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         tx.send(SupervisorMessage {
             priority: MessagePriority::Command,
-            agent_id: AgentId(child_id.into()),
+            agent_id: AgentId("parent-agent".into()),
             payload: SupervisorPayload::Spawn(
                 Box::new(spawn_config(
                     child_id,
                     "parent-agent",
                     CapabilityToken::default(),
-                    default_budget(),
+                    leaf_child_budget(),
                     RestartStrategy::LetCrash,
                 )),
                 ack_tx,
@@ -431,7 +446,7 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Signal,
-        agent_id: AgentId("child-b".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::CancelChild(AgentId("child-b".into()), cancel_tx),
     })
     .await
@@ -470,7 +485,7 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
     let (cancel_completed_tx, cancel_completed_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Signal,
-        agent_id: AgentId("child-b".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::CancelChild(AgentId("child-b".into()), cancel_completed_tx),
     })
     .await
@@ -486,7 +501,7 @@ async fn cancel_child_payload_signals_only_the_target_child_token() {
     let (cancel_a_tx, cancel_a_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Signal,
-        agent_id: AgentId("child-a".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::CancelChild(AgentId("child-a".into()), cancel_a_tx),
     })
     .await
@@ -521,11 +536,13 @@ async fn supervisor_restarts_failed_agent_via_actor_loop() {
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -535,7 +552,7 @@ async fn supervisor_restarts_failed_agent_via_actor_loop() {
     let (flaky_result_tx, _) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("flaky-agent".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "flaky-agent",
@@ -585,11 +602,13 @@ async fn child_agents_communicate_via_mpsc() {
 
     let child_budget = default_budget();
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -599,7 +618,7 @@ async fn child_agents_communicate_via_mpsc() {
     let (mpsc_result_tx, _) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("mpsc-child".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "mpsc-child",
@@ -663,17 +682,18 @@ async fn steering_live_child_is_accepted_and_completed_child_is_rejected() {
                 exit_reason: ExitReason::Complete,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+                reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             },
         },
     );
     let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
     );
+    install_test_journal(&mut supervisor);
 
     supervisor
         .spawn_agent(spawn_config(

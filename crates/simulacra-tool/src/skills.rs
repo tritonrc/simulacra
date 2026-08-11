@@ -397,6 +397,41 @@ pub fn discover_and_filter_skills(
     capability: &CapabilityToken,
     agent_type_name: &str,
 ) -> Result<Vec<SkillMeta>, SkillError> {
+    discover_and_filter_skills_for_subject(
+        vfs,
+        agent_skills,
+        capability,
+        SkillSubject::AgentType(agent_type_name),
+    )
+}
+
+/// Discover skills for a child placement, retaining placement vocabulary in
+/// startup errors rather than presenting placement as an agent role.
+pub fn discover_and_filter_skills_for_placement(
+    vfs: &Arc<dyn VirtualFs>,
+    placement_skills: &[String],
+    capability: &CapabilityToken,
+    placement_name: &str,
+) -> Result<Vec<SkillMeta>, SkillError> {
+    discover_and_filter_skills_for_subject(
+        vfs,
+        placement_skills,
+        capability,
+        SkillSubject::Placement(placement_name),
+    )
+}
+
+enum SkillSubject<'a> {
+    AgentType(&'a str),
+    Placement(&'a str),
+}
+
+fn discover_and_filter_skills_for_subject(
+    vfs: &Arc<dyn VirtualFs>,
+    agent_skills: &[String],
+    capability: &CapabilityToken,
+    subject: SkillSubject<'_>,
+) -> Result<Vec<SkillMeta>, SkillError> {
     // If the agent type has no skills configured, nothing to discover.
     if agent_skills.is_empty() {
         return Ok(Vec::new());
@@ -465,9 +500,15 @@ pub fn discover_and_filter_skills(
         } else {
             // An agent type that references an undiscoverable skill fails
             // startup with an error naming the agent type and missing skill.
-            return Err(SkillError::UndiscoverableSkill {
-                agent_type: agent_type_name.to_string(),
-                skill: skill_name.clone(),
+            return Err(match subject {
+                SkillSubject::AgentType(agent_type) => SkillError::UndiscoverableSkill {
+                    agent_type: agent_type.to_string(),
+                    skill: skill_name.clone(),
+                },
+                SkillSubject::Placement(placement) => SkillError::UndiscoverablePlacementSkill {
+                    placement: placement.to_string(),
+                    skill: skill_name.clone(),
+                },
             });
         }
     }

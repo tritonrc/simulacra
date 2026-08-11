@@ -185,6 +185,68 @@ fn replay_iterator_frontier_behavior() {
     assert!(iter.next_recorded().is_none());
 }
 
+#[test]
+fn s060_replay_iterator_never_yields_a_typed_wrong_version_kind() {
+    use crate::replay::JournalReplayIterator;
+
+    for version in [2, 4] {
+        let mut replay = JournalReplayIterator::new(vec![JournalEntry {
+            schema_version: version,
+            agent_id: AgentId("wrong-version-replay".into()),
+            timestamp_ms: 1,
+            entry: JournalEntryKind::TurnStart,
+        }]);
+
+        assert!(
+            replay.peek().is_none(),
+            "v{version} replay entry must be rejected before its typed kind is exposed"
+        );
+        assert!(
+            replay.next_recorded().is_none(),
+            "v{version} replay entry must never advance or yield its typed kind"
+        );
+        assert_eq!(replay.position(), 0);
+    }
+}
+
+#[tokio::test]
+async fn s060_with_clock_and_replay_rejects_typed_v2_and_v4_with_exact_mismatch() {
+    for version in [2, 4] {
+        let journal = Arc::new(InMemoryJournalStorage::new());
+        let mut agent = AgentLoop::with_clock_and_replay(
+            default_config(),
+            Box::new(FakeProvider::new(vec![text_response(
+                "wrong-version replay must not reach the provider",
+            )])),
+            ToolRegistry::new(),
+            Box::new(PassthroughContext),
+            journal,
+            default_budget(),
+            Box::new(FixedClock(2_000)),
+            Some(vec![JournalEntry {
+                schema_version: version,
+                agent_id: AgentId("test-agent".into()),
+                timestamp_ms: 1,
+                entry: JournalEntryKind::TurnStart,
+            }]),
+        );
+
+        let result = agent.run("reject wrong-version replay").await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::Journal(
+                    simulacra_types::JournalError::SchemaVersionMismatch {
+                        expected: 3,
+                        got
+                    }
+                )) if got == version
+            ),
+            "with_clock_and_replay must reject v{version} before using its kind; got {result:?}"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------
 // S010: OTel GenAI Semantic Convention Tests
 // -----------------------------------------------------------------------

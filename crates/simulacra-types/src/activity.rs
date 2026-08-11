@@ -77,21 +77,21 @@ pub enum ActivityEvent {
     /// A child agent has been spawned.
     ChildSpawned {
         child_id: String,
-        agent_type: String,
+        placement: String,
         task: String,
     },
 
     /// A forwarded event from a running child agent.
     ChildActivity {
         child_id: String,
-        agent_type: String,
+        placement: String,
         event: Box<ActivityEvent>,
     },
 
     /// A child agent has finished.
     ChildFinished {
         child_id: String,
-        agent_type: String,
+        placement: String,
         exit_reason: String,
         duration_ms: u64,
         tool_uses: u32,
@@ -156,14 +156,17 @@ mod tests {
         };
         let wrapped = ActivityEvent::ChildActivity {
             child_id: "child-1".into(),
-            agent_type: "researcher".into(),
+            placement: "in_process".into(),
             event: Box::new(ActivityEvent::ChildActivity {
                 child_id: "grandchild-1".into(),
-                agent_type: "coder".into(),
+                placement: "workspace".into(),
                 event: Box::new(inner),
             }),
         };
         let json = serde_json::to_string(&wrapped).unwrap();
+        assert!(json.contains("\"placement\":\"in_process\""));
+        assert!(json.contains("\"placement\":\"workspace\""));
+        assert!(!json.contains("agent_type"));
         let restored: ActivityEvent = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&restored).unwrap();
         assert_eq!(json, json2);

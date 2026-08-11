@@ -29,21 +29,27 @@ async fn call_child_status_json(
     tx: &tokio::sync::mpsc::Sender<SupervisorMessage>,
     child_id: &str,
 ) -> Result<serde_json::Value, ToolError> {
-    ChildStatusTool { sender: tx.clone() }
-        .call(
-            serde_json::json!({ "child_id": child_id }),
-            &CapabilityToken::default(),
-        )
-        .await
+    ChildStatusTool {
+        sender: tx.clone(),
+        caller_id: AgentId("parent-agent".into()),
+    }
+    .call(
+        serde_json::json!({ "child_id": child_id }),
+        &CapabilityToken::default(),
+    )
+    .await
 }
 
 #[cfg(feature = "spawn")]
 async fn call_child_roster_json(
     tx: &tokio::sync::mpsc::Sender<SupervisorMessage>,
 ) -> Result<serde_json::Value, ToolError> {
-    ListChildAgentTool { sender: tx.clone() }
-        .call(serde_json::json!({}), &CapabilityToken::default())
-        .await
+    ListChildAgentTool {
+        sender: tx.clone(),
+        caller_id: AgentId("parent-agent".into()),
+    }
+    .call(serde_json::json!({}), &CapabilityToken::default())
+    .await
 }
 
 #[cfg(feature = "spawn")]
@@ -127,8 +133,20 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
             output: AgentLoopOutput {
                 exit_reason: ExitReason::BudgetExhausted,
                 messages: vec![
-                    Message { role: Role::Assistant, content: "partial finding".into(), tool_calls: vec![], tool_call_id: None, provider_content: vec![] },
-                    Message { role: Role::Tool, content: "late tool result".into(), tool_calls: vec![], tool_call_id: Some("tool-call-1".into()), provider_content: vec![] },
+                    Message {
+                        role: Role::Assistant,
+                        content: "partial finding".into(),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        provider_content: vec![],
+                    },
+                    Message {
+                        role: Role::Tool,
+                        content: "late tool result".into(),
+                        tool_calls: vec![],
+                        tool_call_id: Some("tool-call-1".into()),
+                        provider_content: vec![],
+                    },
                 ],
                 token_usage: TokenUsage::default(),
                 reported_tool_uses: None,
@@ -148,11 +166,13 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        parent_capability_for("researcher"),
         ResourceBudget::new(1_000_000, 100, Decimal::new(1_000, 0), 10),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -174,10 +194,10 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
             child_id,
             "parent-agent",
             CapabilityToken::default(),
-            ResourceBudget::new(100, 1, Decimal::ZERO, 0),
+            ResourceBudget::new(100, 1, Decimal::new(1, 0), 1),
             RestartStrategy::LetCrash,
         );
-        config.agent_type = Some("researcher".into());
+        config.placement = "researcher".into();
         config.task = format!("task for {child_id}");
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         tx.send(SupervisorMessage {
@@ -217,8 +237,8 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
                 tokio::task::yield_now().await;
             }
         })
-            .await
-            .expect("terminal child should finish");
+        .await
+        .expect("terminal child should finish");
     }
 
     assert_eq!(
@@ -229,14 +249,29 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
     );
 
     let expected_terminal_statuses = [
-        ("g-partial", serde_json::json!({ "completed": "partial finding" })),
-        ("a-completed", serde_json::json!({ "completed": "real finding" })),
+        (
+            "g-partial",
+            serde_json::json!({ "completed": "partial finding" }),
+        ),
+        (
+            "a-completed",
+            serde_json::json!({ "completed": "real finding" }),
+        ),
         ("b-null", serde_json::json!({ "completed": null })),
         ("c-empty", serde_json::json!({ "completed": "" })),
-        ("d-failed", serde_json::json!({ "failed": "session error: supervisor boom" })),
-        ("e-cancelled", serde_json::json!({ "cancelled": "cancel reason" })),
+        (
+            "d-failed",
+            serde_json::json!({ "failed": "session error: supervisor boom" }),
+        ),
+        (
+            "e-cancelled",
+            serde_json::json!({ "cancelled": "cancel reason" }),
+        ),
         ("f-cancelled-null", serde_json::json!({ "cancelled": null })),
-        ("h-error-output", serde_json::json!({ "failed": "provider timeout" })),
+        (
+            "h-error-output",
+            serde_json::json!({ "failed": "provider timeout" }),
+        ),
     ];
     for (child_id, expected_status) in &expected_terminal_statuses {
         let first = call_child_status_json(&tx, child_id)
@@ -245,12 +280,18 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
         let second = call_child_status_json(&tx, child_id)
             .await
             .expect("repeat status peek should succeed");
-        assert_eq!(first["status"], *expected_status, "wrong status for {child_id}");
+        assert_eq!(
+            first["status"], *expected_status,
+            "wrong status for {child_id}"
+        );
         assert_eq!(second, first, "status peeks must clone cached content");
         assert_eq!(first["child_id"], *child_id);
-        assert_eq!(first["agent_type"], "researcher");
+        assert_eq!(first["placement"], "researcher");
         assert_eq!(first["ready"], true);
-        assert!(first["elapsed_ms"].is_u64(), "elapsed_ms must remain present");
+        assert!(
+            first["elapsed_ms"].is_u64(),
+            "elapsed_ms must remain present"
+        );
     }
 
     let first_roster = call_child_roster_json(&tx)
@@ -260,7 +301,9 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
         .await
         .expect("repeat roster peek should succeed");
     let roster = first_roster.as_array().expect("roster should be an array");
-    let repeated_roster = second_roster.as_array().expect("repeat roster should be an array");
+    let repeated_roster = second_roster
+        .as_array()
+        .expect("repeat roster should be an array");
     let ordered_ids = roster
         .iter()
         .map(|entry| entry["child_id"].as_str().expect("child id"))
@@ -280,21 +323,39 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
         ]
     );
     for (index, entry) in roster.iter().enumerate() {
-        assert_eq!(entry["agent_type"], "researcher");
+        assert_eq!(entry["placement"], "researcher");
         assert_eq!(entry["task"], format!("task for {}", ordered_ids[index]));
-        assert!(entry["elapsed_ms"].is_u64(), "elapsed_ms must remain present");
+        assert!(
+            entry["elapsed_ms"].is_u64(),
+            "elapsed_ms must remain present"
+        );
         assert_eq!(repeated_roster[index]["child_id"], entry["child_id"]);
         assert_eq!(repeated_roster[index]["status"], entry["status"]);
     }
     assert_eq!(roster[0]["ready"], true);
-    assert_eq!(roster[0]["status"], serde_json::json!({ "completed": "real finding" }));
-    assert_eq!(roster[5]["status"], serde_json::json!({ "cancelled": null }));
-    assert_eq!(roster[6]["status"], serde_json::json!({ "completed": "partial finding" }));
-    assert_eq!(roster[7]["status"], serde_json::json!({ "failed": "provider timeout" }));
+    assert_eq!(
+        roster[0]["status"],
+        serde_json::json!({ "completed": "real finding" })
+    );
+    assert_eq!(
+        roster[5]["status"],
+        serde_json::json!({ "cancelled": null })
+    );
+    assert_eq!(
+        roster[6]["status"],
+        serde_json::json!({ "completed": "partial finding" })
+    );
+    assert_eq!(
+        roster[7]["status"],
+        serde_json::json!({ "failed": "provider timeout" })
+    );
     assert_eq!(roster[8]["status"], "running");
     assert_eq!(roster[8]["ready"], false);
 
-    let join_tool = JoinChildAgentTool { sender: tx.clone() };
+    let join_tool = JoinChildAgentTool {
+        sender: tx.clone(),
+        caller_id: AgentId("parent-agent".into()),
+    };
     let joined = join_tool
         .call(
             serde_json::json!({ "child_id": "a-completed" }),
@@ -309,9 +370,12 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
         )
         .await
         .expect("repeat join should clone the same cached terminal result");
-    assert_eq!(joined_again, joined, "status/list peeks and joins must not consume or alter the summary");
+    assert_eq!(
+        joined_again, joined,
+        "status/list peeks and joins must not consume or alter the summary"
+    );
     assert_eq!(joined["child_id"], "a-completed");
-    assert_eq!(joined["agent_type"], "researcher");
+    assert_eq!(joined["placement"], "researcher");
     assert_eq!(joined["status"], "completed");
     assert_eq!(joined["ready"], true);
     assert_eq!(joined["exit_reason"], "completed");
@@ -345,15 +409,21 @@ async fn status_and_roster_expose_cached_terminal_content_without_consuming_it()
         .await
         .expect("error-output child join should still return its canonical summary");
     assert_eq!(error_output_join["status"], "failed");
-    assert_eq!(error_output_join["message"], "partial answer before provider failure");
+    assert_eq!(
+        error_output_join["message"],
+        "partial answer before provider failure"
+    );
 
-    CloseChildAgentTool { sender: tx.clone() }
-        .call(
-            serde_json::json!({ "child_id": "a-completed" }),
-            &CapabilityToken::default(),
-        )
-        .await
-        .expect("close should remove completed child");
+    CloseChildAgentTool {
+        sender: tx.clone(),
+        caller_id: AgentId("parent-agent".into()),
+    }
+    .call(
+        serde_json::json!({ "child_id": "a-completed" }),
+        &CapabilityToken::default(),
+    )
+    .await
+    .expect("close should remove completed child");
     assert!(
         call_child_status_json(&tx, "a-completed").await.is_err(),
         "closed child should be absent from status"
@@ -407,10 +477,11 @@ async fn actor_join_journals_completion_before_terminal_result_resolves() {
     );
 
     let mut supervisor = AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory),
     );
+    supervisor.set_root_agent_id(AgentId("parent-agent".into()));
     supervisor.set_journal_storage(Arc::clone(&journal));
     let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -422,7 +493,7 @@ async fn actor_join_journals_completion_before_terminal_result_resolves() {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("journaled-child".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "journaled-child",
@@ -508,11 +579,13 @@ async fn actor_retry_returns_successful_retry_to_original_caller() {
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -522,7 +595,7 @@ async fn actor_retry_returns_successful_retry_to_original_caller() {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("flaky-agent".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::Spawn(
             Box::new(spawn_config(
                 "flaky-agent",
@@ -548,7 +621,7 @@ async fn actor_retry_returns_successful_retry_to_original_caller() {
     let (join_tx, join_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Command,
-        agent_id: AgentId("flaky-agent".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::JoinChild(AgentId("flaky-agent".into()), join_tx),
     })
     .await
@@ -581,7 +654,8 @@ async fn actor_retry_returns_successful_retry_to_original_caller() {
 fn valid_spawn_without_task_factory_has_no_spawn_side_effects() {
     let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
     let parent_id = AgentId("parent-agent".into());
-    let mut supervisor = AgentSupervisor::new(CapabilityToken::default(), default_budget());
+    let mut supervisor = AgentSupervisor::new(worker_parent_capability(), default_budget());
+    supervisor.set_root_agent_id(parent_id.clone());
     supervisor.set_journal_storage(Arc::clone(&journal));
 
     let result = supervisor.spawn_agent(spawn_config(
@@ -614,11 +688,16 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        CapabilityToken {
+            spawn_placements: vec!["researcher".into()],
+            ..CapabilityToken::default()
+        },
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -632,7 +711,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
         default_budget(),
         RestartStrategy::LetCrash,
     );
-    config.agent_type = Some("researcher".into());
+    config.placement = "researcher".into();
     config.task = "inspect lifecycle".into();
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
@@ -664,7 +743,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
         .expect("status response channel should stay open")
         .expect("running child should have status");
     assert_eq!(status.child_id.0, "child-orchestrated");
-    assert_eq!(status.agent_type, "researcher");
+    assert_eq!(status.placement, "researcher");
     assert_eq!(status.status, ChildAgentStatus::Running);
     assert!(!status.ready);
 
@@ -672,7 +751,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
     assert_eq!(running_roster.len(), 1);
     let running_child = &running_roster[0];
     assert_eq!(running_child.child_id, "child-orchestrated");
-    assert_eq!(running_child.agent_type, "researcher");
+    assert_eq!(running_child.placement, "researcher");
     assert_eq!(running_child.task, "inspect lifecycle");
     assert_eq!(running_child.status, ChildAgentStatus::Running);
     assert!(!running_child.ready);
@@ -759,7 +838,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
             .terminal
             .as_ref()
             .expect("terminal result should be retained")
-            .agent_type,
+            .placement,
         "researcher"
     );
 
@@ -804,7 +883,7 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
     assert_eq!(joined_roster.len(), 1);
     let joined_child = &joined_roster[0];
     assert_eq!(joined_child.child_id, "child-orchestrated");
-    assert_eq!(joined_child.agent_type, "researcher");
+    assert_eq!(joined_child.placement, "researcher");
     assert_eq!(joined_child.task, "inspect lifecycle");
     assert_eq!(joined_child.status, ChildAgentStatus::Completed(None));
     assert!(joined_child.ready);
@@ -948,6 +1027,123 @@ async fn child_status_wait_and_close_follow_handle_lifecycle() {
 }
 
 #[tokio::test]
+#[cfg(feature = "spawn")]
+async fn s060_sibling_child_control_tools_cannot_access_another_parents_child() {
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
+        default_budget(),
+        Arc::new(NoopTaskFactory),
+    );
+    install_test_journal(&mut supervisor);
+    supervisor.set_root_agent_id(AgentId("parent-a".into()));
+    supervisor
+        .spawn_agent(spawn_config(
+            "parent-a-child",
+            "parent-a",
+            CapabilityToken::default(),
+            leaf_child_budget(),
+            RestartStrategy::LetCrash,
+        ))
+        .expect("parent-a should own one completed child");
+    let supervisor = Arc::new(supervisor);
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    let actor = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move { supervisor.run_actor_loop(receiver).await })
+    };
+
+    // These are authenticated parent-b tool instances targeting parent-a's child.
+    let status = ChildStatusTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_id": "parent-a-child"}),
+        &CapabilityToken::default(),
+    )
+    .await;
+    let list = ListChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(serde_json::json!({}), &CapabilityToken::default())
+    .await;
+    let wait = WaitChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_id": "parent-a-child", "timeout_ms": 0}),
+        &CapabilityToken::default(),
+    )
+    .await;
+    let wait_any = WaitChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_ids": ["parent-a-child"], "timeout_ms": 0}),
+        &CapabilityToken::default(),
+    )
+    .await;
+    let join = JoinChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_id": "parent-a-child"}),
+        &CapabilityToken::default(),
+    )
+    .await;
+    let close = CloseChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_id": "parent-a-child"}),
+        &CapabilityToken::default(),
+    )
+    .await;
+    let steer = SteerChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_id": "parent-a-child", "message": "sibling intrusion"}),
+        &CapabilityToken::default(),
+    )
+    .await;
+    let cancel = CancelChildAgentTool {
+        sender: sender.clone(),
+        caller_id: AgentId("parent-b".into()),
+    }
+    .call(
+        serde_json::json!({"child_id": "parent-a-child"}),
+        &CapabilityToken::default(),
+    )
+    .await;
+
+    drop(sender);
+    actor.await.expect("supervisor actor should stop");
+    for (operation, result) in [
+        ("status", status),
+        ("list", list),
+        ("wait", wait),
+        ("wait-any", wait_any),
+        ("join", join),
+        ("close", close),
+        ("steer", steer),
+        ("cancel", cancel),
+    ] {
+        let error = result.expect_err("parent-b must not access parent-a's child");
+        assert!(
+            error.to_string().contains("parent-b") && error.to_string().contains("parent-a"),
+            "{operation} ownership denial should identify caller and owner: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn child_status_reports_failed_and_cancelled_terminal_states() {
     let factory = FakeTaskFactory::new();
     factory.push_plan(
@@ -963,18 +1159,20 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
                 exit_reason: ExitReason::Cancelled,
                 messages: vec![],
                 token_usage: TokenUsage::default(),
-            reported_tool_uses: None,
+                reported_tool_uses: None,
                 used_turns: 0,
                 used_cost: Decimal::ZERO,
             },
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -991,7 +1189,7 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
                     child_id,
                     "parent-agent",
                     CapabilityToken::default(),
-                    default_budget(),
+                    leaf_child_budget(),
                     RestartStrategy::LetCrash,
                 )),
                 ack_tx,
@@ -1008,7 +1206,7 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
         priority: MessagePriority::Signal,
-        agent_id: AgentId("child-cancelled".into()),
+        agent_id: AgentId("parent-agent".into()),
         payload: SupervisorPayload::CancelChild(AgentId("child-cancelled".into()), cancel_tx),
     })
     .await
@@ -1018,10 +1216,9 @@ async fn child_status_reports_failed_and_cancelled_terminal_states() {
         .expect("cancel response channel should stay open")
         .expect("cancel should succeed");
 
-    for (child_id, expected_status) in [
-        ("child-failed", "failed"),
-        ("child-cancelled", "cancelled"),
-    ] {
+    for (child_id, expected_status) in
+        [("child-failed", "failed"), ("child-cancelled", "cancelled")]
+    {
         let (wait_tx, wait_rx) = tokio::sync::oneshot::channel();
         tx.send(SupervisorMessage {
             priority: MessagePriority::Command,
@@ -1065,28 +1262,28 @@ async fn join_child_terminal_result_includes_elapsed_ms_and_structured_tool_use_
                         content: "tool one".into(),
                         tool_calls: vec![],
                         tool_call_id: Some("tool-1".into()),
-            provider_content: vec![],
+                        provider_content: vec![],
                     },
                     Message {
                         role: Role::Assistant,
                         content: "middle".into(),
                         tool_calls: vec![],
                         tool_call_id: None,
-            provider_content: vec![],
+                        provider_content: vec![],
                     },
                     Message {
                         role: Role::Tool,
                         content: "tool two".into(),
                         tool_calls: vec![],
                         tool_call_id: Some("tool-2".into()),
-            provider_content: vec![],
+                        provider_content: vec![],
                     },
                     Message {
                         role: Role::Assistant,
                         content: "done".into(),
                         tool_calls: vec![],
                         tool_call_id: None,
-            provider_content: vec![],
+                        provider_content: vec![],
                     },
                 ],
                 token_usage: TokenUsage {
@@ -1095,18 +1292,20 @@ async fn join_child_terminal_result_includes_elapsed_ms_and_structured_tool_use_
                     cache_read_input_tokens: 0,
                     cache_write_input_tokens: 0,
                 },
-            reported_tool_uses: None,
+                reported_tool_uses: None,
                 used_turns: 1,
                 used_cost: Decimal::ZERO,
             },
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -1181,11 +1380,13 @@ async fn wait_children_returns_running_on_timeout_and_first_terminal_child() {
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -1315,7 +1516,13 @@ async fn wait_children_returns_running_on_timeout_and_first_terminal_child() {
         .result
         .as_ref()
         .expect("child-b should complete successfully");
-    assert_eq!(output.messages.last().map(|message| message.content.as_str()), Some("child b done"));
+    assert_eq!(
+        output
+            .messages
+            .last()
+            .map(|message| message.content.as_str()),
+        Some("child b done")
+    );
     assert_eq!(output.token_usage.input_tokens, 7);
     assert_eq!(output.token_usage.output_tokens, 11);
 
@@ -1417,11 +1624,13 @@ async fn wait_children_zero_timeout_returns_first_already_terminal_child_in_inpu
         },
     );
 
-    let supervisor = Arc::new(AgentSupervisor::with_task_factory(
-        CapabilityToken::default(),
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        worker_parent_capability(),
         default_budget(),
         Arc::new(factory.clone()),
-    ));
+    );
+    install_test_journal(&mut supervisor);
+    let supervisor = Arc::new(supervisor);
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let actor = {
         let supervisor = Arc::clone(&supervisor);
@@ -1451,12 +1660,18 @@ async fn wait_children_zero_timeout_returns_first_already_terminal_child_in_inpu
             .expect("spawn ack channel should stay open")
             .expect("spawn should be accepted");
     }
-    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_completion("child-a"))
-        .await
-        .expect("child-a should complete");
-    tokio::time::timeout(Duration::from_secs(1), factory.wait_for_completion("child-b"))
-        .await
-        .expect("child-b should complete");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        factory.wait_for_completion("child-a"),
+    )
+    .await
+    .expect("child-a should complete");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        factory.wait_for_completion("child-b"),
+    )
+    .await
+    .expect("child-b should complete");
 
     let (wait_tx, wait_rx) = tokio::sync::oneshot::channel();
     tx.send(SupervisorMessage {
@@ -1514,5 +1729,5 @@ fn wait_any_output(message: &str, input_tokens: u64, output_tokens: u64) -> Agen
 }
 
 fn wait_any_child_budget() -> ResourceBudget {
-    ResourceBudget::new(1_000, 1, Decimal::new(100, 0), 1)
+    ResourceBudget::new(1_000, 1, Decimal::new(10, 0), 1)
 }

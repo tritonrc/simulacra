@@ -118,8 +118,18 @@ These are behavioral constraints that apply across all specs. They are non-negot
 ### Supervision
 - Actor-style on raw tokio. No framework dependency.
 - Erlang-inspired: message priority (signals > supervision > commands > work).
-- Policy-per-agent-type: restart strategies, resource budgets, capability tokens.
+- Policy per configured root-agent or child-placement profile: resource budgets
+  and capability tokens. Child restart strategy is fixed at `LetCrash` by S060;
+  root-agent restart policy is unchanged.
 - Capability attenuation: children get a subset of parent's capabilities.
+
+### Child Composition
+- A configured child profile selects execution placement and a host-supplied
+  capability envelope; it does not define the child's role or workflow.
+- A child's purpose is shaped independently by its delegated task, caller
+  instructions, and the skills it chooses from the capabilities supplied by
+  its host. Native versus ACP is a runtime-placement decision, not an agent
+  identity.
 
 ### QuickJS
 - JS APIs implemented in Rust as host functions (AWS LLRT pattern), not JS polyfills.

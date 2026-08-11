@@ -1,79 +1,130 @@
 use super::*;
 
-const SPAWN_AGENT_DESCRIPTION: &str = "\
-Spawn a supervised child agent for a concrete, bounded, independent subtask. \
-Do not delegate immediate critical-path blockers when the parent cannot make \
-progress until the answer returns. This tool returns a live child handle, not \
-a final answer. After spawning, continue non-overlapping parent work; use \
-child_status for cheap nonblocking inspection, wait_child_agent for bounded \
-polling or wait-any orchestration, join_child_agent when the terminal result \
-is needed, and close_child_agent only to clean up a terminal child handle.";
+const SPAWN_AGENT_DESCRIPTION: &str = "I can start a supervised child for one concrete, bounded, independent task. Choose where I run it with placement and shape how it works with instructions; placement supplies an environment and capabilities, not a role. I return a live handle, not the child's final answer.";
+const PLACEMENT_DESCRIPTION_PREFIX: &str = "Where I should run this child and which host-supplied capability envelope it receives. This selects placement, not a role.";
+const INSTRUCTIONS_DESCRIPTION: &str = "How I should shape this child for the delegated task, including any relevant available skills and evidence requirements. This does not grant capabilities.";
+const TASK_DESCRIPTION: &str = "The concrete, bounded work I should hand to the child.";
+const BUDGET_DESCRIPTION: &str = "The maximum resources I should reserve for this child; each nonzero value must fit within my remaining budget and the placement limits, while zero requests unlimited capacity under the rules below.";
+const CAPABILITIES_DESCRIPTION: &str = "Capabilities I should remove from this child's placement envelope; these values can only attenuate access.";
+const MAX_INSTRUCTION_BYTES: usize = 65_536;
 
-// ---------------------------------------------------------------------------
-// SpawnAgentTool
-// ---------------------------------------------------------------------------
+static NEXT_CHILD_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Host-provided, model-visible guidance for the `spawn_agent` contract.
 pub struct SpawnAgentGuidance {
-    /// Tool description shown to the model in `definition()`.
     pub description: String,
-    /// Appended to the spawn acknowledgement JSON as a `note` field.
     pub result_note: Option<String>,
 }
 
-/// Tool that spawns a supervised child agent via the supervisor's mpsc channel.
-///
-/// When the LLM calls `spawn_agent`, this tool sends a `SupervisorPayload::Spawn`
-/// message and returns after the supervisor accepts the child. Terminal results
-/// are collected later with `join_child_agent`.
+/// Starts one placement-backed child through the supervisor boundary.
 pub struct SpawnAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
-    pub can_spawn: Vec<String>,
-    /// S019: Activity sink for emitting ChildSpawned/ChildFinished events.
+    pub allowed_placements: Vec<String>,
     pub activity_sink: Arc<dyn ActivitySink>,
-    /// The parent agent's ID, propagated into SpawnConfig.parent_id.
     pub parent_id: AgentId,
-    /// S023: Known tier names from `[tiers]` config. Used for tier validation.
-    pub tiers: TierMap,
-    /// Parent's budget, used to cap child budgets when the LLM omits or explicitly
-    /// requests unlimited (0) budget fields. Without this, "missing" or 0 budget
-    /// fields would create unlimited children under a finite-budget parent, which
-    /// slips past the supervisor's `child_limit > parent_remaining` check.
-    ///
-    /// Semantics: when a budget field is absent OR explicitly 0, the child
-    /// inherits the parent's **remaining** budget for that resource. When the
-    /// parent itself is unlimited (0), the child remains unlimited too.
     pub parent_budget: Arc<Mutex<ResourceBudget>>,
-    /// Parent model, used to derive the inherited tier label for generic
-    /// children without changing their model-selection fallback.
-    pub parent_model: String,
-    /// Optional host policy for the model-visible spawn contract.
     pub guidance: Option<SpawnAgentGuidance>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnArguments {
+    placement: String,
+    #[serde(default)]
+    instructions: Option<String>,
+    task: String,
+    budget: SpawnBudget,
+    #[serde(default)]
+    capabilities: Option<SpawnCapabilities>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnBudget {
+    max_tokens: u64,
+    max_turns: u32,
+    max_cost: String,
+    max_sub_agents: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnCapabilities {
+    #[serde(default)]
+    network: Option<Vec<String>>,
+    #[serde(default)]
+    mcp_tools: Option<Vec<String>>,
+    #[serde(default)]
+    shell: Option<bool>,
+    #[serde(default)]
+    javascript: Option<bool>,
+    #[serde(default)]
+    python: Option<bool>,
+    #[serde(default)]
+    paths_write: Option<Vec<String>>,
+    #[serde(default)]
+    paths_read: Option<Vec<String>>,
+    #[serde(default)]
+    spawn_placements: Option<Vec<String>>,
+}
+
+impl SpawnCapabilities {
+    fn into_token(self, parent: &CapabilityToken) -> CapabilityToken {
+        let requested = CapabilityToken {
+            network: self.network.map_or_else(
+                || parent.network.clone(),
+                |values| values.into_iter().map(NetworkPermission).collect(),
+            ),
+            mcp_tools: self.mcp_tools.unwrap_or_else(|| parent.mcp_tools.clone()),
+            shell: self.shell.unwrap_or(parent.shell),
+            javascript: self.javascript.unwrap_or(parent.javascript),
+            python: self.python.unwrap_or(parent.python),
+            paths_write: self.paths_write.map_or_else(
+                || parent.paths_write.clone(),
+                |values| {
+                    values
+                        .into_iter()
+                        .map(|value| normalize_spawn_path_scope(&value))
+                        .collect()
+                },
+            ),
+            paths_read: self.paths_read.map_or_else(
+                || parent.paths_read.clone(),
+                |values| {
+                    values
+                        .into_iter()
+                        .map(|value| normalize_spawn_path_scope(&value))
+                        .collect()
+                },
+            ),
+            spawn_placements: self
+                .spawn_placements
+                .unwrap_or_else(|| parent.spawn_placements.clone()),
+            skill_patterns: parent.skill_patterns.clone(),
+            memory: parent.memory.clone(),
+        };
+        parent.intersect(&requested)
+    }
 }
 
 impl simulacra_types::Tool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
-        // Surface the configured child agent types as an `enum` so the model can
-        // discover the valid `agent_type` values instead of falling back to a
-        // generic `system_prompt` child. Without this the property is an opaque
-        // string and the model cannot know, e.g., that "tdd-coder" is spawnable.
-        let agent_type_schema = if self.can_spawn.is_empty() {
-            serde_json::json!({
-                "type": "string",
-                "description": "Name of a configured child agent type to use for the child agent"
-            })
+        let mut placements = self.allowed_placements.clone();
+        placements.sort();
+        placements.dedup();
+        let placement_description = if placements.is_empty() {
+            format!(
+                "{PLACEMENT_DESCRIPTION_PREFIX} No child placements are available in this session."
+            )
         } else {
-            serde_json::json!({
-                "type": "string",
-                "enum": self.can_spawn,
-                "description": format!(
-                    "Name of a configured child agent type to use for the child agent. \
-                     Prefer a configured agent_type over a raw system_prompt whenever one \
-                     fits the subtask. Configured types: {}.",
-                    self.can_spawn.join(", ")
-                )
-            })
+            let quoted = placements
+                .iter()
+                .filter_map(|placement| serde_json::to_string(placement).ok())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{PLACEMENT_DESCRIPTION_PREFIX} Available placements: {quoted}.")
         };
+
         ToolDefinition {
             name: "spawn_agent".to_string(),
             description: self.guidance.as_ref().map_or_else(
@@ -83,34 +134,33 @@ impl simulacra_types::Tool for SpawnAgentTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "agent_type": agent_type_schema,
+                    "placement": {
+                        "type": "string",
+                        "description": placement_description
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": INSTRUCTIONS_DESCRIPTION
+                    },
                     "task": {
                         "type": "string",
-                        "description": "The task or instruction delegated to the child agent"
+                        "description": TASK_DESCRIPTION
                     },
                     "budget": {
                         "type": "object",
-                        "description": "Requested child budget. Each field is an upper bound and must fit within the parent's remaining budget.",
+                        "description": BUDGET_DESCRIPTION,
                         "properties": {
                             "max_tokens": { "type": "integer", "minimum": 0 },
                             "max_turns": { "type": "integer", "minimum": 0 },
-                            "max_cost": { "type": "string", "description": "Decimal string, same representation as ResourceBudget.max_cost" },
+                            "max_cost": { "type": "string", "description": "The decimal cost limit I should reserve, represented as a string." },
                             "max_sub_agents": { "type": "integer", "minimum": 0 }
                         },
                         "required": ["max_tokens", "max_turns", "max_cost", "max_sub_agents"],
                         "additionalProperties": false
                     },
-                    "system_prompt": {
-                        "type": "string",
-                        "description": "System prompt for generic sub-agent (max 8KB). Required when agent_type is omitted."
-                    },
-                    "tier": {
-                        "type": "string",
-                        "description": "Model capability tier. Defaults to parent's tier."
-                    },
                     "capabilities": {
                         "type": "object",
-                        "description": "Optional attenuated capability override.",
+                        "description": CAPABILITIES_DESCRIPTION,
                         "properties": {
                             "network": { "type": "array", "items": { "type": "string" } },
                             "mcp_tools": { "type": "array", "items": { "type": "string" } },
@@ -119,12 +169,12 @@ impl simulacra_types::Tool for SpawnAgentTool {
                             "python": { "type": "boolean" },
                             "paths_write": { "type": "array", "items": { "type": "string" } },
                             "paths_read": { "type": "array", "items": { "type": "string" } },
-                            "spawn_types": { "type": "array", "items": { "type": "string" } }
+                            "spawn_placements": { "type": "array", "items": { "type": "string" } }
                         },
                         "additionalProperties": false
                     }
                 },
-                "required": ["task", "budget"],
+                "required": ["placement", "task", "budget"],
                 "additionalProperties": false
             }),
         }
@@ -141,236 +191,125 @@ impl simulacra_types::Tool for SpawnAgentTool {
                 + '_,
         >,
     > {
-        let agent_type = arguments
-            .get("agent_type")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-        let system_prompt = arguments
-            .get("system_prompt")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let tier = arguments
-            .get("tier")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let task = arguments
-            .get("task")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let caller_spawn_types = capability.spawn_types.clone();
-
+        let caller_spawn_placements = capability.spawn_placements.clone();
+        let caller_capability = capability.clone();
         Box::pin(async move {
-            // Validate mutual exclusivity: agent_type XOR system_prompt
-            if agent_type.is_some() && system_prompt.is_some() {
-                return Err(simulacra_types::ToolError::InvalidArguments(
-                    "provide agent_type or system_prompt, not both".into(),
-                ));
-            }
-            if agent_type.is_none() && system_prompt.is_none() {
-                return Err(simulacra_types::ToolError::InvalidArguments(
-                    "either agent_type or system_prompt is required".into(),
-                ));
-            }
+            validate_argument_shape(&arguments)?;
+            let parsed: SpawnArguments = serde_json::from_value(arguments)
+                .map_err(|error| simulacra_types::ToolError::InvalidArguments(error.to_string()))?;
+            validate_text(&parsed.placement, "placement")?;
+            validate_text(&parsed.task, "task")?;
 
-            // Validate system_prompt size limit (8 KB)
-            if let Some(ref sp) = system_prompt
-                && sp.len() > 8192
-            {
-                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                    "system_prompt exceeds 8192 byte limit (got {} bytes)",
-                    sp.len()
-                )));
-            }
-
-            // S023: Validate tier name against configured tiers
-            if let Some(ref t) = tier {
-                if self.tiers.is_empty() {
-                    tracing::warn!(
-                        tier = %t,
-                        "tier ignored: no [tiers] config exists, falling back to parent model"
-                    );
-                } else if !self.tiers.contains_key(t.as_str()) {
-                    let valid: Vec<_> = self.tiers.keys().collect();
-                    return Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                        "unknown tier '{}'. Valid tiers: {:?}",
-                        t, valid
-                    )));
+            let instructions = match parsed.instructions {
+                Some(value) => {
+                    if value.len() > MAX_INSTRUCTION_BYTES {
+                        return Err(simulacra_types::ToolError::InvalidArguments(format!(
+                            "instructions has {} UTF-8 bytes; maximum is {MAX_INSTRUCTION_BYTES}",
+                            value.len()
+                        )));
+                    }
+                    (!value.trim().is_empty()).then_some(value)
                 }
-            }
+                None => None,
+            };
 
-            // Only check can_spawn for named agent types
-            if let Some(ref at) = agent_type
-                && !self.can_spawn.contains(at)
-            {
-                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                    "agent_type '{}' is not in can_spawn config",
-                    at
+            let mut available = self.allowed_placements.clone();
+            available.sort();
+            available.dedup();
+            if !available.contains(&parsed.placement) {
+                let suffix = if available.is_empty() {
+                    String::new()
+                } else {
+                    format!("; available placements: {}", available.join(", "))
+                };
+                return Err(simulacra_types::ToolError::InvalidArguments(format!(
+                    "unknown or unauthorized placement {:?}{suffix}",
+                    parsed.placement
                 )));
             }
-            if let Some(ref at) = agent_type
-                && !caller_spawn_types.is_empty()
-                && !caller_spawn_types.contains(at)
-            {
-                return Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                    "agent_type '{}' is not in caller spawn_types {:?}",
-                    at, caller_spawn_types
+            if !caller_spawn_placements.contains(&parsed.placement) {
+                return Err(simulacra_types::ToolError::InvalidArguments(format!(
+                    "placement {:?} is not authorized by caller spawn_placements",
+                    parsed.placement
                 )));
             }
 
-            // Parse budget from arguments.
-            //
-            // BLOCKER 1 fix: when a field is missing or explicitly 0, the child
-            // inherits the parent's **remaining** budget for that resource. This
-            // is required because 0 means "unlimited" everywhere else in the
-            // budget system, so an LLM that omits or zeros a field would have
-            // silently created an unlimited child under a finite-budget parent
-            // (the supervisor only rejects `child_limit > parent_remaining`,
-            // and 0 always passes that check).
-            //
-            // When the parent itself is unlimited (0), the child's inherited
-            // value also stays 0 (unlimited) — this is the only case where 0
-            // is allowed to propagate. Explicit positive values from the LLM
-            // are kept as-is (the supervisor's headroom check enforces the cap).
-            let budget_obj = arguments.get("budget").ok_or_else(|| {
-                simulacra_types::ToolError::ExecutionFailed("missing budget".into())
+            let max_cost = parsed.budget.max_cost.parse::<Decimal>().map_err(|_| {
+                simulacra_types::ToolError::InvalidArguments(format!(
+                    "max_cost {:?} is not a nonnegative decimal string",
+                    parsed.budget.max_cost
+                ))
             })?;
-
-            // Snapshot parent's remaining budget under the lock, then release.
-            let (
-                parent_remaining_tokens,
-                parent_remaining_turns,
-                parent_remaining_cost,
-                parent_remaining_sub_agents,
-            ) = {
-                let parent = self.parent_budget.lock().map_err(|e| {
+            if max_cost.is_sign_negative() {
+                return Err(simulacra_types::ToolError::InvalidArguments(format!(
+                    "max_cost {:?} is not a nonnegative decimal string",
+                    parsed.budget.max_cost
+                )));
+            }
+            let requested = ResourceBudget::new(
+                parsed.budget.max_tokens,
+                parsed.budget.max_turns,
+                max_cost,
+                parsed.budget.max_sub_agents,
+            );
+            {
+                let parent = self.parent_budget.lock().map_err(|error| {
                     simulacra_types::ToolError::ExecutionFailed(format!(
-                        "parent budget mutex poisoned: {e}"
+                        "parent budget mutex poisoned: {error}"
                     ))
                 })?;
-                let remaining_tokens = if parent.max_tokens == 0 {
-                    0u64 // 0 means unlimited — propagate to child
-                } else {
-                    parent.max_tokens.saturating_sub(parent.used_tokens)
-                };
-                let remaining_turns = if parent.max_turns == 0 {
-                    0u32
-                } else {
-                    parent.max_turns.saturating_sub(parent.used_turns)
-                };
-                let remaining_cost = if parent.max_cost.is_zero() {
-                    Decimal::ZERO
-                } else {
-                    parent.max_cost - parent.used_cost
-                };
-                let remaining_sub_agents = if parent.max_sub_agents == 0 {
-                    0u32
-                } else {
-                    parent.max_sub_agents.saturating_sub(parent.used_sub_agents)
-                };
-                (
-                    remaining_tokens,
-                    remaining_turns,
-                    remaining_cost,
-                    remaining_sub_agents,
-                )
-            };
+                validate_parent_budget(&requested, &parent)?;
+            }
 
-            let parsed_max_tokens = budget_obj.get("max_tokens").and_then(|v| v.as_u64());
-            let max_tokens = match parsed_max_tokens {
-                Some(n) if n > 0 => n,
-                _ => parent_remaining_tokens, // missing OR 0 → inherit parent remaining
-            };
-
-            let parsed_max_turns = budget_obj.get("max_turns").and_then(|v| v.as_u64());
-            let max_turns = match parsed_max_turns {
-                Some(n) if n > 0 => n as u32,
-                _ => parent_remaining_turns,
-            };
-
-            let parsed_max_cost = budget_obj
-                .get("max_cost")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Decimal>().ok());
-            let max_cost = match parsed_max_cost {
-                Some(c) if !c.is_zero() => c,
-                _ => parent_remaining_cost,
-            };
-
-            let parsed_max_sub_agents = budget_obj.get("max_sub_agents").and_then(|v| v.as_u64());
-            let max_sub_agents = match parsed_max_sub_agents {
-                Some(n) if n > 0 => n as u32,
-                _ => parent_remaining_sub_agents,
-            };
-
-            // Generate child_id: use agent_type name for named agents,
-            // "generic" for inline system_prompt agents.
-            let child_id = match &agent_type {
-                Some(at) => format!(
-                    "child-{}-{:016x}",
-                    at,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                ),
-                None => format!(
-                    "child-generic-{:016x}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                ),
-            };
-
-            // For the agent_type string used in response/activity events
-            let agent_type_label = agent_type.clone().unwrap_or_else(|| "generic".to_string());
-
-            // Parse optional capabilities override from arguments.
-            // When the LLM omits the `capabilities` field, capability stays None
-            // so the factory uses config ∩ parent (no zeroing).
-            let capability = arguments.get("capabilities").map(parse_capability_override);
-
+            let child_id = next_child_id();
             let config = SpawnConfig {
                 agent_id: AgentId(child_id.clone()),
                 parent_id: self.parent_id.clone(),
-                capability,
-                budget: ResourceBudget::new(max_tokens, max_turns, max_cost, max_sub_agents),
+                capability: parsed
+                    .capabilities
+                    .map(|override_capability| override_capability.into_token(&caller_capability)),
+                budget: requested,
                 restart_strategy: crate::RestartStrategy::LetCrash,
-                agent_type: agent_type.clone(),
-                task: task.clone(),
-                system_prompt: system_prompt.clone(),
-                tier: tier.clone(),
-                resolved_tier: tier.clone().or_else(|| {
-                    if agent_type.is_none() {
-                        Some(parent_tier_name(&self.tiers, &self.parent_model))
-                    } else {
-                        None
-                    }
-                }),
+                placement: parsed.placement.clone(),
+                task: parsed.task,
+                instructions,
             };
-
-            // Note: ChildSpawned is emitted by the supervisor (spawn_agent),
-            // not here, to avoid duplicate emissions.
-
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            crate::supervisor::register_spawn_parent_span(
+                &config.parent_id,
+                &config.agent_id,
+                tracing::Span::current(),
+            );
+            if self
+                .sender
+                .send(SupervisorMessage {
+                    agent_id: self.parent_id.clone(),
+                    priority: MessagePriority::Command,
+                    payload: SupervisorPayload::Spawn(Box::new(config), result_tx),
+                })
+                .await
+                .is_err()
+            {
+                let _ =
+                    crate::supervisor::take_spawn_parent_span(&self.parent_id, &AgentId(child_id));
+                return Err(simulacra_types::ToolError::ExecutionFailed(
+                    "supervisor channel closed".into(),
+                ));
+            }
 
-            let msg = SupervisorMessage {
-                agent_id: AgentId(child_id.clone()),
-                priority: MessagePriority::Command,
-                payload: SupervisorPayload::Spawn(Box::new(config), result_tx),
-            };
-
-            self.sender.send(msg).await.map_err(|_| {
-                simulacra_types::ToolError::ExecutionFailed("supervisor channel closed".into())
-            })?;
-
-            match result_rx.await {
+            let result = result_rx.await;
+            // The real supervisor takes this context before accepting the
+            // spawn. Fake receivers and rejected/dropped requests leave it for
+            // the caller to clean up here.
+            let _ = crate::supervisor::take_spawn_parent_span(
+                &self.parent_id,
+                &AgentId(child_id.clone()),
+            );
+            match result {
                 Ok(Ok(ack)) => {
                     let mut acknowledgement = serde_json::json!({
                         "child_id": ack.child_id.0,
-                        "agent_type": ack.agent_type,
+                        "placement": ack.placement,
                         "status": "running"
                     });
                     if let (Some(object), Some(note)) = (
@@ -383,13 +322,221 @@ impl simulacra_types::Tool for SpawnAgentTool {
                     }
                     Ok(acknowledgement)
                 }
-                Ok(Err(err)) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                    "child {child_id} (agent_type={agent_type_label}) failed: {err}"
+                Ok(Err(error)) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
+                    "child {child_id} (placement={:?}) failed: {error}",
+                    parsed.placement
                 ))),
                 Err(_) => Err(simulacra_types::ToolError::ExecutionFailed(format!(
-                    "child {child_id} (agent_type={agent_type_label}): supervisor dropped spawn acknowledgement channel"
+                    "child {child_id} (placement={:?}): supervisor dropped spawn acknowledgement channel",
+                    parsed.placement
                 ))),
             }
         })
     }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+}
+
+fn validate_argument_shape(
+    arguments: &serde_json::Value,
+) -> Result<(), simulacra_types::ToolError> {
+    let object = arguments.as_object().ok_or_else(|| {
+        simulacra_types::ToolError::InvalidArguments(
+            "spawn_agent arguments must be an object".into(),
+        )
+    })?;
+    const TOP_LEVEL: &[&str] = &[
+        "placement",
+        "instructions",
+        "task",
+        "budget",
+        "capabilities",
+    ];
+    reject_unknown_keys(object, TOP_LEVEL)?;
+    require_string(object, "placement")?;
+    require_string(object, "task")?;
+    if object
+        .get("instructions")
+        .is_some_and(|value| !value.is_string())
+    {
+        return invalid_field("instructions", "must be a string");
+    }
+
+    let budget = object
+        .get("budget")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            simulacra_types::ToolError::InvalidArguments("budget must be an object".into())
+        })?;
+    const BUDGET: &[&str] = &["max_tokens", "max_turns", "max_cost", "max_sub_agents"];
+    reject_unknown_keys(budget, BUDGET)?;
+    require_u64(budget, "max_tokens", u64::MAX)?;
+    require_u64(budget, "max_turns", u64::from(u32::MAX))?;
+    require_string(budget, "max_cost")?;
+    require_u64(budget, "max_sub_agents", u64::from(u32::MAX))?;
+
+    if let Some(capabilities) = object.get("capabilities") {
+        let capabilities = capabilities.as_object().ok_or_else(|| {
+            simulacra_types::ToolError::InvalidArguments("capabilities must be an object".into())
+        })?;
+        const CAPABILITIES: &[&str] = &[
+            "network",
+            "mcp_tools",
+            "shell",
+            "javascript",
+            "python",
+            "paths_write",
+            "paths_read",
+            "spawn_placements",
+        ];
+        reject_unknown_keys(capabilities, CAPABILITIES)?;
+        for field in [
+            "network",
+            "mcp_tools",
+            "paths_write",
+            "paths_read",
+            "spawn_placements",
+        ] {
+            if let Some(value) = capabilities.get(field)
+                && !value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
+            {
+                return invalid_field(field, "must be an array of strings");
+            }
+        }
+        for field in ["shell", "javascript", "python"] {
+            if capabilities
+                .get(field)
+                .is_some_and(|value| !value.is_boolean())
+            {
+                return invalid_field(field, "must be a boolean");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject_unknown_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> Result<(), simulacra_types::ToolError> {
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return invalid_field(key, "is unknown");
+    }
+    Ok(())
+}
+
+fn require_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), simulacra_types::ToolError> {
+    if !object.get(field).is_some_and(serde_json::Value::is_string) {
+        return invalid_field(field, "is required and must be a string");
+    }
+    Ok(())
+}
+
+fn require_u64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    maximum: u64,
+) -> Result<(), simulacra_types::ToolError> {
+    if !object
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|value| value <= maximum)
+    {
+        return invalid_field(
+            field,
+            "is required and must be a nonnegative integer in range",
+        );
+    }
+    Ok(())
+}
+
+fn invalid_field<T>(field: &str, message: &str) -> Result<T, simulacra_types::ToolError> {
+    Err(simulacra_types::ToolError::InvalidArguments(format!(
+        "{field} {message}"
+    )))
+}
+
+fn validate_text(value: &str, field: &str) -> Result<(), simulacra_types::ToolError> {
+    if value.trim().is_empty() {
+        return Err(simulacra_types::ToolError::InvalidArguments(format!(
+            "{field} must be a non-blank string"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_parent_budget(
+    requested: &ResourceBudget,
+    parent: &ResourceBudget,
+) -> Result<(), simulacra_types::ToolError> {
+    validate_limit(
+        "max_tokens",
+        requested.max_tokens,
+        parent.max_tokens,
+        parent.max_tokens.saturating_sub(parent.used_tokens),
+    )?;
+    validate_limit(
+        "max_turns",
+        requested.max_turns,
+        parent.max_turns,
+        parent.max_turns.saturating_sub(parent.used_turns),
+    )?;
+    validate_decimal_limit(
+        "max_cost",
+        requested.max_cost,
+        parent.max_cost,
+        parent.max_cost - parent.used_cost.min(parent.max_cost),
+    )?;
+    validate_limit(
+        "max_sub_agents",
+        requested.max_sub_agents,
+        parent.max_sub_agents,
+        parent.max_sub_agents.saturating_sub(parent.used_sub_agents),
+    )
+}
+
+fn validate_limit<T>(
+    field: &str,
+    requested: T,
+    parent_maximum: T,
+    parent_remaining: T,
+) -> Result<(), simulacra_types::ToolError>
+where
+    T: Copy + Default + PartialEq + PartialOrd + std::fmt::Display,
+{
+    if requested == T::default() && parent_maximum != T::default() {
+        return Err(simulacra_types::ToolError::InvalidArguments(format!(
+            "{field} requested {requested} (unlimited), but parent remaining is {parent_remaining}"
+        )));
+    }
+    if requested != T::default() && parent_maximum != T::default() && requested > parent_remaining {
+        return Err(simulacra_types::ToolError::InvalidArguments(format!(
+            "{field} requested {requested} exceeds parent remaining {parent_remaining}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_decimal_limit(
+    field: &str,
+    requested: Decimal,
+    parent_maximum: Decimal,
+    parent_remaining: Decimal,
+) -> Result<(), simulacra_types::ToolError> {
+    validate_limit(field, requested, parent_maximum, parent_remaining)
+}
+
+fn next_child_id() -> String {
+    let counter = NEXT_CHILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64);
+    format!("child-{nanos:016x}{counter:016x}")
 }

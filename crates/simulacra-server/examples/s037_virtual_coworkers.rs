@@ -180,9 +180,7 @@ async fn main() {
     agent_types.insert(
         "atlas".to_string(),
         simulacra_config::AgentTypeConfig {
-            backend: Default::default(),
             model: "claude-sonnet-4-6".into(),
-            acp_profile: None,
             system_prompt: None,
             max_turns: Some(15),
             max_tokens: Some(60000),
@@ -204,7 +202,7 @@ async fn main() {
             }),
             skills: vec![],
             restart_policy: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
         },
     );
 
@@ -217,9 +215,7 @@ async fn main() {
     agent_types.insert(
         "sol".to_string(),
         simulacra_config::AgentTypeConfig {
-            backend: Default::default(),
             model: "claude-sonnet-4-6".into(),
-            acp_profile: None,
             system_prompt: None,
             max_turns: Some(15),
             max_tokens: Some(60000),
@@ -241,7 +237,7 @@ async fn main() {
             }),
             skills: vec![],
             restart_policy: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
         },
     );
 
@@ -250,9 +246,7 @@ async fn main() {
     agent_types.insert(
         "nova".to_string(),
         simulacra_config::AgentTypeConfig {
-            backend: Default::default(),
             model: "claude-sonnet-4-6".into(),
-            acp_profile: None,
             system_prompt: None,
             max_turns: Some(15),
             max_tokens: Some(60000),
@@ -281,7 +275,7 @@ async fn main() {
             }),
             skills: vec![],
             restart_policy: None,
-            can_spawn: vec![],
+            allowed_child_placements: vec![],
         },
     );
 
@@ -291,6 +285,7 @@ async fn main() {
             description: None,
         },
         agent_types,
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,

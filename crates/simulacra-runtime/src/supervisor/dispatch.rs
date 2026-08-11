@@ -12,8 +12,23 @@ impl AgentSupervisor {
         msg: SupervisorMessage,
     ) {
         match msg.payload {
-            SupervisorPayload::Spawn(config, result_tx) => {
-                if let Err(err) = self.validate_spawn_request(&config) {
+            SupervisorPayload::Spawn(mut config, result_tx) => {
+                if let Err(err) = self.require_bound_root() {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                if msg.agent_id != config.parent_id {
+                    let _ = result_tx.send(Err(RuntimeError::CapabilityViolation(format!(
+                        "caller {:?} cannot spawn as parent {:?}",
+                        msg.agent_id.0, config.parent_id.0
+                    ))));
+                    return;
+                }
+                if let Err(err) = self.ensure_child_id_is_new(&config.agent_id) {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                if let Err(err) = self.validate_spawn_authorization(&config) {
                     let _ = result_tx.send(Err(err));
                     return;
                 }
@@ -25,74 +40,154 @@ impl AgentSupervisor {
                     let _ = result_tx.send(Err(err));
                     return;
                 }
-                if let Err(err) = self.prepare_spawn(&config) {
+                if let Err(err) = self.require_spawn_journal() {
                     let _ = result_tx.send(Err(err));
                     return;
                 }
+                if let Err(err) = self.validate_spawn_budget(&config) {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                let caller_capability = match self.capability_for_caller(&config.parent_id) {
+                    Ok(capability) => capability,
+                    Err(err) => {
+                        let _ = result_tx.send(Err(err));
+                        return;
+                    }
+                };
+                if let Err(err) =
+                    factory.prepare_spawn_config_for_caller(&mut config, &caller_capability)
+                {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                if let Err(err) = self.validate_spawn_authorization(&config) {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                if let Err(err) = self.validate_spawn_budget(&config) {
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                let backend = factory.placement_backend(&config);
+                let parent_span = take_spawn_parent_span(&config.parent_id, &config.agent_id);
+                let create_agent_span =
+                    Self::create_agent_span(&config, backend, parent_span.as_ref());
+                let accepted_budget = match self.reserve_spawn_budget(&config) {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        let _ = result_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let prepare_result = {
+                    let _guard = create_agent_span.enter();
+                    self.prepare_spawn(&config, backend)
+                };
+                if let Err(err) = prepare_result {
+                    self.rollback_unaccepted_budget(&config.agent_id);
+                    let _ = result_tx.send(Err(err));
+                    return;
+                }
+                self.record_accepted_child_id(&config.agent_id);
                 let ack = SpawnAck {
                     child_id: config.agent_id.clone(),
-                    agent_type: config
-                        .agent_type
-                        .clone()
-                        .unwrap_or_else(|| "generic".to_string()),
+                    placement: config.placement.clone(),
+                    backend,
                 };
                 let _ = result_tx.send(Ok(ack));
-                self.spawn_task_into(task_set, *config, factory);
+                self.spawn_task_into(
+                    task_set,
+                    *config,
+                    factory,
+                    Some(create_agent_span),
+                    accepted_budget,
+                );
             }
             SupervisorPayload::JoinChild(child_id, result_tx) => {
-                self.join_child(child_id, result_tx);
+                if let Err(error) = self.authorize_child_owner(&msg.agent_id, &child_id) {
+                    let _ = result_tx.send(Err(error));
+                } else {
+                    self.join_child(child_id, result_tx);
+                }
             }
             SupervisorPayload::InspectChildResult(child_id, result_tx) => {
-                let _ = result_tx.send(self.inspect_child_result(&child_id));
+                let result = self
+                    .validate_caller_identity(&msg.agent_id)
+                    .and_then(|()| self.inspect_child_result(&child_id));
+                let _ = result_tx.send(result);
             }
             SupervisorPayload::ChildStatus(child_id, result_tx) => {
-                self.send_child_status(&child_id, result_tx);
+                if let Err(error) = self.authorize_child_owner(&msg.agent_id, &child_id) {
+                    let _ = result_tx.send(Err(error));
+                } else {
+                    self.send_child_status(&child_id, result_tx);
+                }
             }
             SupervisorPayload::ListChildren(result_tx) => {
-                self.send_child_roster(result_tx);
+                self.send_child_roster(&msg.agent_id, result_tx);
             }
             SupervisorPayload::InspectChildren(result_tx) => {
                 self.send_child_roster_inspection(result_tx);
             }
             SupervisorPayload::WaitChild(child_id, timeout, result_tx) => {
-                self.wait_child(child_id, timeout, result_tx);
+                if let Err(error) = self.authorize_child_owner(&msg.agent_id, &child_id) {
+                    let _ = result_tx.send(Err(error));
+                } else {
+                    self.wait_child(child_id, timeout, result_tx);
+                }
             }
             SupervisorPayload::WaitChildren(child_ids, timeout, result_tx) => {
-                self.wait_children(child_ids, timeout, result_tx);
+                let authorization = child_ids
+                    .iter()
+                    .try_for_each(|child_id| self.authorize_child_owner(&msg.agent_id, child_id));
+                if let Err(error) = authorization {
+                    let _ = result_tx.send(Err(error));
+                } else {
+                    self.wait_children(child_ids, timeout, result_tx);
+                }
             }
             SupervisorPayload::CloseChild(child_id, result_tx) => {
-                let result = self.close_child(&child_id);
+                let result = self
+                    .authorize_child_owner(&msg.agent_id, &child_id)
+                    .and_then(|()| self.close_child(&child_id));
                 let _ = result_tx.send(result);
             }
             SupervisorPayload::CancelChild(child_id, result_tx) => {
-                let result = if let Some(token) =
-                    lock_mutex(&self.cancellation_tokens, "cancellation_tokens").get(&child_id)
-                {
-                    token.signal();
-                    Ok(())
-                } else if lock_mutex(&self.child_results, "child_results")
-                    .get(&child_id)
-                    .is_some_and(|state| state.result.is_some())
-                {
-                    Err(format!("child_id already completed: {}", child_id.0))
-                } else {
-                    Err(format!("unknown child_id: {}", child_id.0))
-                };
+                let result =
+                    if let Err(error) = self.authorize_child_owner(&msg.agent_id, &child_id) {
+                        Err(error)
+                    } else if let Some(token) =
+                        lock_mutex(&self.cancellation_tokens, "cancellation_tokens").get(&child_id)
+                    {
+                        token.signal();
+                        Ok(())
+                    } else if lock_mutex(&self.child_results, "child_results")
+                        .get(&child_id)
+                        .is_some_and(|state| state.result.is_some())
+                    {
+                        Err(format!("child_id already completed: {}", child_id.0))
+                    } else {
+                        Err(format!("unknown child_id: {}", child_id.0))
+                    };
                 let _ = result_tx.send(result);
             }
             SupervisorPayload::SteerChild(child_id, message, result_tx) => {
-                let result = if let Some(handle) =
-                    lock_mutex(&self.child_inputs, "child_inputs").get(&child_id)
-                {
-                    handle.enqueue(message)
-                } else if lock_mutex(&self.child_results, "child_results")
-                    .get(&child_id)
-                    .is_some_and(|state| state.result.is_some())
-                {
-                    Err(format!("child_id already completed: {}", child_id.0))
-                } else {
-                    Err(format!("unknown child_id: {}", child_id.0))
-                };
+                let result =
+                    if let Err(error) = self.authorize_child_owner(&msg.agent_id, &child_id) {
+                        Err(error)
+                    } else if let Some(handle) =
+                        lock_mutex(&self.child_inputs, "child_inputs").get(&child_id)
+                    {
+                        handle.enqueue(message)
+                    } else if lock_mutex(&self.child_results, "child_results")
+                        .get(&child_id)
+                        .is_some_and(|state| state.result.is_some())
+                    {
+                        Err(format!("child_id already completed: {}", child_id.0))
+                    } else {
+                        Err(format!("unknown child_id: {}", child_id.0))
+                    };
                 let _ = result_tx.send(result);
             }
             SupervisorPayload::Cancel => {

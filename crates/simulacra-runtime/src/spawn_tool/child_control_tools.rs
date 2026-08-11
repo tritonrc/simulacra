@@ -24,8 +24,8 @@ cancelled without waiting for or consuming the terminal result; terminal status 
 variants contain the child's result.";
 
 const LIST_CHILD_AGENTS_DESCRIPTION: &str = "\
-List all child handles currently tracked by this supervisor, including live \
-children and terminal children that have not been closed; terminal status \
+List all child handles I own that are currently tracked by this supervisor, \
+including live children and terminal children that have not been closed by me; terminal status \
 variants contain each child's result.";
 
 const WAIT_CHILD_AGENT_DESCRIPTION: &str = "\
@@ -43,6 +43,7 @@ children; it is not cancellation and must not be used to stop running work.";
 
 pub struct JoinChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for JoinChildAgentTool {
@@ -89,7 +90,7 @@ impl simulacra_types::Tool for JoinChildAgentTool {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             self.sender
                 .send(SupervisorMessage {
-                    agent_id: AgentId(child_id.clone()),
+                    agent_id: self.caller_id.clone(),
                     priority: MessagePriority::Command,
                     payload: SupervisorPayload::JoinChild(AgentId(child_id.clone()), result_tx),
                 })
@@ -110,6 +111,7 @@ impl simulacra_types::Tool for JoinChildAgentTool {
 
 pub struct ChildStatusTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for ChildStatusTool {
@@ -147,7 +149,7 @@ impl simulacra_types::Tool for ChildStatusTool {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             self.sender
                 .send(SupervisorMessage {
-                    agent_id: AgentId(child_id.clone()),
+                    agent_id: self.caller_id.clone(),
                     priority: MessagePriority::Command,
                     payload: SupervisorPayload::ChildStatus(AgentId(child_id.clone()), result_tx),
                 })
@@ -168,6 +170,7 @@ impl simulacra_types::Tool for ChildStatusTool {
 
 pub struct ListChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for ListChildAgentTool {
@@ -204,7 +207,7 @@ impl simulacra_types::Tool for ListChildAgentTool {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             self.sender
                 .send(SupervisorMessage {
-                    agent_id: AgentId("list_child_agents".into()),
+                    agent_id: self.caller_id.clone(),
                     priority: MessagePriority::Command,
                     payload: SupervisorPayload::ListChildren(result_tx),
                 })
@@ -225,6 +228,7 @@ impl simulacra_types::Tool for ListChildAgentTool {
 
 pub struct WaitChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for WaitChildAgentTool {
@@ -283,7 +287,7 @@ impl simulacra_types::Tool for WaitChildAgentTool {
                     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
                     self.sender
                         .send(SupervisorMessage {
-                            agent_id: AgentId(child_id.clone()),
+                            agent_id: self.caller_id.clone(),
                             priority: MessagePriority::Command,
                             payload: SupervisorPayload::WaitChild(
                                 AgentId(child_id),
@@ -309,7 +313,7 @@ impl simulacra_types::Tool for WaitChildAgentTool {
                     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
                     self.sender
                         .send(SupervisorMessage {
-                            agent_id: AgentId(child_ids[0].clone()),
+                            agent_id: self.caller_id.clone(),
                             priority: MessagePriority::Command,
                             payload: SupervisorPayload::WaitChildren(
                                 child_ids.into_iter().map(AgentId).collect(),
@@ -338,6 +342,7 @@ impl simulacra_types::Tool for WaitChildAgentTool {
 
 pub struct CloseChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for CloseChildAgentTool {
@@ -375,7 +380,7 @@ impl simulacra_types::Tool for CloseChildAgentTool {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             self.sender
                 .send(SupervisorMessage {
-                    agent_id: AgentId(child_id.clone()),
+                    agent_id: self.caller_id.clone(),
                     priority: MessagePriority::Command,
                     payload: SupervisorPayload::CloseChild(AgentId(child_id.clone()), result_tx),
                 })
@@ -399,6 +404,7 @@ impl simulacra_types::Tool for CloseChildAgentTool {
 
 pub struct SteerChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for SteerChildAgentTool {
@@ -461,7 +467,7 @@ impl simulacra_types::Tool for SteerChildAgentTool {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             self.sender
                 .send(SupervisorMessage {
-                    agent_id: AgentId(child_id.clone()),
+                    agent_id: self.caller_id.clone(),
                     priority: MessagePriority::Command,
                     payload: SupervisorPayload::SteerChild(
                         AgentId(child_id.clone()),
@@ -489,6 +495,7 @@ impl simulacra_types::Tool for SteerChildAgentTool {
 
 pub struct CancelChildAgentTool {
     pub sender: tokio::sync::mpsc::Sender<SupervisorMessage>,
+    pub caller_id: AgentId,
 }
 
 impl simulacra_types::Tool for CancelChildAgentTool {
@@ -539,7 +546,7 @@ impl simulacra_types::Tool for CancelChildAgentTool {
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             self.sender
                 .send(SupervisorMessage {
-                    agent_id: AgentId(child_id.clone()),
+                    agent_id: self.caller_id.clone(),
                     priority: MessagePriority::Signal,
                     payload: SupervisorPayload::CancelChild(AgentId(child_id.clone()), result_tx),
                 })

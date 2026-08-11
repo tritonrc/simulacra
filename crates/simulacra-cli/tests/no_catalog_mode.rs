@@ -64,6 +64,7 @@ fn base_config() -> SimulacraConfig {
             description: None,
         },
         agent_types: HashMap::new(),
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: None,
@@ -79,17 +80,29 @@ fn base_config() -> SimulacraConfig {
 
 fn agent_with(model: &str, prompt: Option<&str>) -> AgentTypeConfig {
     AgentTypeConfig {
-        backend: Default::default(),
         model: model.into(),
-        acp_profile: None,
         system_prompt: prompt.map(str::to_owned),
         skills: vec![],
         max_turns: None,
         max_tokens: None,
         max_sub_agents: None,
-        can_spawn: vec![],
+        allowed_child_placements: vec![],
         restart_policy: None,
         capabilities: None,
+    }
+}
+
+fn agent_with_allowed_children(
+    model: &str,
+    prompt: Option<&str>,
+    placements: &[&str],
+) -> AgentTypeConfig {
+    AgentTypeConfig {
+        allowed_child_placements: placements
+            .iter()
+            .map(|placement| (*placement).to_owned())
+            .collect(),
+        ..agent_with(model, prompt)
     }
 }
 
@@ -332,6 +345,39 @@ async fn no_catalog_mode_fixtures_serve_get_list_resolve_via_memory_agent_repo()
     assert!(
         resolved.skills.is_empty(),
         "planner has no inline skills (host references only)"
+    );
+}
+
+#[tokio::test]
+async fn catalog_fixtures_retain_allowed_child_placements_as_spawn_grants() {
+    let mut config = base_config();
+    config.agent_types.insert(
+        "planner".into(),
+        agent_with_allowed_children("claude-x", Some("plan!"), &["workspace", "in_process"]),
+    );
+
+    let fixtures = fixtures_from_config(&config);
+    let repo = MemoryAgentRepository::new(fixtures);
+    let resolved = repo
+        .resolve(&default_tenant_id(), "planner")
+        .await
+        .expect("planner should resolve from no-catalog fixtures");
+
+    assert!(
+        resolved
+            .capabilities
+            .iter()
+            .any(|capability| capability == "spawn:workspace"),
+        "allowed_child_placements must survive catalog import as spawn:workspace grants: {:?}",
+        resolved.capabilities
+    );
+    assert!(
+        resolved
+            .capabilities
+            .iter()
+            .any(|capability| capability == "spawn:in_process"),
+        "allowed_child_placements must survive catalog import as spawn:in_process grants: {:?}",
+        resolved.capabilities
     );
 }
 

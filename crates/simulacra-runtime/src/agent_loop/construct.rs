@@ -16,6 +16,11 @@ impl AgentLoop {
         activity_sink: Option<Arc<dyn ActivitySink>>,
         pipeline: Option<Arc<HookPipeline>>,
     ) -> Self {
+        let policy_kill_signal = crate::policy_kill::subscribe(&config.agent_id, &journal);
+        let spawn_hook_journal_frontier = journal
+            .read_all(&config.agent_id)
+            .ok()
+            .map(|entries| entries.len());
         Self {
             config,
             provider,
@@ -34,6 +39,8 @@ impl AgentLoop {
             cancellation: None,
             input_queue: None,
             hitl: None,
+            spawn_hook_journal_frontier,
+            policy_kill_signal,
         }
     }
 
@@ -49,6 +56,11 @@ impl AgentLoop {
         clock: Box<dyn Clock>,
         replay_journal: Option<Vec<JournalEntry>>,
     ) -> Self {
+        let policy_kill_signal = crate::policy_kill::subscribe(&config.agent_id, &journal);
+        let spawn_hook_journal_frontier = journal
+            .read_all(&config.agent_id)
+            .ok()
+            .map(|entries| entries.len());
         Self {
             config,
             provider,
@@ -67,6 +79,8 @@ impl AgentLoop {
             cancellation: None,
             input_queue: None,
             hitl: None,
+            spawn_hook_journal_frontier,
+            policy_kill_signal,
         }
     }
 

@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rust_decimal::Decimal;
-use simulacra_config::{AgentBackend, SimulacraConfig, TierMap, build_capability_token};
+use simulacra_config::{AgentBackend, SimulacraConfig, build_child_placement_capability};
 use simulacra_types::{
     AgentId, CapabilityToken, ContextStrategy, JournalStorage, Message, NetworkPermission,
     PathPattern, Provider, ResourceBudget, ToolDefinition, ToolError, VirtualFs,
@@ -54,9 +54,10 @@ use crate::{
 };
 
 use child_environment::{ChildEnvironmentSpec, ChildSpawnToolSpec, build_child_environment};
-use helpers::{
-    inherit_memory_when_override_unset, parent_tier_name, parse_capability_override,
-    resolve_tier_model, run_spawn_after_hook, run_spawn_before_hook,
-};
-use proc_runtime::{ChildProcRuntime, ChildProcSpec, child_proc_runtime};
+#[cfg(test)]
+use helpers::inherit_memory_when_override_unset;
+use helpers::{normalize_spawn_path_scope, run_spawn_after_hook, run_spawn_before_hook};
+#[cfg(test)]
+use proc_runtime::child_proc_runtime;
+use proc_runtime::{ChildProcRuntime, ChildProcSpec, child_proc_runtime_with_budget};
 use provider_adapter::build_provider;

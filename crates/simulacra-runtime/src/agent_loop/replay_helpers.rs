@@ -49,13 +49,11 @@ pub(super) fn replay_entries_match(expected: &JournalEntryKind, actual: &Journal
                 arguments: actual_args,
             },
         ) => {
-            let ids_match = match (expected_id, actual_id) {
-                (Some(expected), Some(actual)) => expected == actual,
-                // Backward compatibility: old journals did not record ids.
-                (_, None) => true,
-                (None, Some(_)) => true,
-            };
-            ids_match && expected_tool == actual_tool && expected_args == actual_args
+            matches!(
+                (expected_id, actual_id),
+                (Some(expected), Some(actual)) if expected == actual
+            ) && expected_tool == actual_tool
+                && expected_args == actual_args
         }
         _ => false,
     }
@@ -73,7 +71,7 @@ pub(super) fn describe_replay_entry(kind: &JournalEntryKind) -> String {
             arguments,
         } => format!(
             "ToolCall(tool_call_id={}, tool_name={tool_name}, arguments={arguments})",
-            tool_call_id.as_deref().unwrap_or("<legacy>")
+            tool_call_id.as_deref().unwrap_or("<missing>")
         ),
         other => entry_kind_name(other).to_string(),
     }

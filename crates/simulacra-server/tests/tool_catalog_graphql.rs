@@ -19,6 +19,7 @@ fn config_with_mcp_servers(names: &[&str]) -> SimulacraConfig {
             description: None,
         },
         agent_types: HashMap::new(),
+        child_placements: HashMap::new(),
         integrations: HashMap::new(),
         tenants: HashMap::new(),
         mcp: Some(McpConfig {

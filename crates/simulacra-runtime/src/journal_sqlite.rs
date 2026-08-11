@@ -66,8 +66,24 @@ impl SqliteJournalStorage {
     }
 }
 
+fn validate_schema_version(schema_version: u32) -> Result<(), JournalError> {
+    if schema_version != JOURNAL_SCHEMA_VERSION {
+        tracing::error!(
+            expected = JOURNAL_SCHEMA_VERSION,
+            got = schema_version,
+            "journal schema version mismatch; start a new session"
+        );
+        return Err(JournalError::SchemaVersionMismatch {
+            expected: JOURNAL_SCHEMA_VERSION,
+            got: schema_version,
+        });
+    }
+    Ok(())
+}
+
 impl JournalStorage for SqliteJournalStorage {
     fn append(&self, entry: JournalEntry) -> Result<(), JournalError> {
+        validate_schema_version(entry.schema_version)?;
         let entry_json = serde_json::to_string(&entry.entry)
             .map_err(|e| JournalError::Storage(e.to_string()))?;
 
@@ -115,17 +131,7 @@ impl JournalStorage for SqliteJournalStorage {
             let (agent_id_str, schema_version, timestamp_ms, entry_json) =
                 row.map_err(|e| JournalError::Storage(e.to_string()))?;
 
-            if schema_version > JOURNAL_SCHEMA_VERSION {
-                tracing::error!(
-                    "schema version mismatch: expected {} but found {}",
-                    JOURNAL_SCHEMA_VERSION,
-                    schema_version
-                );
-                return Err(JournalError::SchemaVersionMismatch {
-                    expected: JOURNAL_SCHEMA_VERSION,
-                    got: schema_version,
-                });
-            }
+            validate_schema_version(schema_version)?;
 
             let entry: JournalEntryKind = serde_json::from_str(&entry_json)
                 .map_err(|e| JournalError::Storage(e.to_string()))?;
@@ -145,7 +151,7 @@ impl JournalStorage for SqliteJournalStorage {
 
         let mut stmt = conn
             .prepare(
-                "SELECT entry_json FROM journal_entries
+                "SELECT schema_version, entry_json FROM journal_entries
                  WHERE agent_id = ?1
                  ORDER BY id",
             )
@@ -154,16 +160,19 @@ impl JournalStorage for SqliteJournalStorage {
         let mut total = TokenUsage::default();
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0], |row| {
-                let entry_json: String = row.get(0)?;
-                Ok(entry_json)
+                let schema_version: u32 = row.get(0)?;
+                let entry_json: String = row.get(1)?;
+                Ok((schema_version, entry_json))
             })
             .map_err(|e| JournalError::Storage(e.to_string()))?;
 
         for row in rows {
-            let entry_json = row.map_err(|e| JournalError::Storage(e.to_string()))?;
-            if let Ok(JournalEntryKind::LlmResponse { token_usage, .. }) =
-                serde_json::from_str::<JournalEntryKind>(&entry_json)
-            {
+            let (schema_version, entry_json) =
+                row.map_err(|e| JournalError::Storage(e.to_string()))?;
+            validate_schema_version(schema_version)?;
+            let entry = serde_json::from_str::<JournalEntryKind>(&entry_json)
+                .map_err(|error| JournalError::Storage(error.to_string()))?;
+            if let JournalEntryKind::LlmResponse { token_usage, .. } = entry {
                 total.input_tokens = total.input_tokens.saturating_add(token_usage.input_tokens);
                 total.output_tokens = total
                     .output_tokens
@@ -187,6 +196,17 @@ impl JournalStorage for SqliteJournalStorage {
         data: CheckpointData,
     ) -> Result<(), JournalError> {
         let conn = crate::sqlite_util::lock_mutex(&self.conn).map_err(JournalError::Storage)?;
+
+        let mut versions = conn
+            .prepare("SELECT schema_version FROM journal_entries WHERE agent_id = ?1 ORDER BY id")
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
+        let rows = versions
+            .query_map(rusqlite::params![agent_id.0], |row| row.get::<_, u32>(0))
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
+        for row in rows {
+            validate_schema_version(row.map_err(|e| JournalError::Storage(e.to_string()))?)?;
+        }
+        drop(versions);
 
         // Validate after_entry is within bounds
         let agent_count: usize = conn
@@ -262,6 +282,14 @@ mod tests {
     use super::*;
     use rust_decimal::Decimal;
     use simulacra_types::{Message, ResourceBudget, Role};
+
+    #[path = "s060_slice4.rs"]
+    mod s060_slice4;
+
+    // Schema-mismatch tests exercise one tracing callsite with different
+    // thread-local subscribers. Serialize them so tracing's global callsite
+    // interest cache cannot be rebuilt by a sibling test mid-capture.
+    static SCHEMA_MISMATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_entry(agent_id: &str, kind: JournalEntryKind) -> JournalEntry {
         JournalEntry {
@@ -422,23 +450,34 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_mismatch_rejected() {
+    fn schema_version_mismatch_rejected_at_append() {
+        let _schema_guard = SCHEMA_MISMATCH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let storage = SqliteJournalStorage::in_memory().unwrap();
         let agent = AgentId("schema-agent".into());
 
-        storage
+        let err = storage
             .append(JournalEntry {
                 schema_version: JOURNAL_SCHEMA_VERSION + 1,
                 agent_id: agent.clone(),
                 timestamp_ms: 1,
                 entry: JournalEntryKind::TurnStart,
             })
-            .unwrap();
-
-        let err = storage
-            .read_all(&agent)
-            .expect_err("should reject future schema version");
-        assert!(matches!(err, JournalError::SchemaVersionMismatch { .. }));
+            .expect_err("should reject future schema version at append");
+        assert!(matches!(
+            err,
+            JournalError::SchemaVersionMismatch {
+                expected: JOURNAL_SCHEMA_VERSION,
+                got
+            } if got == JOURNAL_SCHEMA_VERSION + 1
+        ));
+        assert!(
+            storage
+                .read_all(&agent)
+                .expect("rejected append must leave a readable stream")
+                .is_empty()
+        );
     }
 
     #[test]

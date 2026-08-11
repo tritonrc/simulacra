@@ -12,7 +12,7 @@ pub struct PathPattern(pub String);
 
 /// Capability token assigned to an agent at creation.
 /// Checked at the proxy layer before any side-effecting operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityToken {
     pub network: Vec<NetworkPermission>,
     pub mcp_tools: Vec<String>,
@@ -21,7 +21,7 @@ pub struct CapabilityToken {
     pub python: bool,
     pub paths_write: Vec<PathPattern>,
     pub paths_read: Vec<PathPattern>,
-    pub spawn_types: Vec<String>,
+    pub spawn_placements: Vec<String>,
     /// Skill capability patterns using the `skill:<name>` namespace and glob
     /// semantics. An agent's effective skill catalog is the intersection of:
     ///
@@ -86,9 +86,9 @@ impl CapabilityToken {
             }
         }
 
-        // Spawn types: child must be a subset of parent
-        for child_spawn in &self.spawn_types {
-            if !parent.spawn_types.contains(child_spawn) {
+        // Child placement authorization: child must be a subset of parent.
+        for child_spawn in &self.spawn_placements {
+            if !parent.spawn_placements.contains(child_spawn) {
                 return false;
             }
         }
@@ -124,16 +124,11 @@ impl CapabilityToken {
             return false;
         }
         for child_skill in &self.skill_patterns {
-            let covered = parent.skill_patterns.iter().any(|parent_pat| {
-                if parent_pat == child_skill {
-                    return true;
-                }
-                // Glob: parent `skill:rust-*` covers child `skill:rust-dev`
-                if let Some(prefix) = parent_pat.strip_suffix('*') {
-                    return child_skill.starts_with(prefix);
-                }
-                false
-            });
+            let covered = child_skill == DENY_ALL_SKILLS_PATTERN
+                || parent
+                    .skill_patterns
+                    .iter()
+                    .any(|parent_pat| skill_pattern_covers(parent_pat, child_skill));
             if !covered {
                 return false;
             }
@@ -187,29 +182,13 @@ impl CapabilityToken {
             python: self.python && other.python,
             paths_write: intersect_path_patterns(&self.paths_write, &other.paths_write),
             paths_read: intersect_path_patterns(&self.paths_read, &other.paths_read),
-            spawn_types: self
-                .spawn_types
+            spawn_placements: self
+                .spawn_placements
                 .iter()
-                .filter(|s| other.spawn_types.contains(s))
+                .filter(|s| other.spawn_placements.contains(s))
                 .cloned()
                 .collect(),
-            // skill_patterns uses "empty = allow all" semantics (unlike other
-            // list fields where empty = deny all). Handle this explicitly:
-            //   [] ∩ []       = []       (both allow all → allow all)
-            //   [] ∩ ["a"]    = ["a"]    (allow all ∩ restricted → restricted)
-            //   ["a"] ∩ []    = ["a"]    (restricted ∩ allow all → restricted)
-            //   ["a"] ∩ ["b"] = filtered (standard set intersection)
-            skill_patterns: if self.skill_patterns.is_empty() {
-                other.skill_patterns.clone()
-            } else if other.skill_patterns.is_empty() {
-                self.skill_patterns.clone()
-            } else {
-                self.skill_patterns
-                    .iter()
-                    .filter(|s| other.skill_patterns.contains(s))
-                    .cloned()
-                    .collect()
-            },
+            skill_patterns: intersect_skill_patterns(&self.skill_patterns, &other.skill_patterns),
             // Memory capability intersection: both must be enabled, scopes
             // are intersected with **prefix-aware narrowing**, not exact
             // vector intersection. A child scope is allowed if it is at or
@@ -444,6 +423,62 @@ fn intersect_path_patterns(a: &[PathPattern], b: &[PathPattern]) -> Vec<PathPatt
         if path_pattern_covered_by(&bp.0, a) && !out.contains(bp) {
             out.push(bp.clone());
         }
+    }
+    out
+}
+
+// `skill_patterns = []` means allow all, so an empty ordinary set cannot also
+// represent the result of two disjoint restricted envelopes. This private,
+// non-matching pattern preserves deny-all through subsequent intersections.
+const DENY_ALL_SKILLS_PATTERN: &str = "\0";
+
+fn skill_pattern_covers(parent: &str, child: &str) -> bool {
+    if child == DENY_ALL_SKILLS_PATTERN {
+        return true;
+    }
+    if parent == DENY_ALL_SKILLS_PATTERN {
+        return false;
+    }
+    if parent == "*" || parent == "skill:*" || parent == child {
+        return true;
+    }
+    parent
+        .strip_suffix('*')
+        .is_some_and(|prefix| child.starts_with(prefix))
+}
+
+fn intersect_skill_patterns(a: &[String], b: &[String]) -> Vec<String> {
+    if a.is_empty() {
+        return b.to_vec();
+    }
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    if a.iter().any(|pattern| pattern == DENY_ALL_SKILLS_PATTERN)
+        || b.iter().any(|pattern| pattern == DENY_ALL_SKILLS_PATTERN)
+    {
+        return vec![DENY_ALL_SKILLS_PATTERN.to_string()];
+    }
+
+    let mut out = Vec::new();
+    for left in a {
+        for right in b {
+            let narrower = if skill_pattern_covers(left, right) {
+                Some(right)
+            } else if skill_pattern_covers(right, left) {
+                Some(left)
+            } else {
+                None
+            };
+            if let Some(pattern) = narrower
+                && !out.contains(pattern)
+            {
+                out.push(pattern.clone());
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push(DENY_ALL_SKILLS_PATTERN.to_string());
     }
     out
 }
@@ -716,19 +751,19 @@ mod tests {
     }
 
     #[test]
-    fn child_spawn_type_must_be_granted_by_parent() {
+    fn child_spawn_placement_must_be_granted_by_parent() {
         let parent = CapabilityToken {
-            spawn_types: vec!["worker".into()],
+            spawn_placements: vec!["worker".into()],
             ..Default::default()
         };
         let child = CapabilityToken {
-            spawn_types: vec!["supervisor".into()],
+            spawn_placements: vec!["supervisor".into()],
             ..Default::default()
         };
 
         assert!(
             !child.is_subset_of(&parent),
-            "child spawn types must be validated as a subset of the parent's spawn permissions"
+            "child spawn placements must be validated as a subset of the parent's spawn permissions"
         );
     }
 
@@ -838,6 +873,101 @@ mod tests {
 
         let result = a.intersect(&b);
         assert!(result.skill_patterns.is_empty());
+    }
+
+    #[test]
+    fn intersect_disjoint_restricted_skill_patterns_yields_deny_all_sentinel() {
+        let rust_only = CapabilityToken {
+            skill_patterns: vec!["skill:rust-dev".into()],
+            ..Default::default()
+        };
+        let research_only = CapabilityToken {
+            skill_patterns: vec!["skill:web-research".into()],
+            ..Default::default()
+        };
+
+        let intersection = rust_only.intersect(&research_only);
+
+        assert_eq!(
+            intersection.skill_patterns,
+            vec![DENY_ALL_SKILLS_PATTERN.to_string()],
+            "disjoint restricted envelopes must not collapse to the empty allow-all representation"
+        );
+    }
+
+    #[test]
+    fn deny_all_skill_sentinel_persists_through_intersections_and_denies_every_skill() {
+        let left = CapabilityToken {
+            skill_patterns: vec!["skill:rust-dev".into()],
+            ..Default::default()
+        };
+        let right = CapabilityToken {
+            skill_patterns: vec!["skill:web-research".into()],
+            ..Default::default()
+        };
+        let later = CapabilityToken {
+            skill_patterns: vec!["skill:*".into()],
+            ..Default::default()
+        };
+
+        let deny_all = left.intersect(&right);
+        let still_deny_all = deny_all.intersect(&later);
+
+        assert_eq!(
+            still_deny_all.skill_patterns,
+            vec![DENY_ALL_SKILLS_PATTERN.to_string()]
+        );
+        for skill in ["rust-dev", "web-research", "anything-else"] {
+            assert!(
+                still_deny_all.check_skill(skill).is_err(),
+                "deny-all sentinel must reject {skill:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn intersect_skill_glob_and_exact_keeps_exact_in_both_directions_without_widening() {
+        let glob = CapabilityToken {
+            skill_patterns: vec!["skill:code-*".into()],
+            ..Default::default()
+        };
+        let exact = CapabilityToken {
+            skill_patterns: vec!["skill:code-review".into()],
+            ..Default::default()
+        };
+
+        for intersection in [glob.intersect(&exact), exact.intersect(&glob)] {
+            assert_eq!(
+                intersection.skill_patterns,
+                vec!["skill:code-review".to_string()]
+            );
+            assert!(intersection.check_skill("code-review").is_ok());
+            assert!(
+                intersection.check_skill("code-build").is_err(),
+                "intersection must not widen back to the broader glob"
+            );
+        }
+    }
+
+    #[test]
+    fn intersect_nested_skill_globs_keeps_narrower_glob_in_both_directions() {
+        let broad = CapabilityToken {
+            skill_patterns: vec!["skill:code-*".into()],
+            ..Default::default()
+        };
+        let narrow = CapabilityToken {
+            skill_patterns: vec!["skill:code-review-*".into()],
+            ..Default::default()
+        };
+
+        for intersection in [broad.intersect(&narrow), narrow.intersect(&broad)] {
+            assert_eq!(
+                intersection.skill_patterns,
+                vec!["skill:code-review-*".to_string()]
+            );
+            assert!(intersection.check_skill("code-review-rust").is_ok());
+            assert!(intersection.check_skill("code-build").is_err());
+        }
     }
 
     #[test]

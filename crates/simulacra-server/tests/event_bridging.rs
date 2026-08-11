@@ -262,14 +262,15 @@ async fn child_spawned_events_translate_to_agent_child_spawned_with_seq() {
 
     sink.emit(ActivityEvent::ChildSpawned {
         child_id: "child-1".to_string(),
-        agent_type: "reviewer".to_string(),
+        placement: "workspace".to_string(),
         task: "Review the patch".to_string(),
     });
 
     let event = recv_event(&mut rx).await;
     assert_eq!(event["event"], "agent.child_spawned");
     assert_eq!(event["child_id"], "child-1");
-    assert_eq!(event["agent_type"], "reviewer");
+    assert_eq!(event["placement"], "workspace");
+    assert!(event.get("agent_type").is_none());
     assert_eq!(event["child_task"], "Review the patch");
 }
 
@@ -280,7 +281,7 @@ async fn child_finished_events_translate_to_agent_child_finished_with_seq() {
 
     sink.emit(ActivityEvent::ChildFinished {
         child_id: "child-1".to_string(),
-        agent_type: "reviewer".to_string(),
+        placement: "workspace".to_string(),
         exit_reason: "completed".to_string(),
         duration_ms: 225,
         tool_uses: 3,
@@ -290,6 +291,8 @@ async fn child_finished_events_translate_to_agent_child_finished_with_seq() {
     let event = recv_event(&mut rx).await;
     assert_eq!(event["event"], "agent.child_finished");
     assert_eq!(event["child_id"], "child-1");
+    assert_eq!(event["placement"], "workspace");
+    assert!(event.get("agent_type").is_none());
     assert_eq!(event["exit_reason"], "completed");
     assert_eq!(event["duration_ms"], 225);
 }
@@ -313,7 +316,7 @@ async fn child_activity_is_flattened_with_child_attribution_added_to_the_inner_e
 
     sink.emit(ActivityEvent::ChildActivity {
         child_id: "child-1".to_string(),
-        agent_type: "researcher".to_string(),
+        placement: "in_process".to_string(),
         event: Box::new(ActivityEvent::Token {
             text: "child message".to_string(),
         }),
@@ -324,7 +327,8 @@ async fn child_activity_is_flattened_with_child_attribution_added_to_the_inner_e
     assert_eq!(event["task_id"], "task-9");
     assert_eq!(event["content"], "child message");
     assert_eq!(event["child_id"], "child-1");
-    assert_eq!(event["child_agent_type"], "researcher");
+    assert_eq!(event["child_placement"], "in_process");
+    assert!(event.get("child_agent_type").is_none());
 }
 
 #[tokio::test]
@@ -334,10 +338,10 @@ async fn nested_child_activity_is_flattened_to_the_innermost_child_identity() {
 
     sink.emit(ActivityEvent::ChildActivity {
         child_id: "child-outer".to_string(),
-        agent_type: "planner".to_string(),
+        placement: "in_process".to_string(),
         event: Box::new(ActivityEvent::ChildActivity {
             child_id: "child-inner".to_string(),
-            agent_type: "researcher".to_string(),
+            placement: "workspace".to_string(),
             event: Box::new(ActivityEvent::ToolOutput {
                 tool_call_id: "tool-10".to_string(),
                 line: "nested child output".to_string(),
@@ -350,7 +354,8 @@ async fn nested_child_activity_is_flattened_to_the_innermost_child_identity() {
     assert_eq!(event["task_id"], "task-10");
     // Innermost child attribution preserved.
     assert_eq!(event["child_id"], "child-inner");
-    assert_eq!(event["child_agent_type"], "researcher");
+    assert_eq!(event["child_placement"], "workspace");
+    assert!(event.get("child_agent_type").is_none());
 }
 
 #[tokio::test]

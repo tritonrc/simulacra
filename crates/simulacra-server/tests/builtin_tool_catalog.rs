@@ -27,6 +27,7 @@ fn config_with_mcp_servers(names: &[&str]) -> SimulacraConfig {
             description: None,
         },
         agent_types: Default::default(),
+        child_placements: Default::default(),
         integrations: Default::default(),
         tenants: Default::default(),
         mcp: Some(McpConfig {

@@ -4206,6 +4206,7 @@ name = "simulacra-config"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "rust_decimal",
  "serde",
  "simulacra-types",
  "thiserror 2.0.18",
