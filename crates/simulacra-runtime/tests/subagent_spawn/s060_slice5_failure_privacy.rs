@@ -160,11 +160,11 @@ fn s060_async_capture_storage() -> &'static (
 async fn s060_capture_trace_async<T>(
     operation: impl FnOnce() -> std::pin::Pin<Box<dyn std::future::Future<Output = T>>>,
 ) -> (T, Vec<CapturedSpan>, Vec<CapturedEvent>) {
-    static ASYNC_CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static ASYNC_CAPTURE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     let _capture_guard = ASYNC_CAPTURE_LOCK
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .await;
     let (spans, events) = s060_async_capture_storage();
     spans
         .lock()
