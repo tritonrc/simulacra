@@ -6,8 +6,8 @@ use crate::{
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use simulacra_types::{
-    ActivityEvent, ExitReason, FsMetadata, MemoryCapability, MemoryPath, PathPattern, Role,
-    TokenUsage, Tool, VfsError, VfsSnapshot,
+    ActivityEvent, ExitReason, FsMetadata, JournalEntryKind, MemoryCapability, MemoryPath,
+    PathPattern, Role, TokenUsage, Tool, VfsError, VfsSnapshot,
 };
 use simulacra_vfs::MemoryFs;
 
@@ -1072,4 +1072,738 @@ async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_pro
     supervisor_task
         .await
         .expect("supervisor task should exit cleanly");
+}
+
+// S061 — Path-Shaped Child Ids from `task_name`.
+
+fn s061_spawn_tool(
+    parent_id: &str,
+) -> (
+    SpawnAgentTool,
+    tokio::sync::mpsc::Receiver<SupervisorMessage>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    (
+        SpawnAgentTool {
+            sender,
+            allowed_placements: vec!["reviewer".into()],
+            activity_sink: Arc::new(NoopActivitySink),
+            parent_id: AgentId(parent_id.into()),
+            parent_budget: Arc::new(Mutex::new(ResourceBudget::new(
+                10_000,
+                100,
+                Decimal::ZERO,
+                100,
+            ))),
+            guidance: None,
+        },
+        receiver,
+    )
+}
+
+fn s061_capability() -> CapabilityToken {
+    CapabilityToken {
+        spawn_placements: vec!["reviewer".into()],
+        ..Default::default()
+    }
+}
+
+fn s061_arguments(task: &str, task_name: Option<serde_json::Value>) -> serde_json::Value {
+    let mut arguments = serde_json::json!({
+        "placement": "reviewer",
+        "task": task,
+        "budget": {
+            "max_tokens": 10,
+            "max_turns": 1,
+            "max_cost": "0",
+            "max_sub_agents": 1
+        }
+    });
+    if let Some(task_name) = task_name {
+        arguments
+            .as_object_mut()
+            .expect("S061 arguments should be an object")
+            .insert("task_name".into(), task_name);
+    }
+    arguments
+}
+
+fn s061_arguments_with_task_name(task: &str, task_name: &str) -> serde_json::Value {
+    s061_arguments(task, Some(serde_json::Value::String(task_name.into())))
+}
+
+async fn s061_call_and_capture_spawn(
+    tool: &SpawnAgentTool,
+    receiver: &mut tokio::sync::mpsc::Receiver<SupervisorMessage>,
+    arguments: serde_json::Value,
+) -> (serde_json::Value, SpawnConfig) {
+    let capability = s061_capability();
+    let call = tool.call(arguments, &capability);
+    tokio::pin!(call);
+
+    let message = tokio::select! {
+        result = &mut call => {
+            panic!("spawn_agent returned before submitting a spawn request: {result:?}");
+        }
+        message = receiver.recv() => {
+            message.expect("spawn_agent should submit a supervisor request")
+        }
+    };
+
+    let config = match message.payload {
+        SupervisorPayload::Spawn(config, result_tx) => {
+            let config = *config;
+            result_tx
+                .send(Ok(crate::supervisor::SpawnAck {
+                    child_id: config.agent_id.clone(),
+                    placement: config.placement.clone(),
+                    backend: AgentBackend::Native,
+                }))
+                .expect("spawn_agent should await the acknowledgement");
+            config
+        }
+        other => panic!("expected spawn request, got {other:?}"),
+    };
+
+    let acknowledgement = call.await.expect("spawn_agent should accept the spawn");
+    (acknowledgement, config)
+}
+
+async fn s061_call_and_reject_spawn(
+    tool: &SpawnAgentTool,
+    receiver: &mut tokio::sync::mpsc::Receiver<SupervisorMessage>,
+    arguments: serde_json::Value,
+    error: RuntimeError,
+) -> (simulacra_types::ToolError, SpawnConfig) {
+    let capability = s061_capability();
+    let call = tool.call(arguments, &capability);
+    tokio::pin!(call);
+
+    let message = tokio::select! {
+        result = &mut call => {
+            panic!("spawn_agent returned before submitting a spawn request: {result:?}");
+        }
+        message = receiver.recv() => {
+            message.expect("spawn_agent should submit a supervisor request")
+        }
+    };
+
+    let config = match message.payload {
+        SupervisorPayload::Spawn(config, result_tx) => {
+            let config = *config;
+            result_tx
+                .send(Err(error))
+                .expect("spawn_agent should await the acknowledgement");
+            config
+        }
+        other => panic!("expected spawn request, got {other:?}"),
+    };
+
+    let error = call
+        .await
+        .expect_err("spawn_agent should propagate supervisor rejection");
+    (error, config)
+}
+
+async fn s061_expect_invalid_arguments(
+    parent_id: &str,
+    arguments: serde_json::Value,
+    expected_fragments: &[&str],
+) {
+    let (tool, mut receiver) = s061_spawn_tool(parent_id);
+    s061_expect_invalid_arguments_with_tool(&tool, &mut receiver, arguments, expected_fragments)
+        .await;
+}
+
+async fn s061_expect_invalid_arguments_with_tool(
+    tool: &SpawnAgentTool,
+    receiver: &mut tokio::sync::mpsc::Receiver<SupervisorMessage>,
+    arguments: serde_json::Value,
+    expected_fragments: &[&str],
+) {
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        tool.call(arguments, &s061_capability()),
+    )
+    .await
+    .expect("argument validation should finish without supervisor acknowledgement")
+    .expect_err("spawn_agent should reject invalid arguments");
+
+    let message = match error {
+        simulacra_types::ToolError::InvalidArguments(message) => message,
+        other => panic!("expected InvalidArguments, got {other:?}"),
+    };
+
+    for fragment in expected_fragments {
+        assert!(
+            message.contains(fragment),
+            "expected InvalidArguments message {message:?} to contain {fragment:?}"
+        );
+    }
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+fn s061_is_legacy_child_id(value: &str) -> bool {
+    value.strip_prefix("child-").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ('a'..='f').contains(&ch))
+    })
+}
+
+#[test]
+fn s061_schema_exposes_optional_task_name_and_preserves_required_fields() {
+    let (tool, _receiver) = s061_spawn_tool("s061-parent-schema");
+    let schema = tool.definition().input_schema;
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .expect("spawn_agent schema should define object properties");
+    let task_name = properties
+        .get("task_name")
+        .expect("spawn_agent schema should expose task_name");
+
+    assert_eq!(
+        task_name.get("type").and_then(|value| value.as_str()),
+        Some("string")
+    );
+    let description = task_name
+        .get("description")
+        .and_then(|value| value.as_str())
+        .expect("task_name should describe valid segment syntax");
+    for fragment in ["lowercase", "digits", "underscores"] {
+        assert!(
+            description.contains(fragment),
+            "task_name description should mention {fragment:?}: {description:?}"
+        );
+    }
+    assert_eq!(
+        schema.get("required"),
+        Some(&serde_json::json!(["placement", "task", "budget"]))
+    );
+}
+
+#[tokio::test]
+async fn s061_task_name_passes_shape_validation_while_unknown_keys_still_fail() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-shape-task-name");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments_with_task_name("review the focused change", "shape_validation"),
+    )
+    .await;
+
+    assert_eq!(config.agent_id, AgentId("/forge/shape_validation".into()));
+    assert_eq!(acknowledgement["child_id"], "/forge/shape_validation");
+
+    let mut unknown = s061_arguments("review the focused change", None);
+    unknown
+        .as_object_mut()
+        .expect("S061 arguments should be an object")
+        .insert("unexpected".into(), serde_json::json!(true));
+    s061_expect_invalid_arguments(
+        "s061-parent-shape-unknown",
+        unknown,
+        &["unexpected", "unknown"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn s061_non_string_task_name_fails_as_invalid_arguments() {
+    s061_expect_invalid_arguments(
+        "s061-parent-non-string-task-name",
+        s061_arguments("review the focused change", Some(serde_json::json!(7))),
+        &["task_name", "string"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn s061_blank_task_names_fail_as_invalid_arguments() {
+    for (index, task_name) in ["", "   ", "\t\n"].into_iter().enumerate() {
+        s061_expect_invalid_arguments(
+            &format!("s061-parent-blank-task-name-{index}"),
+            s061_arguments_with_task_name("review the focused change", task_name),
+            &["task_name", "non-blank"],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn s061_task_name_rejects_invalid_path_segment_characters() {
+    for (index, task_name) in [
+        "has/slash",
+        "Uppercase",
+        "has-hyphen",
+        "has space",
+        "has.dot",
+        "emoji_smile_🙂",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s061_expect_invalid_arguments(
+            &format!("s061-parent-invalid-task-name-chars-{index}"),
+            s061_arguments_with_task_name("review the focused change", task_name),
+            &["task_name"],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn s061_task_name_rejects_reserved_segments() {
+    for (index, task_name) in ["forge", ".", ".."].into_iter().enumerate() {
+        s061_expect_invalid_arguments(
+            &format!("s061-parent-reserved-task-name-{index}"),
+            s061_arguments_with_task_name("review the focused change", task_name),
+            &["task_name", "reserved"],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn s061_task_name_accepts_sixty_four_chars_and_rejects_sixty_five() {
+    let sixty_four = "a".repeat(64);
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-sixty-four-task-name");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments_with_task_name("review the focused change", &sixty_four),
+    )
+    .await;
+    let expected = format!("/forge/{sixty_four}");
+
+    assert_eq!(config.agent_id.0, expected);
+    assert_eq!(acknowledgement["child_id"], expected);
+
+    let sixty_five = "b".repeat(65);
+    s061_expect_invalid_arguments(
+        "s061-parent-sixty-five-task-name",
+        s061_arguments_with_task_name("review the focused change", &sixty_five),
+        &["task_name", "64"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn s061_root_task_name_composes_forge_path_and_ack_echoes_it() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-root-task-name");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments_with_task_name("explore the codebase", "explore_codebase"),
+    )
+    .await;
+
+    assert_eq!(config.agent_id, AgentId("/forge/explore_codebase".into()));
+    assert_eq!(acknowledgement["child_id"], "/forge/explore_codebase");
+}
+
+#[tokio::test]
+async fn s061_descendant_task_name_appends_segment_to_parent_path() {
+    let (tool, mut receiver) = s061_spawn_tool("/forge/first_phase");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments_with_task_name("review the focused change", "review_patch"),
+    )
+    .await;
+
+    assert_eq!(
+        config.agent_id,
+        AgentId("/forge/first_phase/review_patch".into())
+    );
+    assert_eq!(
+        acknowledgement["child_id"],
+        "/forge/first_phase/review_patch"
+    );
+}
+
+#[tokio::test]
+async fn s061_valid_task_name_flows_through_spawn_config_and_ack_unchanged() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-unchanged-flow");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments_with_task_name("summarize risky diffs", "summarize_risky_diffs"),
+    )
+    .await;
+
+    assert_eq!(config.agent_id.0, "/forge/summarize_risky_diffs");
+    assert_eq!(acknowledgement["child_id"], config.agent_id.0);
+}
+
+#[tokio::test]
+async fn s061_omitted_task_name_derives_slug_from_task_for_root() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-auto-slug-basic");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments("Explore the Codebase for DF-123", None),
+    )
+    .await;
+
+    assert_eq!(
+        config.agent_id,
+        AgentId("/forge/explore_the_codebase_for_df123".into())
+    );
+    assert_eq!(
+        acknowledgement["child_id"],
+        "/forge/explore_the_codebase_for_df123"
+    );
+}
+
+#[tokio::test]
+async fn s061_auto_slug_collapses_drops_trims_and_truncates() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-auto-slug-normalization");
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments(
+            "  Hello,\tWORLD!!! café Δ keep__underscores and very long suffix  ",
+            None,
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        config.agent_id,
+        AgentId("/forge/hello_world_caf_keep__underscore".into())
+    );
+    assert_eq!(config.agent_id.0.len(), "/forge/".len() + 32);
+    assert_eq!(
+        acknowledgement["child_id"],
+        "/forge/hello_world_caf_keep__underscore"
+    );
+}
+
+#[tokio::test]
+async fn s061_auto_slug_truncates_before_uniqueness_suffix() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-auto-slug-truncate-suffix");
+    let long_task = "  Hello,\tWORLD!!! café Δ keep__underscores and very long suffix  ";
+    let (_, first) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments(long_task, None)).await;
+    let (_, second) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments(long_task, None)).await;
+
+    assert_eq!(first.agent_id.0, "/forge/hello_world_caf_keep__underscore");
+    assert_eq!(
+        second.agent_id.0, "/forge/hello_world_caf_keep__underscore_2",
+        "the uniqueness suffix must be appended after 32-character truncation"
+    );
+}
+
+#[tokio::test]
+async fn s061_no_slugable_task_uses_legacy_child_id_shape() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-no-slug-legacy");
+    let (acknowledgement, config) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments("???", None)).await;
+    let child_id = acknowledgement
+        .get("child_id")
+        .and_then(|value| value.as_str())
+        .expect("spawn acknowledgement should include child_id");
+
+    assert_eq!(config.agent_id.0, child_id);
+    assert!(
+        s061_is_legacy_child_id(child_id),
+        "expected legacy fallback id child-[0-9a-f]{{32}}, got {child_id:?}"
+    );
+}
+
+#[tokio::test]
+async fn s061_two_no_slug_spawns_under_one_parent_get_distinct_legacy_ids() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-no-slug-distinct");
+    let (_, first) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments("???", None)).await;
+    let (_, second) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments("!!!", None)).await;
+
+    assert!(s061_is_legacy_child_id(&first.agent_id.0));
+    assert!(s061_is_legacy_child_id(&second.agent_id.0));
+    assert_ne!(first.agent_id, second.agent_id);
+}
+
+#[tokio::test]
+async fn s061_omitted_task_name_dedupes_locally_under_one_parent() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-auto-slug-dedupe");
+    let (_, first) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments("Review patch", None))
+            .await;
+    let (_, second) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments("Review patch", None))
+            .await;
+    let (_, third) =
+        s061_call_and_capture_spawn(&tool, &mut receiver, s061_arguments("Review patch", None))
+            .await;
+
+    assert_eq!(first.agent_id.0, "/forge/review_patch");
+    assert_eq!(second.agent_id.0, "/forge/review_patch_2");
+    assert_eq!(third.agent_id.0, "/forge/review_patch_3");
+}
+
+#[tokio::test]
+async fn s061_same_auto_slug_under_different_parents_is_unsuffixed_for_both() {
+    let (first_tool, mut first_receiver) = s061_spawn_tool("s061-parent-cross-parent-a");
+    let (second_tool, mut second_receiver) = s061_spawn_tool("s061-parent-cross-parent-b");
+
+    let (_, first) = s061_call_and_capture_spawn(
+        &first_tool,
+        &mut first_receiver,
+        s061_arguments("Shared slug", None),
+    )
+    .await;
+    let (_, second) = s061_call_and_capture_spawn(
+        &second_tool,
+        &mut second_receiver,
+        s061_arguments("Shared slug", None),
+    )
+    .await;
+
+    assert_eq!(first.agent_id.0, "/forge/shared_slug");
+    assert_eq!(second.agent_id.0, "/forge/shared_slug");
+}
+
+#[tokio::test]
+async fn s061_model_supplied_duplicate_path_propagates_supervisor_rejection() {
+    let duplicate_path = "/forge/duplicate_path";
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-duplicate-model-name");
+    let arguments = s061_arguments_with_task_name("review duplicate handling", "duplicate_path");
+    let (_, first) = s061_call_and_capture_spawn(&tool, &mut receiver, arguments.clone()).await;
+    assert_eq!(first.agent_id.0, duplicate_path);
+
+    let (error, second) = s061_call_and_reject_spawn(
+        &tool,
+        &mut receiver,
+        arguments,
+        RuntimeError::CapabilityViolation(format!("already accepted child id {duplicate_path}")),
+    )
+    .await;
+    assert_eq!(second.agent_id.0, duplicate_path);
+
+    let message = match error {
+        simulacra_types::ToolError::ExecutionFailed(message) => message,
+        other => panic!("expected ExecutionFailed, got {other:?}"),
+    };
+    assert!(
+        message.contains(duplicate_path),
+        "ExecutionFailed should contain duplicate path {duplicate_path:?}: {message:?}"
+    );
+}
+
+#[tokio::test]
+async fn s061_auto_slug_drops_non_ascii_whitespace() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-auto-slug-non-ascii");
+    let (_, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments("a\u{00a0}b c\u{2003}d", None),
+    )
+    .await;
+
+    assert_eq!(config.agent_id.0, "/forge/ab_cd");
+}
+
+#[tokio::test]
+async fn s061_concurrent_identical_auto_slugs_receive_unique_suffixes() {
+    let (tool, mut receiver) = s061_spawn_tool("s061-parent-concurrent-same-slug");
+    let tool = Arc::new(tool);
+    let capability = s061_capability();
+    let mut calls = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let tool = Arc::clone(&tool);
+        let capability = capability.clone();
+        calls.spawn(async move {
+            tool.call(s061_arguments("Same concurrent slug", None), &capability)
+                .await
+        });
+    }
+
+    let mut ids = std::collections::BTreeSet::new();
+    for _ in 0..8 {
+        let message = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("spawn request should arrive")
+            .expect("supervisor channel should stay open");
+        match message.payload {
+            SupervisorPayload::Spawn(config, result_tx) => {
+                let child_id = config.agent_id.0.clone();
+                result_tx
+                    .send(Ok(crate::supervisor::SpawnAck {
+                        child_id: config.agent_id.clone(),
+                        placement: config.placement.clone(),
+                        backend: AgentBackend::Native,
+                    }))
+                    .expect("spawn_agent should await the acknowledgement");
+                ids.insert(child_id);
+            }
+            other => panic!("expected spawn request, got {other:?}"),
+        }
+    }
+    while let Some(joined) = calls.join_next().await {
+        joined
+            .expect("spawn call should not panic")
+            .expect("concurrent identical-slug spawn should be accepted");
+    }
+
+    let expected: std::collections::BTreeSet<String> = (1..=8)
+        .map(|suffix| match suffix {
+            1 => "/forge/same_concurrent_slug".to_string(),
+            n => format!("/forge/same_concurrent_slug_{n}"),
+        })
+        .collect();
+    assert_eq!(ids, expected);
+}
+
+struct S061CompletingFactory;
+
+impl TaskFactory for S061CompletingFactory {
+    fn validate_spawn_config(&self, _config: &SpawnConfig) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    fn create_task(&self, _config: SpawnConfig, _cancellation: CancellationToken) -> BoxTaskFuture {
+        Box::pin(async move {
+            Ok(AgentLoopOutput {
+                exit_reason: ExitReason::Complete,
+                messages: Vec::new(),
+                token_usage: TokenUsage::default(),
+                reported_tool_uses: None,
+                used_turns: 0,
+                used_cost: Decimal::ZERO,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn s061_real_supervisor_rejects_duplicate_model_name_and_journals_the_path() {
+    let parent_id = AgentId("s061-real-supervisor-root".into());
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let mut supervisor = AgentSupervisor::with_task_factory(
+        s061_capability(),
+        ResourceBudget::new(10_000, 100, Decimal::ZERO, 100),
+        Arc::new(S061CompletingFactory),
+    );
+    supervisor.set_root_agent_id(parent_id.clone());
+    supervisor.set_journal_storage(Arc::clone(&journal) as Arc<dyn JournalStorage>);
+    let (supervisor_tx, supervisor_rx) = tokio::sync::mpsc::channel(8);
+    let supervisor_task = tokio::spawn(async move {
+        supervisor.run_actor_loop(supervisor_rx).await;
+    });
+    let tool = SpawnAgentTool {
+        sender: supervisor_tx.clone(),
+        allowed_placements: vec!["reviewer".into()],
+        activity_sink: Arc::new(NoopActivitySink),
+        parent_id: parent_id.clone(),
+        parent_budget: Arc::new(Mutex::new(ResourceBudget::new(
+            10_000,
+            100,
+            Decimal::ZERO,
+            100,
+        ))),
+        guidance: None,
+    };
+    let capability = s061_capability();
+    let arguments = s061_arguments_with_task_name("review duplicate handling", "duplicate_real");
+
+    let first = tool
+        .call(arguments.clone(), &capability)
+        .await
+        .expect("first spawn should be accepted");
+    assert_eq!(first["child_id"], "/forge/duplicate_real");
+
+    let error = tool
+        .call(arguments, &capability)
+        .await
+        .expect_err("duplicate model-supplied name must be rejected");
+    let message = match error {
+        simulacra_types::ToolError::ExecutionFailed(message) => message,
+        other => panic!("expected ExecutionFailed, got {other:?}"),
+    };
+    assert!(
+        message.contains("/forge/duplicate_real"),
+        "rejection should name the duplicate path: {message:?}"
+    );
+    assert!(
+        message.contains("already accepted"),
+        "rejection should carry the supervisor's already-accepted vocabulary: {message:?}"
+    );
+
+    drop(supervisor_tx);
+    drop(tool);
+    supervisor_task
+        .await
+        .expect("supervisor should exit after channel close");
+
+    let entries = journal
+        .read_all(&parent_id)
+        .expect("parent journal should remain readable");
+    let spawned: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            JournalEntryKind::SubAgentSpawned { child_id, .. } => Some(child_id.0.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        spawned,
+        vec!["/forge/duplicate_real".to_string()],
+        "the journal must carry the exact path exactly once; the duplicate must not journal"
+    );
+}
+
+#[tokio::test]
+async fn s061_regression_spawn_without_task_name_still_preserves_s060_validation_order() {
+    // One parent for the whole test: a rejected call must not consume the
+    // auto-slug segment, so the subsequent valid spawn still receives the
+    // unsuffixed path.
+    let parent = "s061-parent-regression-order";
+    let (tool, mut receiver) = s061_spawn_tool(parent);
+
+    let mut unauthorized_placement = s061_arguments("review the focused change", None);
+    unauthorized_placement
+        .as_object_mut()
+        .expect("S061 arguments should be an object")
+        .insert("placement".into(), serde_json::json!("writer"));
+    s061_expect_invalid_arguments_with_tool(
+        &tool,
+        &mut receiver,
+        unauthorized_placement,
+        &["placement", "unauthorized"],
+    )
+    .await;
+
+    let mut invalid_budget = s061_arguments("review the focused change", None);
+    invalid_budget
+        .get_mut("budget")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("S061 budget should be an object")
+        .insert("max_cost".into(), serde_json::json!("-1"));
+    s061_expect_invalid_arguments_with_tool(
+        &tool,
+        &mut receiver,
+        invalid_budget,
+        &["max_cost", "nonnegative"],
+    )
+    .await;
+
+    let (acknowledgement, config) = s061_call_and_capture_spawn(
+        &tool,
+        &mut receiver,
+        s061_arguments("review the focused change", None),
+    )
+    .await;
+    assert_eq!(config.agent_id.0, "/forge/review_the_focused_change");
+    assert_eq!(
+        acknowledgement["child_id"],
+        "/forge/review_the_focused_change"
+    );
 }

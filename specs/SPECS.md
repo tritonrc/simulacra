@@ -32,3 +32,4 @@
 | [S054](S054-child-agent-orchestration.md) | Child Agent Orchestration | Active | `simulacra-cli`, `simulacra-runtime`, `simulacra-server` |
 | [S056](S056-acp-child-agents.md) | ACP Child Agents | Active | `simulacra-config`, `simulacra-runtime`, `simulacra-cli`, `simulacra-server` |
 | [S057](S057-skill-activated-mcp-catalogs.md) | Skill-Activated MCP Catalogs | Active | `simulacra-config`, `simulacra-cli`, `simulacra-runtime`, `simulacra-tool`, `simulacra-mcp`, `simulacra-types` |
+| [S061](S061-path-shaped-child-ids.md) | Path-Shaped Child Ids from `task_name` | Active | `simulacra-runtime` |

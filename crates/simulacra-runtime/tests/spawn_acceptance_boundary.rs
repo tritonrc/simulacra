@@ -213,13 +213,23 @@ fn assert_spawn_tool_runtime_error(error: ToolError, placement: &str, runtime_er
         .strip_prefix("child ")
         .and_then(|message| message.strip_suffix(&suffix))
         .expect("tool error must preserve exact child, placement, and runtime error vocabulary");
-    assert_eq!(child_id.len(), "child-".len() + 32);
-    assert!(child_id.starts_with("child-"));
-    assert!(
-        child_id["child-".len()..]
+    // S061: task_name-less spawns with slug-able tasks mint path-shaped ids
+    // (`/forge/<slug>`); legacy hex ids remain only for un-slug-able tasks.
+    // The slug is non-empty and bounded (32 base chars plus `_100` suffix headroom).
+    let is_path_id = child_id.strip_prefix("/forge/").is_some_and(|slug| {
+        (1..=36).contains(&slug.len())
+            && slug
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    });
+    let is_legacy_id = child_id.len() == "child-".len() + 32
+        && child_id.starts_with("child-")
+        && child_id["child-".len()..]
             .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "tool error child id must retain the opaque lowercase-hex form: {child_id}"
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    assert!(
+        is_path_id || is_legacy_id,
+        "tool error child id must be path-shaped or legacy hex: {child_id}"
     );
 }
 

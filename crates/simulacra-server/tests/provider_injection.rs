@@ -1480,10 +1480,10 @@ async fn server_task_returns_live_generic_subagent_handle_and_resumes_parent() {
         "master's second turn should include the spawn_agent live handle; messages were: {resumed_messages:?}"
     );
     assert!(
-        resumed_messages
-            .iter()
-            .any(|message| message.content.contains("\"child_id\":\"child-")),
-        "live handle should include an opaque generated child id; messages were: {resumed_messages:?}"
+        resumed_messages.iter().any(|message| message
+            .content
+            .contains("\"child_id\":\"/forge/analyze_the_delegated_part_and_r\"")),
+        "live handle should include the exact derived path child id; messages were: {resumed_messages:?}"
     );
 }
 

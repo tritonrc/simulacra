@@ -382,8 +382,8 @@ async fn failed_spawn_agent_calls_return_error_tool_results_with_child_id_placem
     match result {
         Err(ToolError::ExecutionFailed(msg)) => {
             assert!(
-                msg.contains("child_id") || msg.contains("child-"),
-                "error message should reference the child_id: {msg}"
+                msg.contains("/forge/check"),
+                "error message should reference the derived child path /forge/check: {msg}"
             );
             assert!(
                 msg.contains("researcher"),

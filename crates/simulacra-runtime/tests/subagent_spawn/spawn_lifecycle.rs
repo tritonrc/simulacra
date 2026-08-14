@@ -329,16 +329,19 @@ async fn s060_a32_one_thousand_concurrent_spawns_receive_opaque_unique_ids() {
         let (result, instructions, task) = joined.expect("spawn task should not panic");
         let result = result.expect("authorized concurrent spawn should be accepted");
         let id = result["child_id"].as_str().expect("child id").to_string();
-        assert_eq!(id.len(), "child-".len() + 32);
-        assert!(id.starts_with("child-"));
+        // S061: hex-digit task text now surfaces (by design) as the
+        // `/forge/<slug>` path segment; instructions must never leak.
+        let slug = id
+            .strip_prefix("/forge/")
+            .unwrap_or_else(|| panic!("child id should be /forge-prefixed: {id}"));
+        assert_eq!(slug.len(), 32);
         assert!(
-            id["child-".len()..]
-                .bytes()
+            slug.bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "child id must use exactly lowercase hexadecimal: {id}"
+            "child id slug must use only the task-text charset: {id}"
         );
+        assert_eq!(slug, task, "slug must derive from this call's own task text");
         fixtures.push(instructions);
-        fixtures.push(task);
         assert!(
             ids.insert(id),
             "concurrent child ids must be pairwise unique"
@@ -350,7 +353,7 @@ async fn s060_a32_one_thousand_concurrent_spawns_receive_opaque_unique_ids() {
         for fixture in &fixtures {
             assert!(
                 !id.contains(fixture),
-                "child id leaked fixture {fixture}: {id}"
+                "child id leaked instructions fixture {fixture}: {id}"
             );
         }
     }
