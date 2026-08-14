@@ -680,7 +680,9 @@ fn jsonl_headless_spawn_agent_returns_handle_and_emits_child_spawned_without_han
     let child_id = child_spawned["event"]["child_id"]
         .as_str()
         .expect("ChildSpawned should include child_id");
-    assert!(child_id.starts_with("child-"));
+    // S061: slug-able tasks without task_name mint `/forge/<slug>` ids;
+    // the fixture task is fixed, so pin the exact derived path.
+    assert_eq!(child_id, "/forge/summarize_the_fixture");
     assert_eq!(child_spawned["event"]["placement"], "researcher");
     assert!(child_spawned["event"].get("agent_type").is_none());
     assert_eq!(child_spawned["event"]["task"], "summarize the fixture");

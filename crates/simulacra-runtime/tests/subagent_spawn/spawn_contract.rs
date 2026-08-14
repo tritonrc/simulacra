@@ -253,7 +253,8 @@ fn s060_a08_spawn_schema_is_flat_and_matches_the_complete_contract() {
             "capabilities",
             "instructions",
             "placement",
-            "task"
+            "task",
+            "task_name"
         ]
     );
 

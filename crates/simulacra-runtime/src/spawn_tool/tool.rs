@@ -1,14 +1,23 @@
 use super::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 const SPAWN_AGENT_DESCRIPTION: &str = "I can start a supervised child for one concrete, bounded, independent task. Choose where I run it with placement and shape how it works with instructions; placement supplies an environment and capabilities, not a role. I return a live handle, not the child's final answer.";
 const PLACEMENT_DESCRIPTION_PREFIX: &str = "Where I should run this child and which host-supplied capability envelope it receives. This selects placement, not a role.";
 const INSTRUCTIONS_DESCRIPTION: &str = "How I should shape this child for the delegated task, including any relevant available skills and evidence requirements. This does not grant capabilities.";
 const TASK_DESCRIPTION: &str = "The concrete, bounded work I should hand to the child.";
+const TASK_NAME_DESCRIPTION: &str = "Short snake_case name for this child, derived from the task; use lowercase letters, digits, and underscores (for example explore_codebase). The child's id becomes /forge/<task_name>.";
 const BUDGET_DESCRIPTION: &str = "The maximum resources I should reserve for this child; each nonzero value must fit within my remaining budget and the placement limits, while zero requests unlimited capacity under the rules below.";
 const CAPABILITIES_DESCRIPTION: &str = "Capabilities I should remove from this child's placement envelope; these values can only attenuate access.";
 const MAX_INSTRUCTION_BYTES: usize = 65_536;
 
 static NEXT_CHILD_ID: AtomicU64 = AtomicU64::new(1);
+
+// Auto-slug segments are recorded per parent and never freed, matching the
+// supervisor's never-reuse semantics for accepted child ids. Only auto-derived
+// segments enter this registry; model-supplied names never do.
+static AUTO_SLUG_SEGMENTS: LazyLock<Mutex<HashMap<String, HashSet<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Host-provided, model-visible guidance for the `spawn_agent` contract.
 pub struct SpawnAgentGuidance {
@@ -36,6 +45,8 @@ struct SpawnArguments {
     budget: SpawnBudget,
     #[serde(default)]
     capabilities: Option<SpawnCapabilities>,
+    #[serde(default)]
+    task_name: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -145,6 +156,10 @@ impl simulacra_types::Tool for SpawnAgentTool {
                     "task": {
                         "type": "string",
                         "description": TASK_DESCRIPTION
+                    },
+                    "task_name": {
+                        "type": "string",
+                        "description": TASK_NAME_DESCRIPTION
                     },
                     "budget": {
                         "type": "object",
@@ -261,7 +276,25 @@ impl simulacra_types::Tool for SpawnAgentTool {
                 validate_parent_budget(&requested, &parent)?;
             }
 
-            let child_id = next_child_id();
+            let child_id = match parsed.task_name.as_deref() {
+                Some(task_name) => {
+                    validate_task_name(task_name)?;
+                    compose_child_path(&self.parent_id.0, task_name)
+                }
+                None => {
+                    let slug = derive_auto_slug(&parsed.task);
+                    if slug.is_empty() {
+                        next_child_id()
+                    } else {
+                        // The uniqueness suffix is appended after the 32-char
+                        // truncation, so suffixed segments may exceed 32 chars.
+                        match reserve_auto_slug_segment(&self.parent_id.0, &slug) {
+                            Some(segment) => compose_child_path(&self.parent_id.0, &segment),
+                            None => next_child_id(),
+                        }
+                    }
+                }
+            };
             let config = SpawnConfig {
                 agent_id: AgentId(child_id.clone()),
                 parent_id: self.parent_id.clone(),
@@ -351,6 +384,7 @@ fn validate_argument_shape(
         "placement",
         "instructions",
         "task",
+        "task_name",
         "budget",
         "capabilities",
     ];
@@ -362,6 +396,12 @@ fn validate_argument_shape(
         .is_some_and(|value| !value.is_string())
     {
         return invalid_field("instructions", "must be a string");
+    }
+    if object
+        .get("task_name")
+        .is_some_and(|value| !value.is_string())
+    {
+        return invalid_field("task_name", "must be a string");
     }
 
     let budget = object
@@ -539,4 +579,79 @@ fn next_child_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos() as u64);
     format!("child-{nanos:016x}{counter:016x}")
+}
+
+fn validate_task_name(value: &str) -> Result<(), simulacra_types::ToolError> {
+    validate_text(value, "task_name")?;
+    if value.contains('/') {
+        return Err(simulacra_types::ToolError::InvalidArguments(
+            "task_name must not contain '/'".into(),
+        ));
+    }
+    if matches!(value, "forge" | "." | "..") {
+        return Err(simulacra_types::ToolError::InvalidArguments(
+            "task_name is reserved; choose a different name".into(),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return Err(simulacra_types::ToolError::InvalidArguments(
+            "task_name may only contain ASCII lowercase letters, digits, and underscores".into(),
+        ));
+    }
+    if value.chars().count() > 64 {
+        return Err(simulacra_types::ToolError::InvalidArguments(format!(
+            "task_name has {} characters; maximum is 64",
+            value.chars().count()
+        )));
+    }
+    Ok(())
+}
+
+fn derive_auto_slug(task: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_whitespace = false;
+    for ch in task.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_whitespace && !slug.is_empty() {
+                slug.push('_');
+            }
+            pending_whitespace = false;
+            slug.push(ch.to_ascii_lowercase());
+        } else if ch == '_' {
+            if pending_whitespace && !slug.is_empty() {
+                slug.push('_');
+            }
+            pending_whitespace = false;
+            slug.push(ch);
+        } else if ch.is_ascii_whitespace() {
+            pending_whitespace = true;
+        }
+    }
+    slug.trim_matches('_').chars().take(32).collect()
+}
+
+fn reserve_auto_slug_segment(parent_id: &str, slug: &str) -> Option<String> {
+    let mut registry = AUTO_SLUG_SEGMENTS.lock().ok()?;
+    let taken = registry.entry(parent_id.to_string()).or_default();
+    if taken.insert(slug.to_string()) {
+        return Some(slug.to_string());
+    }
+    for suffix in 2..=100 {
+        let candidate = format!("{slug}_{suffix}");
+        if taken.insert(candidate.clone()) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn compose_child_path(parent_id: &str, segment: &str) -> String {
+    if parent_id.starts_with("/forge/") {
+        format!("{parent_id}/{segment}")
+    } else {
+        format!("/forge/{segment}")
+    }
 }

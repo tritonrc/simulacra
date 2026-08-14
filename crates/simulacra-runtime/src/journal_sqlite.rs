@@ -283,8 +283,7 @@ mod tests {
     use rust_decimal::Decimal;
     use simulacra_types::{Message, ResourceBudget, Role};
 
-    #[path = "s060_slice4.rs"]
-    mod s060_slice4;
+    mod spawn_entries;
 
     // Schema-mismatch tests exercise one tracing callsite with different
     // thread-local subscribers. Serialize them so tracing's global callsite

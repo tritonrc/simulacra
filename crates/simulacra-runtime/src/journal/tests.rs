@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 
-mod s060_slice4;
+mod spawn_entries;
 
 #[derive(Debug, Clone)]
 struct CapturedEvent {
