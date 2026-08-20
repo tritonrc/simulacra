@@ -4,6 +4,24 @@
 //! a provider's token limit.
 
 pub use simulacra_types::{ContextStrategy, Message, Role};
+use tiktoken_rs::CoreBPE;
+
+/// Shared `cl100k_base` BPE encoder. `cl100k_base_singleton` initializes it once
+/// and hands out a `&'static` reference, so estimation has no per-call setup.
+///
+/// Why cl100k: Anthropic does not publish Claude's tokenizer, and DevForge's
+/// agent loop targets Claude models. cl100k_base is the standard deterministic
+/// offline approximation — it runs materially denser than the old 4-chars-per-
+/// token stub on prose and sparser on code/JSON, which is the mis-sizing this
+/// replaces. It is a heuristic, not Claude's exact count.
+fn bpe() -> &'static CoreBPE {
+    tiktoken_rs::cl100k_base_singleton()
+}
+
+/// Real token count of a text blob under the shared encoder.
+fn count_tokens(text: &str) -> u64 {
+    bpe().encode_with_special_tokens(text).len() as u64
+}
 
 /// After trimming, skip forward past any leading `Role::Tool` messages so we
 /// never start the kept window with orphaned tool results (which would produce
@@ -37,59 +55,47 @@ fn kept_window_start(msgs: &[Message], start: usize) -> usize {
     }
 }
 
-/// Estimated cost of a single message under the stub heuristic (4 chars = 1
-/// token), covering `content`, tool-call arguments, and provider-native
-/// content blocks. `provider_content` must round-trip unchanged, so
-/// `enforce_token_budget` counts it but can only reclaim space from `content`;
-/// the `MIN_KEPT_CONTENT_BYTES` floor keeps that pressure from gutting short
-/// turns.
+/// Estimated cost of a single message in real BPE tokens, covering `content`,
+/// tool-call arguments, and provider-native content blocks. `provider_content`
+/// must round-trip unchanged, so `enforce_token_budget` counts it but can only
+/// reclaim space from `content`; the `MIN_KEPT_CONTENT_TOKENS` floor keeps that
+/// pressure from gutting short turns.
 fn message_tokens(message: &Message) -> u64 {
-    let mut bytes = message.content.len() as u64;
+    let mut tokens = count_tokens(&message.content);
     // Tool-call arguments and provider-native blocks (`thinking` etc.) are
     // sent to the provider too; leaving them uncounted is how an "in budget"
-    // window overshoots the real limit. They are estimated at the same 4:1
-    // ratio via their serialized size.
+    // window overshoots the real limit. Ids/names are short, but counted.
     for call in &message.tool_calls {
-        bytes += call.id.len() as u64;
-        bytes += call.name.len() as u64;
-        bytes += call.arguments.to_string().len() as u64;
+        tokens += count_tokens(&call.id);
+        tokens += count_tokens(&call.name);
+        tokens += count_tokens(&call.arguments.to_string());
     }
     if let Some(id) = &message.tool_call_id {
-        bytes += id.len() as u64;
+        tokens += count_tokens(id);
     }
     for block in &message.provider_content {
-        bytes += block.provider.len() as u64;
-        bytes += block.value.to_string().len() as u64;
+        tokens += count_tokens(&block.provider);
+        tokens += count_tokens(&block.value.to_string());
     }
-    bytes.div_ceil(4)
+    tokens
 }
 
 /// The share of a message's cost that compaction cannot reclaim: tool-call
 /// ids/names/arguments, `tool_call_id`, and provider-native blocks all must
 /// reach the provider verbatim. Only `content` is shrinkable.
 fn immutable_tokens(message: &Message) -> u64 {
-    message_tokens(message).saturating_sub((message.content.len() as u64).div_ceil(4))
+    message_tokens(message).saturating_sub(count_tokens(&message.content))
 }
 
 fn window_tokens(messages: &[Message]) -> u64 {
     messages.iter().map(message_tokens).sum()
 }
 
-/// Content at or below this size is left alone by the budget pass: shrinking it
-/// reclaims nothing and risks emitting an empty (provider-invalid) block.
-const MIN_KEPT_CONTENT_BYTES: usize = 256;
-
-/// Largest byte index `<= idx` that is a UTF-8 char boundary.
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
+/// Content at or below this token cost is left alone by the budget pass:
+/// shrinking it reclaims nothing and risks emitting an empty (provider-invalid)
+/// block. 64 tokens ≈ the old 256-byte floor under the stub estimator, so the
+/// "don't bother gutting short turns" threshold is unchanged in spirit.
+const MIN_KEPT_CONTENT_TOKENS: u64 = 64;
 
 /// Marker left in place of a tool result whose body was dropped. Mirrors
 /// `ObservationMaskingStrategy`'s wording so a transcript reads the same
@@ -98,25 +104,30 @@ fn elided_marker(original_len: usize) -> String {
     format!("[output elided — {original_len} chars]")
 }
 
-/// Shrink `content` to at most `target_tokens`, keeping a leading slice and
-/// recording how much was cut. Returns an empty string when not even the marker
-/// fits — the message itself still stays in the transcript, so provider
-/// validity is unaffected.
+/// Shrink `content` to at most `target_tokens`, keeping a leading run of whole
+/// tokens and recording how much was cut. Token-native: it encodes `content`,
+/// keeps the leading token ids that fit the budget (minus the marker's cost),
+/// and decodes them back to a `String` — so the result is never larger than
+/// `target_tokens` and always ends on a token boundary. Returns an empty string
+/// when not even the marker fits — the message itself still stays in the
+/// transcript, so provider validity is unaffected.
 fn truncate_to_tokens(content: &str, target_tokens: u64) -> String {
-    let budget_bytes = (target_tokens.saturating_mul(4)) as usize;
-    if content.len() <= budget_bytes {
+    let tokens = bpe().encode_with_special_tokens(content);
+    if tokens.len() as u64 <= target_tokens {
         return content.to_string();
     }
     let marker = format!("\n[…truncated — {} chars total]", content.len());
-    if marker.len() > budget_bytes {
+    let marker_tokens = bpe().encode_with_special_tokens(&marker).len() as u64;
+    if marker_tokens >= target_tokens {
         // The allowance cannot even hold the marker. Emit the marker alone: it
         // records what was dropped and keeps the block non-empty, which the
         // provider requires.
         return marker;
     }
-    let keep = floor_char_boundary(content, budget_bytes - marker.len());
-    let mut out = String::with_capacity(keep + marker.len());
-    out.push_str(&content[..keep]);
+    let keep = (target_tokens - marker_tokens) as usize;
+    // Decoding whole token ids yields valid UTF-8; on the (not expected)
+    // failure path, emit the marker alone rather than a partial invalid block.
+    let mut out = bpe().decode(&tokens[..keep]).unwrap_or_default();
     out.push_str(&marker);
     out
 }
@@ -174,7 +185,7 @@ fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64) {
         }
         if messages[i].role != Role::Tool
             || Some(i) == last_tool
-            || messages[i].content.len() <= MIN_KEPT_CONTENT_BYTES
+            || count_tokens(&messages[i].content) <= MIN_KEPT_CONTENT_TOKENS
         {
             continue;
         }
@@ -198,7 +209,7 @@ fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64) {
         // Below the floor there is nothing worth reclaiming, and cutting a
         // short turn to nothing would emit an empty content block — which the
         // provider rejects, trading one 400 for another.
-        if messages[i].content.len() <= MIN_KEPT_CONTENT_BYTES {
+        if count_tokens(&messages[i].content) <= MIN_KEPT_CONTENT_TOKENS {
             continue;
         }
         // Give this message whatever slack the rest of the window leaves for
@@ -290,7 +301,7 @@ fn normalize_leading(messages: &mut Vec<Message>) {
 ///
 /// Keeps the system message (first message if it has role System)
 /// plus as many recent messages as fit within the token limit.
-/// Uses a stub token counter: ~4 chars per token.
+/// Sizes the kept window with a real BPE token counter (cl100k_base).
 pub struct SlidingWindowStrategy;
 
 impl SlidingWindowStrategy {
@@ -298,7 +309,7 @@ impl SlidingWindowStrategy {
         Self
     }
 
-    /// Estimate tokens for a message using the stub heuristic (4 chars = 1 token).
+    /// Estimate tokens for a message with the shared BPE encoder.
     fn estimate_tokens(message: &Message) -> u64 {
         message_tokens(message)
     }
@@ -714,6 +725,10 @@ mod tests {
     /// computed net of the immutable share.
     #[test]
     fn truncation_allowance_accounts_for_immutable_tool_arguments() {
+        // cl100k: content "y"*4000 = 1000 tokens (shrinkable); the small
+        // tool-call argument + id + name = ~9 tokens (immutable). Budget 100
+        // forces content truncation; the allowance must be computed NET of the
+        // immutable share, or the result lands ~immutable over budget.
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![
             msg(Role::User, "go"),
@@ -723,13 +738,13 @@ mod tests {
                 tool_calls: vec![ToolCallMessage {
                     id: "call_1".into(),
                     name: "exec".into(),
-                    arguments: serde_json::json!({"cmd": "z".repeat(4_000)}),
+                    arguments: serde_json::json!({"cmd": "ls"}),
                 }],
                 tool_call_id: None,
                 provider_content: vec![],
             },
         ];
-        let limit = 1_500;
+        let limit = 100;
         let result = strategy.compact(&messages, limit);
         assert!(
             total_tokens(&result) <= limit,
@@ -742,9 +757,14 @@ mod tests {
         assert_eq!(
             assistant.tool_calls[0].arguments["cmd"]
                 .as_str()
-                .unwrap()
-                .len(),
-            4_000
+                .unwrap(),
+            "ls"
+        );
+        // And the content really was truncated (the whole point of the pass).
+        assert!(
+            assistant.content.len() < 4_000,
+            "over-budget content must be truncated, got {} bytes",
+            assistant.content.len()
         );
     }
 
@@ -825,63 +845,60 @@ mod tests {
         );
     }
 
-    // --- X6: Token boundary math (div_ceil(4)) at exact boundaries ---
+    // --- X6: Estimation math — the budget walk tracks real BPE token counts ---
+    //
+    // These pin the WINDOW SELECTION against cl100k_base counts, not a char
+    // ratio. cl100k: "hello world" = 2 tokens; the pangram below = 9.
 
     #[test]
-    fn estimate_tokens_exact_multiple_of_4() {
-        // 4 chars => div_ceil(4) = 1 token
+    fn estimator_counts_real_bpe_tokens() {
+        // Direct: a single message's cost is its cl100k token count, so it is
+        // kept when the budget reaches that count. "hello world" = 2 tokens.
         let strategy = SlidingWindowStrategy::new();
-        let messages = vec![msg(Role::User, "abcd")]; // exactly 4 chars = 1 token
-        let result = strategy.compact(&messages, 1);
-        assert_eq!(result.len(), 1);
+        let messages = vec![msg(Role::User, "hello world")];
+        let result = strategy.compact(&messages, 2);
+        assert_eq!(result.len(), 1, "a 2-token message fits a 2-token budget");
+        assert_eq!(result[0].content, "hello world");
+    }
 
-        // Budget 0 can't fit even 1 token, but we never drop below the most-recent message
-        let result = strategy.compact(&messages, 0);
+    #[test]
+    fn estimate_tokens_keeps_last_when_over_budget() {
+        // A message costing more than the budget is KEPT (never dropped below
+        // the most-recent message), so over-budget is kept, not emptied.
+        let strategy = SlidingWindowStrategy::new();
+        let messages = vec![msg(Role::User, "hello world")]; // 2 tokens
+        let result = strategy.compact(&messages, 1);         // budget 1 < 2
         assert_eq!(
             result.len(),
             1,
             "never strip below the most-recent message — over budget is kept, not dropped to empty"
         );
-    }
-
-    #[test]
-    fn estimate_tokens_one_over_boundary() {
-        // 5 chars => div_ceil(4) = 2 tokens
-        let strategy = SlidingWindowStrategy::new();
-        let messages = vec![msg(Role::User, "abcde")]; // 5 chars = 2 tokens
-        let result = strategy.compact(&messages, 1);
-        assert_eq!(
-            result.len(),
-            1,
-            "never strip below the most-recent message — over budget is kept, not dropped to empty"
-        ); // 2 tokens > 1 budget
-
-        let result = strategy.compact(&messages, 2);
+        let result = strategy.compact(&messages, 0);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
-    fn estimate_tokens_boundary_8_chars() {
-        // 8 chars => exactly 2 tokens
+    fn estimate_tokens_window_selects_by_token_cost() {
+        // cl100k: pangram = 9 tokens, "hello world" = 2 tokens. Budget 9 keeps
+        // the recent pangram and excludes the older "hello world" (9+2 > 9).
+        let pangram = "the quick brown fox jumps over the lazy dog";
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![
-            msg(Role::User, "abcdefgh"), // 8 chars = 2 tokens
-            msg(Role::User, "ijkl"),     // 4 chars = 1 token
+            msg(Role::User, "hello world"), // older, 2 tokens
+            msg(Role::User, pangram),       // recent, 9 tokens
         ];
-        // Budget = 2: only "ijkl" (1 token) fits, then we try "abcdefgh" (2 tokens)
-        // which doesn't fit in remaining 1 token
-        let result = strategy.compact(&messages, 2);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "ijkl");
+        let result = strategy.compact(&messages, 9);
+        assert_eq!(result.len(), 1, "only the 9-token message fits");
+        assert_eq!(result[0].content, pangram);
 
-        // Budget = 3: both fit (2 + 1 = 3)
-        let result = strategy.compact(&messages, 3);
+        // Budget 11: both fit (2 + 9 = 11).
+        let result = strategy.compact(&messages, 11);
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn estimate_tokens_single_char() {
-        // 1 char => div_ceil(4) = 1 token
+        // "x" is one cl100k token.
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![msg(Role::User, "x")];
         let result = strategy.compact(&messages, 1);
@@ -890,7 +907,7 @@ mod tests {
 
     #[test]
     fn estimate_tokens_empty_content() {
-        // 0 chars => div_ceil(4) = 0 tokens
+        // Empty content encodes to 0 tokens, so it fits a 0 budget.
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![msg(Role::User, "")];
         let result = strategy.compact(&messages, 0);
@@ -926,17 +943,18 @@ mod tests {
 
     #[test]
     fn sliding_window_exact_order_and_count() {
+        // cl100k costs: sys=1, msgN=2 each. Budget 7 keeps system + the three
+        // most recent (2+2+2=6) but not msg1 (6+2=8 > 7).
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![
             msg(Role::System, "sys"),     // 1 token
-            msg(Role::User, "msg1"),      // 1 token
-            msg(Role::Assistant, "msg2"), // 1 token
-            msg(Role::User, "msg3"),      // 1 token
-            msg(Role::Assistant, "msg4"), // 1 token
-            msg(Role::User, "msg5"),      // 1 token
+            msg(Role::User, "msg1"),      // 2 tokens
+            msg(Role::Assistant, "msg2"), // 2 tokens
+            msg(Role::User, "msg3"),      // 2 tokens
+            msg(Role::Assistant, "msg4"), // 2 tokens
+            msg(Role::User, "msg5"),      // 2 tokens
         ];
-        // Budget = 4 tokens: system(1) + 3 most recent
-        let result = strategy.compact(&messages, 4);
+        let result = strategy.compact(&messages, 7);
         assert_eq!(result.len(), 4, "expected system + 3 recent messages");
         assert_eq!(result[0].role, Role::System);
         assert_eq!(result[0].content, "sys");
@@ -947,14 +965,15 @@ mod tests {
 
     #[test]
     fn sliding_window_preserves_chronological_order() {
+        // cl100k: "first"/"second"/"third" are 1 token each. Budget 2 keeps
+        // "third"+"second" (1+1) and excludes "first".
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![
-            msg(Role::User, "first"),  // 2 tokens
-            msg(Role::User, "second"), // 2 tokens
-            msg(Role::User, "third"),  // 2 tokens
+            msg(Role::User, "first"),  // 1 token
+            msg(Role::User, "second"), // 1 token
+            msg(Role::User, "third"),  // 1 token
         ];
-        // Budget = 4: "third"(2) + "second"(2) = 4, "first" won't fit
-        let result = strategy.compact(&messages, 4);
+        let result = strategy.compact(&messages, 2);
         assert_eq!(result.len(), 2);
         // Must be in chronological order, not reversed
         assert_eq!(result[0].content, "second");
