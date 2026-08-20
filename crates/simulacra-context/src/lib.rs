@@ -852,19 +852,30 @@ mod tests {
 
     #[test]
     fn estimator_counts_real_bpe_tokens() {
-        // Direct: a single message's cost is its cl100k token count, so it is
-        // kept when the budget reaches that count. "hello world" = 2 tokens.
+        // Discriminating window: the recent message costs the SAME under both
+        // estimators ("ok go now" = 3 cl100k = 3 bytes/4), but the older one
+        // DIVERGES ("a b c d e" = 5 cl100k vs 3 bytes/4). Budget 6 keeps the
+        // older message under bytes/4 (3+3=6) but excludes it under cl100k
+        // (3+5=8 > 6). So len==1 passes ONLY with the real BPE estimator.
         let strategy = SlidingWindowStrategy::new();
-        let messages = vec![msg(Role::User, "hello world")];
-        let result = strategy.compact(&messages, 2);
-        assert_eq!(result.len(), 1, "a 2-token message fits a 2-token budget");
-        assert_eq!(result[0].content, "hello world");
+        let messages = vec![
+            msg(Role::User, "a b c d e"), // older: cl100k 5, bytes/4 3
+            msg(Role::User, "ok go now"), // recent: cl100k 3, bytes/4 3
+        ];
+        let result = strategy.compact(&messages, 6);
+        assert_eq!(
+            result.len(),
+            1,
+            "older message (5 real tokens) must be excluded at budget 6; bytes/4 (3) would wrongly keep it"
+        );
+        assert_eq!(result[0].content, "ok go now");
     }
 
     #[test]
     fn estimate_tokens_keeps_last_when_over_budget() {
         // A message costing more than the budget is KEPT (never dropped below
-        // the most-recent message), so over-budget is kept, not emptied.
+        // the most-recent message), so over-budget is kept, not emptied. Uses a
+        // real 2-token message against a 1-token budget.
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![msg(Role::User, "hello world")]; // 2 tokens
         let result = strategy.compact(&messages, 1);         // budget 1 < 2
@@ -912,6 +923,23 @@ mod tests {
         let messages = vec![msg(Role::User, "")];
         let result = strategy.compact(&messages, 0);
         assert_eq!(result.len(), 1); // 0 tokens fits in 0 budget
+    }
+
+    /// The regression-pinning test for the estimator swap: `message_tokens` must
+    /// return the real cl100k count, NOT the old bytes/4 stub. This 72-byte
+    /// sentence is 15 cl100k tokens but 18 under bytes/4, so asserting 15 fails
+    /// if the stub is restored.
+    #[test]
+    fn message_tokens_is_cl100k_not_bytes_over_four() {
+        let sentence =
+            "The quick brown fox jumps over the lazy dog and runs through the forest.";
+        assert_eq!(sentence.len(), 72, "test premise: byte length changed");
+        // bytes/4 would be 18; cl100k is 15. Pin the real tokenizer's count.
+        assert_eq!(
+            message_tokens(&msg(Role::User, sentence)),
+            15,
+            "message_tokens must be the cl100k count (15), not bytes/4 (18)"
+        );
     }
 
     // --- X7: ObservationMasking system-over-budget fallback ---
