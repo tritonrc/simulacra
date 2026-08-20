@@ -1,5 +1,10 @@
 //! HTTP server — axum routes, middleware, WebSocket and REST+SSE transports.
 
+// `Result<_, Response>` here returns the HTTP error response itself as the
+// `Err` — that is the intended axum pattern, not a large error payload to box.
+// clippy 1.98's `result_large_err` does not apply; allow it for this module.
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;

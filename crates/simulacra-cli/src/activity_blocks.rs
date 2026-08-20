@@ -239,7 +239,7 @@ impl ActivityBlockRenderer {
                     completion_summary: String::new(),
                 };
                 self.blocks.insert("thinking".into(), block);
-                vec![format!("+ Thinking...")]
+                vec!["+ Thinking...".to_string()]
             }
 
             // ThinkDelta content is not rendered to the terminal.
