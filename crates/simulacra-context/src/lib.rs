@@ -87,6 +87,10 @@ fn immutable_tokens(message: &Message) -> u64 {
     message_tokens(message).saturating_sub(count_tokens(&message.content))
 }
 
+/// Sum of [`message_tokens`] over a window. Only used by the test-module
+/// `total_tokens` helper, so it is compiled only under `cfg(test)` — otherwise
+/// `-D warnings` fails the plain build on dead code.
+#[cfg(test)]
 fn window_tokens(messages: &[Message]) -> u64 {
     messages.iter().map(message_tokens).sum()
 }
@@ -267,10 +271,10 @@ fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64) {
             if Some(start) == final_block_start {
                 break; // never drop the final block
             }
-            if let Some(u) = last_user {
-                if (start..end).contains(&u) {
-                    continue; // never drop the last user turn
-                }
+            if let Some(u) = last_user
+                && (start..end).contains(&u)
+            {
+                continue; // never drop the last user turn
             }
             for j in start..end {
                 dropped[j] = true;
@@ -757,9 +761,7 @@ mod tests {
         // The tool call itself must survive untouched.
         let assistant = result.iter().find(|m| !m.tool_calls.is_empty()).unwrap();
         assert_eq!(
-            assistant.tool_calls[0].arguments["cmd"]
-                .as_str()
-                .unwrap(),
+            assistant.tool_calls[0].arguments["cmd"].as_str().unwrap(),
             "ls"
         );
         // And the content really was truncated (the whole point of the pass).
@@ -880,7 +882,7 @@ mod tests {
         // real 2-token message against a 1-token budget.
         let strategy = SlidingWindowStrategy::new();
         let messages = vec![msg(Role::User, "hello world")]; // 2 tokens
-        let result = strategy.compact(&messages, 1);         // budget 1 < 2
+        let result = strategy.compact(&messages, 1); // budget 1 < 2
         assert_eq!(
             result.len(),
             1,
@@ -933,8 +935,7 @@ mod tests {
     /// if the stub is restored.
     #[test]
     fn message_tokens_is_cl100k_not_bytes_over_four() {
-        let sentence =
-            "The quick brown fox jumps over the lazy dog and runs through the forest.";
+        let sentence = "The quick brown fox jumps over the lazy dog and runs through the forest.";
         assert_eq!(sentence.len(), 72, "test premise: byte length changed");
         // bytes/4 would be 18; cl100k is 15. Pin the real tokenizer's count.
         assert_eq!(
