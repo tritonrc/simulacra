@@ -44,6 +44,19 @@ impl Provider for FakeProvider {
     }
 }
 
+/// Records the `token_limit` each `compact` call receives, so a test can
+/// assert the model-derived context limit actually reaches the strategy.
+struct LimitCapturingContext {
+    seen: Arc<Mutex<Vec<u64>>>,
+}
+
+impl ContextStrategy for LimitCapturingContext {
+    fn compact(&self, messages: &[Message], token_limit: u64) -> Vec<Message> {
+        self.seen.lock().unwrap().push(token_limit);
+        messages.to_vec()
+    }
+}
+
 struct PassthroughContext;
 
 impl ContextStrategy for PassthroughContext {

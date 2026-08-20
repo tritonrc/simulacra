@@ -24,18 +24,17 @@ fn adjust_tool_boundary(msgs: &[Message], start: usize) -> usize {
 /// the provider must receive at least one coherent message block.
 fn kept_window_start(msgs: &[Message], start: usize) -> usize {
     let adjusted = adjust_tool_boundary(msgs, start);
-    if adjusted < msgs.len() {
-        return adjusted;
-    }
-    // Nothing fit within budget (or only orphaned tool results remain). Anchor on
-    // the most recent user message so the kept window is non-empty AND begins
-    // with a user turn — providers require the first non-system message to be a
-    // user turn, so an assistant- or tool-first window is invalid. If there is no
+    // Providers require the first non-system message to be a user turn, so the
+    // window must always reach back to the most recent user message — whether
+    // the budget walk stopped after it (an assistant-/tool-first window) or
+    // found nothing at all. Size is NOT this function's concern: the window it
+    // returns is bounded afterwards by `enforce_token_budget`. If there is no
     // user message at all (a malformed transcript), fall back to `adjusted`
     // rather than starting the window on an orphaned tool result.
-    msgs.iter()
-        .rposition(|m| m.role == Role::User)
-        .unwrap_or(adjusted)
+    match msgs.iter().rposition(|m| m.role == Role::User) {
+        Some(last_user) => adjusted.min(last_user),
+        None => adjusted,
+    }
 }
 
 /// Estimated cost of a single message under the stub heuristic (4 chars = 1
@@ -51,13 +50,25 @@ fn message_tokens(message: &Message) -> u64 {
     // window overshoots the real limit. They are estimated at the same 4:1
     // ratio via their serialized size.
     for call in &message.tool_calls {
+        bytes += call.id.len() as u64;
         bytes += call.name.len() as u64;
         bytes += call.arguments.to_string().len() as u64;
     }
+    if let Some(id) = &message.tool_call_id {
+        bytes += id.len() as u64;
+    }
     for block in &message.provider_content {
+        bytes += block.provider.len() as u64;
         bytes += block.value.to_string().len() as u64;
     }
     bytes.div_ceil(4)
+}
+
+/// The share of a message's cost that compaction cannot reclaim: tool-call
+/// ids/names/arguments, `tool_call_id`, and provider-native blocks all must
+/// reach the provider verbatim. Only `content` is shrinkable.
+fn immutable_tokens(message: &Message) -> u64 {
+    message_tokens(message).saturating_sub((message.content.len() as u64).div_ceil(4))
 }
 
 fn window_tokens(messages: &[Message]) -> u64 {
@@ -112,79 +123,166 @@ fn truncate_to_tokens(content: &str, target_tokens: u64) -> String {
 
 /// Hard-bound an already-selected window so it cannot exceed `token_limit`.
 ///
-/// `kept_window_start` guarantees a provider-VALID transcript (never
-/// system-only, never leading with an orphaned tool result) but says nothing
-/// about SIZE: when the tail after the last user message is itself larger than
-/// the budget, it returns that tail whole. In production that produced a
-/// 2,870,192-token prompt against a 1,000,000 cap. The provider rejects that
-/// non-retryably, so every later turn rebuilt the same oversized prompt and the
-/// conversation wedged permanently.
+/// `kept_window_start` guarantees the window is never system-only and never
+/// LEADS with an orphaned tool result, but says nothing about SIZE: when the
+/// tail after the last user message is itself larger than the budget, it
+/// returns that tail whole. In production that produced a 2,870,192-token
+/// prompt against a 1,000,000 cap. The provider rejects that non-retryably, so
+/// every later turn rebuilt the same oversized prompt and the conversation
+/// wedged permanently.
 ///
-/// This pass closes the hole by shrinking CONTENT in place rather than choosing
-/// between "keep the message whole" and "drop it":
-///   1. tool results are elided oldest-first (they dominate context), then
-///   2. remaining non-system content is truncated oldest-first, so the most
-///      recent turns keep their detail longest.
+/// Four passes, cheapest reclamation first:
+///   0. leading normalization — drop non-User messages from the front (after
+///      system) until the window begins with a user turn, the shape providers
+///      require. Runs even when the window is within budget: the backward walk
+///      can select an assistant-first window on its own.
+///   1. tool results are elided oldest-first (they dominate context), sparing
+///      the most recent one — the model usually needs it verbatim to act;
+///   2. remaining oversized content is truncated oldest-first to a prefix plus
+///      a marker, so the newest turns keep their detail longest;
+///   3. if the window STILL exceeds the budget (many small messages, each
+///      under the floor; irreducible provider blocks), whole messages are
+///      dropped oldest-first, keeping the system message and at least the
+///      final message, then the front is re-normalized.
 ///
-/// No message is ever removed, so `tool_use`/`tool_result` pairing and
-/// `provider_content` round-tripping both survive untouched. The system message
-/// is kept whole, matching the existing escape hatch.
+/// `provider_content` is never rewritten, so thinking blocks round-trip
+/// unchanged. Passes 1–2 never remove a message; pass 3 removes whole
+/// messages only, so a `tool_use` and its `tool_result` are either both kept
+/// or the orphaned result is dropped by re-normalization — never a dangling
+/// half.
 ///
-/// Guarantee: the window is bounded by `token_limit` plus an irreducible
-/// residual of the system message and `MIN_KEPT_CONTENT_BYTES` per short turn.
-/// It is never bounded by tool-output volume, which is the term that actually
-/// runs away. Whenever the overflow comes from oversized content — every real
-/// case of this bug — the result lands inside `token_limit`.
-fn enforce_token_budget(messages: &mut [Message], token_limit: u64) {
-    if window_tokens(messages) <= token_limit {
+/// Guarantee: the result is bounded by `token_limit` plus an irreducible
+/// residual — the system message and the final message's floor/provider
+/// blocks. It is never proportional to transcript length or tool-output
+/// volume, the terms that actually run away.
+fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64) {
+    normalize_leading(messages);
+
+    let mut costs: Vec<u64> = messages.iter().map(message_tokens).collect();
+    let mut total: u64 = costs.iter().sum();
+    if total <= token_limit {
         return;
     }
 
-    // Elide tool results oldest-first, but never the most recent one: the
-    // model usually needs it verbatim to act (a spawn ack, a command result).
-    // If that last result is itself oversized, the truncation pass below still
-    // bounds it — truncation keeps a prefix instead of destroying the message.
+    // Pass 1: elide tool results oldest-first, but never the most recent one.
+    // If that last result is itself oversized, pass 2 still bounds it —
+    // truncation keeps a prefix instead of destroying the message.
     let last_tool = messages.iter().rposition(|m| m.role == Role::Tool);
     for i in 0..messages.len() {
-        if window_tokens(messages) <= token_limit {
+        if total <= token_limit {
             return;
         }
-        if messages[i].role != Role::Tool || Some(i) == last_tool {
-            continue;
-        }
-        if messages[i].content.len() <= MIN_KEPT_CONTENT_BYTES {
+        if messages[i].role != Role::Tool
+            || Some(i) == last_tool
+            || messages[i].content.len() <= MIN_KEPT_CONTENT_BYTES
+        {
             continue;
         }
         let marker = elided_marker(messages[i].content.len());
         if marker.len() < messages[i].content.len() {
             messages[i].content = marker;
+            let new_cost = message_tokens(&messages[i]);
+            total = total - costs[i] + new_cost;
+            costs[i] = new_cost;
         }
     }
 
+    // Pass 2: truncate oversized content oldest-first.
     for i in 0..messages.len() {
-        if window_tokens(messages) <= token_limit {
+        if total <= token_limit {
             return;
         }
         if messages[i].role == Role::System {
             continue;
         }
-        // Below the floor there is nothing worth reclaiming, and cutting a short
-        // turn to nothing would emit an empty content block — which Anthropic
-        // rejects, trading one 400 for another. Leave small turns whole.
+        // Below the floor there is nothing worth reclaiming, and cutting a
+        // short turn to nothing would emit an empty content block — which the
+        // provider rejects, trading one 400 for another.
         if messages[i].content.len() <= MIN_KEPT_CONTENT_BYTES {
             continue;
         }
-        // Everything before this point is already minimal, so hand this message
-        // whatever slack is left. Walking oldest-first means the newest turns
-        // are the last to be cut.
-        let others = window_tokens(messages).saturating_sub(message_tokens(&messages[i]));
-        let allowance = token_limit.saturating_sub(others);
+        // Give this message whatever slack the rest of the window leaves for
+        // its CONTENT specifically: its own immutable share (tool arguments,
+        // provider blocks) cannot be reclaimed and must be budgeted around,
+        // not granted to the content and then re-added on top.
+        let others = total.saturating_sub(costs[i]);
+        let allowance =
+            token_limit.saturating_sub(others.saturating_add(immutable_tokens(&messages[i])));
         let shrunk = truncate_to_tokens(&messages[i].content, allowance);
-        // Only take the rewrite if it actually reclaims bytes and leaves the
-        // message non-empty.
         if !shrunk.is_empty() && shrunk.len() < messages[i].content.len() {
             messages[i].content = shrunk;
+            let new_cost = message_tokens(&messages[i]);
+            total = total - costs[i] + new_cost;
+            costs[i] = new_cost;
         }
+    }
+
+    // Pass 3: content shrinking was not enough — the overflow is message
+    // COUNT (each under the floor) or irreducible provider blocks. Drop whole
+    // BLOCKS oldest-first. A block is one message, except an assistant carrying
+    // tool_calls, which takes its contiguous tool results with it — dropping
+    // half of that pair would leave a dangling tool_use or an orphaned
+    // tool_result, both provider-invalid. The system message, the block holding
+    // the last user turn (the transcript's anchor), and the final block are
+    // never dropped; if only those remain, the residual is accepted — after
+    // passes 1–2 it is a handful of floor-sized messages, not the
+    // transcript-proportional overflow this pass exists to stop.
+    if total > token_limit {
+        let offset = usize::from(messages[0].role == Role::System);
+        let last_user = messages.iter().rposition(|m| m.role == Role::User);
+
+        // Block start indices, oldest-first.
+        let mut blocks: Vec<(usize, usize)> = Vec::new(); // (start, end_exclusive)
+        let mut i = offset;
+        while i < messages.len() {
+            let mut end = i + 1;
+            if !messages[i].tool_calls.is_empty() {
+                while end < messages.len() && messages[end].role == Role::Tool {
+                    end += 1;
+                }
+            }
+            blocks.push((i, end));
+            i = end;
+        }
+
+        let mut dropped = vec![false; messages.len()];
+        let final_block_start = blocks.last().map(|b| b.0);
+        for &(start, end) in &blocks {
+            if total <= token_limit {
+                break;
+            }
+            if Some(start) == final_block_start {
+                break; // never drop the final block
+            }
+            if let Some(u) = last_user {
+                if (start..end).contains(&u) {
+                    continue; // never drop the last user turn
+                }
+            }
+            for j in start..end {
+                dropped[j] = true;
+                total -= costs[j];
+            }
+        }
+        if dropped.iter().any(|&d| d) {
+            let mut keep = dropped.iter().map(|&d| !d);
+            messages.retain(|_| keep.next().unwrap());
+            normalize_leading(messages);
+        }
+    }
+}
+
+/// Drop non-User messages from the front of the window (after any system
+/// message) until the first conversational message is a user turn — the shape
+/// providers require — as long as a later user turn exists to anchor on. A
+/// window with no user message at all is left as-is rather than emptied.
+fn normalize_leading(messages: &mut Vec<Message>) {
+    let offset = usize::from(!messages.is_empty() && messages[0].role == Role::System);
+    let Some(rel_user) = messages[offset..].iter().position(|m| m.role == Role::User) else {
+        return;
+    };
+    if rel_user > 0 {
+        messages.drain(offset..offset + rel_user);
     }
 }
 
@@ -576,11 +674,133 @@ mod tests {
             msg(Role::Assistant, "hi"), // 1 token
             msg(Role::User, "bye"),     // 1 token
         ];
-        // Budget = 2 tokens: only "bye" fits (1 token) then "hi" (1 token)
+        // Budget = 2 tokens: "bye" fits, then "hi" — but an assistant-first
+        // window is provider-invalid (the first conversational message must be
+        // a user turn), so normalization drops "hi" too. This test previously
+        // enshrined the assistant-first shape.
         let result = strategy.compact(&messages, 2);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].content, "hi");
-        assert_eq!(result[1].content, "bye");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "bye");
+        assert_eq!(result[0].role, Role::User);
+    }
+
+    /// Review finding: enough small messages — each under the truncation floor
+    /// — still overflowed the budget in proportion to transcript length,
+    /// recreating the permanent-wedge failure mode without any single
+    /// oversized message. The drop pass must bound this.
+    #[test]
+    fn budget_holds_against_many_small_messages() {
+        let strategy = SlidingWindowStrategy::new();
+        let mut messages = vec![msg(Role::System, "sys"), msg(Role::User, "go")];
+        for _ in 0..10_000 {
+            messages.push(msg(Role::Assistant, &"x".repeat(256)));
+        }
+        let limit = 1_000;
+        let result = strategy.compact(&messages, limit);
+        assert!(
+            total_tokens(&result) <= limit,
+            "count-proportional overflow must be bounded, got {} > {}",
+            total_tokens(&result),
+            limit
+        );
+        let non_system: Vec<&Message> = result.iter().filter(|m| m.role != Role::System).collect();
+        assert!(!non_system.is_empty());
+        assert_eq!(non_system[0].role, Role::User);
+    }
+
+    /// Review finding: the truncation allowance granted a message's whole
+    /// slack to its content and then re-added its immutable share (tool
+    /// arguments) on top, roughly doubling the budget. The allowance must be
+    /// computed net of the immutable share.
+    #[test]
+    fn truncation_allowance_accounts_for_immutable_tool_arguments() {
+        let strategy = SlidingWindowStrategy::new();
+        let messages = vec![
+            msg(Role::User, "go"),
+            Message {
+                role: Role::Assistant,
+                content: "y".repeat(4_000),
+                tool_calls: vec![ToolCallMessage {
+                    id: "call_1".into(),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({"cmd": "z".repeat(4_000)}),
+                }],
+                tool_call_id: None,
+                provider_content: vec![],
+            },
+        ];
+        let limit = 1_500;
+        let result = strategy.compact(&messages, limit);
+        assert!(
+            total_tokens(&result) <= limit,
+            "immutable tool arguments must be budgeted, not granted twice: {} > {}",
+            total_tokens(&result),
+            limit
+        );
+        // The tool call itself must survive untouched.
+        let assistant = result.iter().find(|m| !m.tool_calls.is_empty()).unwrap();
+        assert_eq!(
+            assistant.tool_calls[0].arguments["cmd"]
+                .as_str()
+                .unwrap()
+                .len(),
+            4_000
+        );
+    }
+
+    /// Review finding: dropping whole messages must not orphan a tool result
+    /// from its tool_use — the pair moves as one block.
+    #[test]
+    fn drop_pass_never_orphans_tool_results() {
+        let strategy = SlidingWindowStrategy::new();
+        let mut messages = vec![msg(Role::System, "sys"), msg(Role::User, "go")];
+        // Many small tool-use blocks, then a final block.
+        for k in 0..2_000 {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![ToolCallMessage {
+                    id: format!("call_{k}"),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({"n": k}),
+                }],
+                tool_call_id: None,
+                provider_content: vec![],
+            });
+            messages.push(Message {
+                role: Role::Tool,
+                content: "ok".repeat(64),
+                tool_calls: vec![],
+                tool_call_id: Some(format!("call_{k}")),
+                provider_content: vec![],
+            });
+        }
+        let limit = 2_000;
+        let result = strategy.compact(&messages, limit);
+        assert!(total_tokens(&result) <= limit);
+        // Every kept tool result must be preceded (somewhere) by the assistant
+        // message carrying its tool_use id.
+        for m in result.iter().filter(|m| m.role == Role::Tool) {
+            let id = m.tool_call_id.as_deref().unwrap();
+            assert!(
+                result
+                    .iter()
+                    .any(|a| a.tool_calls.iter().any(|c| c.id == id)),
+                "tool result {id} kept without its tool_use"
+            );
+        }
+        // And no dangling tool_use either: every kept tool_use has its result.
+        for a in result.iter().filter(|m| !m.tool_calls.is_empty()) {
+            for c in &a.tool_calls {
+                assert!(
+                    result
+                        .iter()
+                        .any(|t| t.tool_call_id.as_deref() == Some(c.id.as_str())),
+                    "tool_use {} kept without its result",
+                    c.id
+                );
+            }
+        }
     }
 
     // --- X5: System prompt exceeding budget is preserved ---
@@ -880,12 +1100,11 @@ mod tests {
         );
     }
 
-    /// Total estimated tokens of a compacted window, mirroring the strategies'
-    /// own accounting so a test can assert the budget was actually respected.
+    /// Total estimated tokens of a compacted window, using the SAME estimator
+    /// as production (`window_tokens`) so the assertion cannot pass while the
+    /// real accounting is over budget.
     fn total_tokens(msgs: &[Message]) -> u64 {
-        msgs.iter()
-            .map(|m| (m.content.len() as u64).div_ceil(4))
-            .sum()
+        window_tokens(msgs)
     }
 
     /// Production repro (the "prompt is too long" incident): a long agentic
