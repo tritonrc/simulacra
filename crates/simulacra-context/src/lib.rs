@@ -107,10 +107,12 @@ fn elided_marker(original_len: usize) -> String {
 /// Shrink `content` to at most `target_tokens`, keeping a leading run of whole
 /// tokens and recording how much was cut. Token-native: it encodes `content`,
 /// keeps the leading token ids that fit the budget (minus the marker's cost),
-/// and decodes them back to a `String` — so the result is never larger than
-/// `target_tokens` and always ends on a token boundary. Returns an empty string
-/// when not even the marker fits — the message itself still stays in the
-/// transcript, so provider validity is unaffected.
+/// and decodes them back to a `String`, so the result ends on a token boundary.
+/// On the normal path the result costs at most `target_tokens`. The one
+/// exception is deliberate: when the truncation marker alone would cost more
+/// than `target_tokens`, the marker is emitted whole (bounded, ~a dozen tokens)
+/// rather than an empty string, because a content block must stay non-empty for
+/// provider validity. That bounded overage is absorbed by the context headroom.
 fn truncate_to_tokens(content: &str, target_tokens: u64) -> String {
     let tokens = bpe().encode_with_special_tokens(content);
     if tokens.len() as u64 <= target_tokens {
