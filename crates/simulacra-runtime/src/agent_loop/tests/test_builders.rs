@@ -55,6 +55,7 @@ fn default_config() -> AgentLoopConfig {
         model: "test-model".into(),
         max_turns: 10,
         capability: CapabilityToken::default(),
+        context_token_limit: None,
     }
 }
 

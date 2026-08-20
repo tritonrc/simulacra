@@ -589,6 +589,7 @@ fn make_agent_loop(provider: FakeProvider) -> AgentLoop {
         model: "claude-sonnet-4-20250514".to_string(),
         max_turns: 10,
         capability: CapabilityToken::default(),
+        context_token_limit: None,
     };
     AgentLoop::new(
         config,

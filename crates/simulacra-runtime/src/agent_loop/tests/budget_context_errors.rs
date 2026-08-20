@@ -61,13 +61,33 @@ async fn context_strategy_compacts_messages() {
 
 #[test]
 fn compaction_window_is_bounded_by_context_not_just_budget() {
-    let capped = compaction_token_limit(10_000_000, 0);
+    let capped = compaction_token_limit(10_000_000, 0, CONTEXT_TOKEN_LIMIT);
     assert_eq!(capped, CONTEXT_TOKEN_LIMIT);
 
-    assert_eq!(compaction_token_limit(64_000, 59_000), 5_000);
+    assert_eq!(compaction_token_limit(64_000, 59_000, CONTEXT_TOKEN_LIMIT), 5_000);
 
-    let unlimited = compaction_token_limit(0, 0);
+    let unlimited = compaction_token_limit(0, 0, CONTEXT_TOKEN_LIMIT);
     assert_eq!(unlimited, CONTEXT_TOKEN_LIMIT);
+}
+
+#[test]
+fn context_limit_derives_from_the_model_with_headroom() {
+    // Known 1M-window models compact to 800k (20% headroom for the response
+    // and within-turn growth).
+    assert_eq!(default_context_limit("claude-sonnet-5"), 800_000);
+    assert_eq!(default_context_limit("claude-opus-5[1m]"), 800_000);
+    // Other Claude families default to the 200k window.
+    assert_eq!(default_context_limit("claude-haiku-4-5-20251001"), 160_000);
+    assert_eq!(default_context_limit("claude-fable-5"), 160_000);
+    // Unknown models keep the conservative historical ceiling.
+    assert_eq!(default_context_limit("gpt-x"), CONTEXT_TOKEN_LIMIT);
+
+    // An explicit config override wins over model derivation.
+    fn resolve(explicit: Option<u64>, model: &str) -> u64 {
+        explicit.unwrap_or_else(|| default_context_limit(model))
+    }
+    assert_eq!(resolve(Some(42_000), "claude-sonnet-5"), 42_000);
+    assert_eq!(resolve(None, "claude-sonnet-5"), 800_000);
 }
 
 #[tokio::test]

@@ -675,6 +675,7 @@ async fn s060_a42_live_run_exports_native_and_acp_telemetry_without_secret_label
             model: "parent-model".into(),
             max_turns: 8,
             capability: capability.clone(),
+            context_token_limit: None,
         },
         Box::new(provider),
         tools,
