@@ -61,13 +61,71 @@ async fn context_strategy_compacts_messages() {
 
 #[test]
 fn compaction_window_is_bounded_by_context_not_just_budget() {
-    let capped = compaction_token_limit(10_000_000, 0);
+    let capped = compaction_token_limit(10_000_000, 0, CONTEXT_TOKEN_LIMIT);
     assert_eq!(capped, CONTEXT_TOKEN_LIMIT);
 
-    assert_eq!(compaction_token_limit(64_000, 59_000), 5_000);
+    assert_eq!(compaction_token_limit(64_000, 59_000, CONTEXT_TOKEN_LIMIT), 5_000);
 
-    let unlimited = compaction_token_limit(0, 0);
+    let unlimited = compaction_token_limit(0, 0, CONTEXT_TOKEN_LIMIT);
     assert_eq!(unlimited, CONTEXT_TOKEN_LIMIT);
+}
+
+/// End-to-end wiring: the limit handed to `ContextStrategy::compact` must be
+/// the model-derived target (or the explicit override), not the hardcoded
+/// fallback — this is the path the local `default_context_limit` unit
+/// assertions cannot cover.
+#[tokio::test]
+async fn compact_receives_the_model_derived_context_limit() {
+    for (config_override, model, expected) in [
+        (None, "claude-sonnet-5", 800_000u64),
+        (None, "unknown-model", CONTEXT_TOKEN_LIMIT),
+        (Some(42_000u64), "claude-sonnet-5", 42_000u64),
+    ] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = FakeProvider::new(vec![text_response("done")]);
+        let mut config = default_config();
+        config.model = model.into();
+        config.context_token_limit = config_override;
+        let mut agent = AgentLoop::new(
+            config,
+            Box::new(provider),
+            ToolRegistry::new(),
+            Box::new(LimitCapturingContext { seen: seen.clone() }),
+            Arc::new(InMemoryJournalStorage::new()),
+            // max_tokens = 0: unlimited cost budget, so the context ceiling is
+            // the binding term.
+            ResourceBudget::new(0, 10, Decimal::new(100, 0), 5),
+            None,
+            None,
+        );
+        agent.run("go").await.expect("run should succeed");
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().all(|&l| l == expected),
+            "model {model} override {config_override:?}: expected limit {expected}, saw {seen:?}"
+        );
+        assert!(!seen.is_empty(), "compact was never called for {model}");
+    }
+}
+
+#[test]
+fn context_limit_derives_from_the_model_with_headroom() {
+    // Known 1M-window models compact to 800k (20% headroom for the response
+    // and within-turn growth).
+    assert_eq!(default_context_limit("claude-sonnet-5"), 800_000);
+    assert_eq!(default_context_limit("claude-opus-5[1m]"), 800_000);
+    // Other Claude families default to the 200k window.
+    assert_eq!(default_context_limit("claude-haiku-4-5-20251001"), 160_000);
+    assert_eq!(default_context_limit("claude-fable-5"), 160_000);
+    // Unknown models keep the conservative historical ceiling.
+    assert_eq!(default_context_limit("gpt-x"), CONTEXT_TOKEN_LIMIT);
+
+    // An explicit config override wins over model derivation.
+    fn resolve(explicit: Option<u64>, model: &str) -> u64 {
+        explicit.unwrap_or_else(|| default_context_limit(model))
+    }
+    assert_eq!(resolve(Some(42_000), "claude-sonnet-5"), 42_000);
+    assert_eq!(resolve(None, "claude-sonnet-5"), 800_000);
 }
 
 #[tokio::test]

@@ -55,6 +55,7 @@ async fn queued_child_input_is_appended_before_next_provider_call_in_fifo_order(
             model: "model".into(),
             max_turns: 3,
             capability: CapabilityToken::default(),
+            context_token_limit: None,
         },
         Box::new(provider),
         registry,

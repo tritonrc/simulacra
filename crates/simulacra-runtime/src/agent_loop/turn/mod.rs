@@ -71,8 +71,15 @@ impl AgentLoop {
         self.journal_entry(JournalEntryKind::TurnStart)?;
         self.consume_replay_entry(&JournalEntryKind::TurnStart)?;
 
-        let remaining_tokens =
-            compaction_token_limit(self.budget.max_tokens, self.budget.used_tokens);
+        let context_limit = self
+            .config
+            .context_token_limit
+            .unwrap_or_else(|| default_context_limit(&self.config.model));
+        let remaining_tokens = compaction_token_limit(
+            self.budget.max_tokens,
+            self.budget.used_tokens,
+            context_limit,
+        );
         let compacted = self.context_strategy.compact(messages, remaining_tokens);
         let step = StepContext::new(compacted, tool_defs);
         let budget_before_operation = self.budget.clone();

@@ -1488,6 +1488,7 @@ fn s060_parent_loop_with_provider(
             model: "parent-model".into(),
             max_turns: 4,
             capability: s060_capability(&["workspace"]),
+            context_token_limit: None,
         },
         provider,
         tools,

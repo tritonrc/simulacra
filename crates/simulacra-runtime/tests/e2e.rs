@@ -37,6 +37,7 @@ fn e2e_config() -> AgentLoopConfig {
         model: MODEL.into(),
         max_turns: 5,
         capability: CapabilityToken::default(),
+        context_token_limit: None,
     }
 }
 

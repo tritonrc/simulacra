@@ -56,19 +56,54 @@ use replay_helpers::{
 use tool_execution::execute_tool_live;
 use tool_runtime::{ToolCallRuntime, ToolExecutionResult};
 
-/// The model context window the compactor targets, independent of the
-/// cumulative cost budget (`ResourceBudget`).
+/// Fallback compaction target when the model's context window is unknown.
+/// Deliberately conservative: an unknown model gets the historical 128k
+/// ceiling rather than a guess that might exceed its real window.
 const CONTEXT_TOKEN_LIMIT: u64 = 128_000;
+
+/// Best-known context window for a model id, by family. Returns `None` for
+/// models this table does not recognize (the caller falls back to
+/// [`CONTEXT_TOKEN_LIMIT`]). `[1m]`-suffixed ids get the 1M window regardless
+/// of family.
+fn model_context_window(model: &str) -> Option<u64> {
+    if model.ends_with("[1m]") {
+        return Some(1_000_000);
+    }
+    // claude-sonnet-5 serves a 1M window (observed: the API rejects its
+    // prompts at "> 1000000 maximum"). Other Claude families default to 200k.
+    if model.starts_with("claude-sonnet-5") {
+        return Some(1_000_000);
+    }
+    if model.starts_with("claude-") {
+        return Some(200_000);
+    }
+    None
+}
+
+/// The compaction target for a model: its context window with 20% headroom.
+///
+/// The headroom is not decoration — it is the budget for everything that rides
+/// on top of the compacted message window: tool definitions and their JSON
+/// schemas (attached after compaction, uncounted by the strategy), the
+/// response's max_tokens, and within-turn growth (several tool results can
+/// land between compaction and the next request). A deployment whose tool
+/// schemas approach that reserve should set an explicit, lower
+/// `context_token_limit`.
+fn default_context_limit(model: &str) -> u64 {
+    model_context_window(model)
+        .map(|window| window / 5 * 4)
+        .unwrap_or(CONTEXT_TOKEN_LIMIT)
+}
 
 /// Size the compaction window: the lesser of the remaining cost budget and the
 /// model context ceiling. `max_tokens == 0` means an unlimited cost budget.
-fn compaction_token_limit(max_tokens: u64, used_tokens: u64) -> u64 {
+fn compaction_token_limit(max_tokens: u64, used_tokens: u64, context_limit: u64) -> u64 {
     let remaining = if max_tokens == 0 {
         u64::MAX
     } else {
         max_tokens.saturating_sub(used_tokens)
     };
-    remaining.min(CONTEXT_TOKEN_LIMIT)
+    remaining.min(context_limit)
 }
 
 /// The core ReAct agent loop.

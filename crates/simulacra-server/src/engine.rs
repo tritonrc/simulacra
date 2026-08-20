@@ -1917,6 +1917,7 @@ impl SimulacraEngine {
                     model: model_clone.clone(),
                     max_turns,
                     capability: capability_token,
+                    context_token_limit: None,
                 };
                 let strategy = Box::new(ObservationMaskingStrategy::new(3))
                     as Box<dyn simulacra_types::ContextStrategy>;

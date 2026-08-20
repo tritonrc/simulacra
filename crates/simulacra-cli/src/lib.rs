@@ -1678,6 +1678,7 @@ fn run_booted(
         model: boot.model.clone(),
         max_turns,
         capability: boot.capability_token.clone(),
+        context_token_limit: None,
     };
 
     let mut supervisor_parts = boot.spawn_rx.take().map(|spawn_rx| SupervisorActorParts {
@@ -2619,6 +2620,7 @@ task = "bootstrap"
                     model: boot.model.clone(),
                     max_turns: boot.resource_budget.max_turns,
                     capability: boot.capability_token.clone(),
+                    context_token_limit: None,
                 },
                 Box::new(provider),
                 boot.tool_registry,
@@ -2856,6 +2858,7 @@ task = "bootstrap"
                     model: boot.model.clone(),
                     max_turns: boot.resource_budget.max_turns,
                     capability: boot.capability_token.clone(),
+                    context_token_limit: None,
                 },
                 Box::new(provider),
                 boot.tool_registry,

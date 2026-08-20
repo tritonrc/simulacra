@@ -8,6 +8,10 @@ pub struct AgentLoopConfig {
     pub model: String,
     pub max_turns: u32,
     pub capability: CapabilityToken,
+    /// Compaction target in tokens. `None` derives it from `model` (the
+    /// model's context window with headroom reserved); set it explicitly to
+    /// override — e.g. when a proxy or beta header changes the real window.
+    pub context_token_limit: Option<u64>,
 }
 
 /// Output from the agent loop.

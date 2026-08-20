@@ -250,6 +250,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                 model,
                 max_turns: spawn_config.budget.max_turns,
                 capability: effective_capability,
+                context_token_limit: None,
             };
             let provider = build_child_provider(
                 child_provider_factory.as_ref(),
