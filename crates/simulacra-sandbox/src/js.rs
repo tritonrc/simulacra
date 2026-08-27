@@ -65,10 +65,6 @@ impl AgentCell {
         output
     }
 
-    /// Async entry point for JavaScript execution.
-    ///
-    /// This awaits script-executor backpressure once at the `AgentCell` boundary,
-    /// then executes through the same mediated JS runtime wrapper.
     /// Execute `code` holding an OWNED permit the caller acquired from the
     /// cell's script executor.
     ///
@@ -112,6 +108,13 @@ impl AgentCell {
         .await
     }
 
+    /// Async entry point for JavaScript execution.
+    ///
+    /// Awaits script-executor backpressure once at the `AgentCell` boundary,
+    /// then runs the evaluation on the blocking pool with the owned permit
+    /// moved into the worker — so the caller's future stays preemptible and a
+    /// cancelled/timed-out await does not free the slot while the engine
+    /// thread is still running.
     pub async fn execute_js_async(&self, code: &str) -> Result<JsOutput, SandboxError> {
         tracing::callsite::rebuild_interest_cache();
         async move {
@@ -124,9 +127,16 @@ impl AgentCell {
             )?;
             reserve_turn(&self.budget, &self.journal, &self.agent_id)?;
 
-            let _script_permit =
+            // The owned permit is moved INTO the spawned worker
+            // (`eval_async_spawned_with_guard`), so it is held until the
+            // evaluation genuinely finishes. A borrowed permit held by THIS
+            // future would be released the moment the caller's await is
+            // cancelled or times out, while the detached engine thread keeps
+            // running — freeing a slot that is still occupied. The owned move
+            // keeps the executor's concurrency bound honest under cancellation.
+            let owned_permit =
                 match self.script_executor.as_ref() {
-                    Some(executor) => Some(executor.acquire_permit().await.map_err(|e| {
+                    Some(executor) => Some(executor.acquire_owned_permit().await.map_err(|e| {
                         SandboxError::Internal(format!("script executor error: {e}"))
                     })?),
                     None => None,
@@ -141,7 +151,7 @@ impl AgentCell {
                     // outer timeout around THIS future stays preemptible
                     // while a program is mid-execution. The worker thread is
                     // still bounded by the engine's own interrupt.
-                    rt.eval_async_spawned(code)
+                    rt.eval_async_spawned_with_guard(code, owned_permit)
                         .await
                         .map_err(|e| self.map_js_execution_error(e))
                 }

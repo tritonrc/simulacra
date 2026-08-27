@@ -109,29 +109,30 @@ impl JsRuntime {
         .await;
 
         let is_module = code.contains("import ") || code.contains("export ");
-        let outcome = ctx.async_with(async |ctx| {
-            let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
-            if self.host_api == JsHostApiProfile::workflow() {
-                install_workflow_api_restrictions(&ctx)
-                    .map_err(|e| JsError::Runtime(e.to_string()))?;
-            }
-            if self.host_api.simulacra_modules {
-                Self::register_native_modules_async(&ctx).await?;
-            }
-            if is_module {
-                self.eval_as_module_async(&ctx, code, &stdout_buf, &exit_code_cell)
-                    .await
-            } else {
-                self.eval_as_script_async(&ctx, code, &stdout_buf, &exit_code_cell)
-                    .await
-            }
-        })
-        .await;
+        let outcome = ctx
+            .async_with(async |ctx| {
+                let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
+                if self.host_api == JsHostApiProfile::workflow() {
+                    install_workflow_api_restrictions(&ctx)
+                        .map_err(|e| JsError::Runtime(e.to_string()))?;
+                }
+                if self.host_api.simulacra_modules {
+                    Self::register_native_modules_async(&ctx).await?;
+                }
+                if is_module {
+                    self.eval_as_module_async(&ctx, code, &stdout_buf, &exit_code_cell)
+                        .await
+                } else {
+                    self.eval_as_script_async(&ctx, code, &stdout_buf, &exit_code_cell)
+                        .await
+                }
+            })
+            .await;
 
         // Re-type the interrupt as the deadline variant — keyed on the flag,
         // not the message.
         match outcome {
-            Err(JsError::Execution(msg)) if *interrupt_fired.borrow() => Err(JsError::Timeout),
+            Err(JsError::Execution(_)) if *interrupt_fired.borrow() => Err(JsError::Timeout),
             other => other,
         }
     }

@@ -368,11 +368,11 @@ impl Tool for JsExecTool {
                         .with_log_preview("[js evaluation output — content is model-facing]")
                         .to_value())
                 }
-                Err(SandboxError::Js(js_err)) => Ok(
-                    ToolOutput::error(format!("js error: {js_err}"))
+                Err(SandboxError::Js(js_err)) => {
+                    Ok(ToolOutput::error(format!("js error: {js_err}"))
                         .with_log_preview("[js evaluation failed — error text is model-facing]")
-                        .to_value(),
-                ),
+                        .to_value())
+                }
                 Err(err) => Err(map_sandbox_error(err)),
             }
         })

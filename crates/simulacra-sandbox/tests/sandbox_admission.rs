@@ -437,7 +437,10 @@ async fn execute_js_async_with_permit_holds_the_slot_until_the_worker_finishes()
         .expect("the single permit is acquirable");
     let slow = tokio::spawn({
         let cell = Arc::clone(&cell);
-        async move { cell.execute_js_async_with_permit("while (true) {}", permit).await }
+        async move {
+            cell.execute_js_async_with_permit("while (true) {}", permit)
+                .await
+        }
     });
     // Let the slow evaluation actually start and hold the worker.
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -460,5 +463,48 @@ async fn execute_js_async_with_permit_holds_the_slot_until_the_worker_finishes()
     assert!(
         executor.try_acquire_permit().is_ok(),
         "once the worker's interrupt fires, the slot must be released"
+    );
+}
+
+/// The plain async entry point is the production path the upstream js_exec
+/// tool uses for native children — it must be cancellation-safe too: the
+/// owned permit rides into the worker, so an aborted caller does not free the
+/// slot while the detached engine thread runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execute_js_async_holds_the_permit_until_the_worker_finishes_under_cancellation() {
+    let executor = ScriptExecutor::new(1);
+    let vfs: Arc<dyn VirtualFs> = Arc::new(simulacra_vfs::MemoryFs::new());
+    let journal: Arc<dyn JournalStorage> = Arc::new(FakeJournalStorage::default());
+    let http_client: Arc<dyn simulacra_http::HttpClient> =
+        Arc::new(simulacra_http::UreqHttpClient::default());
+    let mut cell = AgentCell::new(
+        vfs,
+        capability(&[], &[], false, true),
+        unlimited_budget(),
+        journal,
+        http_client,
+    );
+    cell.set_script_executor(executor.clone());
+    let cell = Arc::new(cell);
+
+    let slow = tokio::spawn({
+        let cell = Arc::clone(&cell);
+        async move { cell.execute_js_async("while (true) {}").await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Cancel the caller mid-evaluation.
+    slow.abort();
+
+    let immediate = executor.try_acquire_permit();
+    assert!(
+        immediate.is_err(),
+        "the plain async path must not release the slot on caller cancellation"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(5600)).await;
+    assert!(
+        executor.try_acquire_permit().is_ok(),
+        "the slot frees once the worker's interrupt fires"
     );
 }
