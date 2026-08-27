@@ -69,6 +69,47 @@ impl AgentCell {
     ///
     /// This awaits script-executor backpressure once at the `AgentCell` boundary,
     /// then executes through the same mediated JS runtime wrapper.
+    /// Execute `code` holding a permit the CALLER already acquired from the
+    /// cell's script executor.
+    ///
+    /// Use this when the caller needs the queue wait and the evaluation to be
+    /// one contiguous hold (e.g. measuring true queue wait, or running the
+    /// evaluation under a caller-side deadline that must stay preemptible).
+    /// It does NOT acquire a second permit, so the caller's held permit is
+    /// the evaluation's only one. The evaluation itself runs on the blocking
+    /// pool (`eval_async_spawned`), keeping this future preemptible.
+    ///
+    /// # Panics
+    /// Panics in debug builds if the cell has no script executor configured.
+    pub async fn execute_js_async_with_permit<'a>(
+        &self,
+        code: &str,
+        permit: crate::executor::ScriptPermit<'a>,
+    ) -> Result<JsOutput, SandboxError> {
+        // The permit is held for the whole evaluation; it is dropped (and
+        // the semaphore slot released) when this future completes.
+        let _permit = permit;
+        check_and_journal_capability(
+            || self.capability.check_javascript(),
+            "execute_js",
+            "javascript",
+            &self.journal,
+            &self.agent_id,
+        )?;
+        reserve_turn(&self.budget, &self.journal, &self.agent_id)?;
+
+        let js_start = std::time::Instant::now();
+        let output = match self.prepare_js_runtime() {
+            Ok(rt) => rt
+                .eval_async_spawned(code)
+                .await
+                .map_err(|e| self.map_js_execution_error(e)),
+            Err(e) => Err(e),
+        };
+        self.finish_js_execution(js_start);
+        output
+    }
+
     pub async fn execute_js_async(&self, code: &str) -> Result<JsOutput, SandboxError> {
         tracing::callsite::rebuild_interest_cache();
         async move {
@@ -91,8 +132,19 @@ impl AgentCell {
 
             let js_start = std::time::Instant::now();
             let runtime = self.prepare_js_runtime();
-            let output =
-                runtime.and_then(|rt| rt.eval(code).map_err(|e| self.map_js_execution_error(e)));
+            let output = match runtime {
+                Ok(rt) => {
+                    // The spawned-eval path (not the inline `eval_async`): it
+                    // runs the evaluation on the blocking pool, so a caller's
+                    // outer timeout around THIS future stays preemptible
+                    // while a program is mid-execution. The worker thread is
+                    // still bounded by the engine's own interrupt.
+                    rt.eval_async_spawned(code)
+                        .await
+                        .map_err(|e| self.map_js_execution_error(e))
+                }
+                Err(e) => Err(e),
+            };
             self.finish_js_execution(js_start);
             output
         }
@@ -182,6 +234,15 @@ impl AgentCell {
     }
 
     fn map_js_execution_error(&self, error: simulacra_quickjs::JsError) -> SandboxError {
+        // A deadline (the wall-clock timeout wrapped around the engine, or
+        // the interrupt handler inside it) is re-typed to a stable marker
+        // the caller can match on without sniffing user-controlled error
+        // text: the JS error string for an ordinary exception stays
+        // model-facing, but a timeout is a transport condition, so the text
+        // is replaced with the marker.
+        if matches!(error, simulacra_quickjs::JsError::Timeout) {
+            return SandboxError::Js("deadline_exceeded".to_owned());
+        }
         // If execution failed due to budget exhaustion (e.g. a module fetch hit
         // the turns limit), surface it as BudgetExhausted so callers get a
         // structured error instead of a generic JS error string.

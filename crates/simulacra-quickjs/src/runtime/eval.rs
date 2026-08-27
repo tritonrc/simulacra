@@ -29,10 +29,30 @@ impl JsRuntime {
         async move {
             tokio::time::timeout(self.timeout, self.eval_async_inner(&code))
                 .await
-                .map_err(|_| JsError::Execution("JavaScript evaluation timed out".into()))?
+                .map_err(|_| JsError::Timeout)?
         }
         .instrument(span)
         .await
+    }
+
+    /// Like [`Self::eval_async`], but the evaluation runs on the blocking
+    /// thread pool via `tokio::task::spawn_blocking` instead of the caller's
+    /// worker.
+    ///
+    /// The plain async path evaluates inline: between yields it executes JS
+    /// synchronously inside the current task's poll, so a caller-side
+    /// `tokio::time::timeout` around `eval_async` cannot preempt a running
+    /// program — the worker is busy, not suspended. Awaited here, the
+    /// caller's future stays preemptible (an outer timeout fires even while
+    /// the program is mid-execution); the worker thread itself is still
+    /// bounded by the engine's own interrupt handler, so a detached
+    /// evaluation cannot run past the deadline.
+    pub async fn eval_async_spawned(&self, code: &str) -> Result<JsOutput, JsError> {
+        let runtime = self.clone();
+        let code = code.to_string();
+        tokio::task::spawn_blocking(move || runtime.eval(&code))
+            .await
+            .map_err(|e| JsError::Runtime(format!("JS eval task failed to join: {e}")))?
     }
 
     async fn eval_async_inner(&self, code: &str) -> Result<JsOutput, JsError> {
@@ -121,7 +141,7 @@ impl JsRuntime {
             .await
         })
         .await
-        .map_err(|_| JsError::Execution("JavaScript evaluation timed out".into()))?
+        .map_err(|_| JsError::Timeout)?
     }
 
     async fn eval_as_script_async(
@@ -234,7 +254,46 @@ impl JsRuntime {
 
         let msg = format!("{caught}");
         let msg = extract_module_loading_error(&msg).unwrap_or(msg);
-        tracing::error!(exception.message = %msg, "uncaught JS exception");
+        // The interrupt handler surfaces as a plain JS exception whose only
+        // signal is its text — detect it here and re-type as `Timeout` so
+        // callers classify a deadline without pattern-matching error text
+        // (and an ordinary user `throw` containing the same words is not
+        // misclassified).
+        if is_interrupt_message(&msg) {
+            return Err(JsError::Timeout);
+        }
+        // The exception text is model-authored content: it rides the
+        // returned `JsError::Execution` to the caller (which decides where
+        // it may surface), but it is deliberately logged here only at DEBUG
+        // without the message — an embedder with a telemetry-privacy
+        // boundary must not have arbitrary script text written into its
+        // INFO-and-above log stream.
+        tracing::debug!("uncaught JS exception (message withheld)");
         Err(JsError::Execution(msg))
     }
+}
+
+/// Whether a caught-exception message is the engine's own deadline
+/// interrupt rather than a user-thrown error. QuickJS surfaces the
+/// interrupt as an exception whose formatted text is exactly an error name
+/// followed by "interrupted" (observed as `Error: interrupted`); match that
+/// precise shape so user text like `throw new Error("request timed out")`
+/// or `throw new Error("interrupted my flow")` does not false-positive.
+fn is_interrupt_message(msg: &str) -> bool {
+    // The caught error renders as `"<name>: interrupted"` possibly followed
+    // by a stack trace — accept the interrupt wording only as the whole
+    // message line, not as a substring of a longer user message.
+    msg.lines()
+        .next()
+        .map(|first| {
+            let lower = first.trim().to_lowercase();
+            lower
+                .strip_prefix("error: ")
+                .is_some_and(|rest| rest == "interrupted")
+                || lower
+                    .strip_prefix("internalerror: ")
+                    .is_some_and(|rest| rest == "interrupted")
+                || lower == "interrupted"
+        })
+        .unwrap_or(false)
 }

@@ -107,9 +107,13 @@ async fn eval_async_times_out_unresolved_promises() {
     )
     .await
     .expect("eval_async should return instead of leaving the Rust future pending");
-    let message = execution_message(result.expect_err("unresolved promise should time out"));
-
-    assert_timeout_message(&message);
+    assert!(
+        matches!(
+            result.expect_err("unresolved promise should time out"),
+            JsError::Timeout
+        ),
+        "a wall-clock timeout must surface as the typed Timeout variant, not a string"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -135,9 +139,13 @@ async fn eval_async_timeout_bounds_synchronous_remote_module_prefetch() {
     )
     .await
     .expect("eval_async should return before the outer test timeout");
-    let message = execution_message(result.expect_err("slow prefetch should time out"));
-
-    assert_timeout_message(&message);
+    assert!(
+        matches!(
+            result.expect_err("slow prefetch should time out"),
+            JsError::Timeout
+        ),
+        "a prefetch that overruns the budget must surface as the typed Timeout variant"
+    );
 }
 
 #[test]
@@ -153,18 +161,19 @@ fn eval_sync_timeout_bounds_synchronous_remote_module_prefetch() {
     .expect("runtime should be created");
 
     let started = Instant::now();
-    let message = execution_message(
-        runtime
-            .eval(
-                r#"
-                import value from "https://modules.invalid/slow-sync.js";
-                value;
-                "#,
-            )
-            .expect_err("slow prefetch should time out"),
-    );
+    let error = runtime
+        .eval(
+            r#"
+            import value from "https://modules.invalid/slow-sync.js";
+            value;
+            "#,
+        )
+        .expect_err("slow prefetch should time out");
 
-    assert_timeout_message(&message);
+    assert!(
+        matches!(error, JsError::Timeout),
+        "sync prefetch overrun must surface as the typed Timeout variant: {error:?}"
+    );
     assert!(
         started.elapsed() < Duration::from_millis(500),
         "sync eval should not wait for the slow blocking prefetch task to finish"
@@ -191,7 +200,10 @@ fn timed_out_prefetch_does_not_populate_remote_source_cache_later() {
     let first = runtime
         .eval(code)
         .expect_err("first slow prefetch should time out");
-    assert_timeout_message(&execution_message(first));
+    assert!(
+        matches!(first, JsError::Timeout),
+        "the first prefetch overrun must be the typed Timeout variant: {first:?}"
+    );
     std::thread::sleep(Duration::from_millis(250));
 
     let second = runtime
@@ -211,15 +223,68 @@ fn runtime_timeout_interrupts_cpu_bound_loops() {
     let runtime = runtime(Duration::from_millis(50));
     let started = Instant::now();
 
-    let message = execution_message(
-        runtime
-            .eval("while (true) {}")
-            .expect_err("CPU-bound loop should be interrupted by the runtime timeout"),
-    );
+    let error = runtime
+        .eval("while (true) {}")
+        .expect_err("CPU-bound loop should be interrupted by the runtime timeout");
 
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "timeout should interrupt promptly"
     );
-    assert_timeout_message(&message);
+    assert!(
+        matches!(error, JsError::Timeout),
+        "the interrupt handler's exception must be re-typed as Timeout: {error:?}"
+    );
+}
+
+#[test]
+fn user_thrown_errors_containing_timeout_words_are_not_retyped() {
+    let runtime = runtime(Duration::from_secs(5));
+
+    // An ordinary user throw whose message merely CONTAINS the words the
+    // interrupt handler uses must stay a plain Execution error — re-typing
+    // on substring alone would misclassify it as a deadline.
+    let error = runtime
+        .eval(r#"throw new Error("request timed out")"#)
+        .expect_err("a user throw must surface as an execution error");
+
+    match error {
+        JsError::Execution(message) => {
+            assert!(
+                message.contains("request timed out"),
+                "the user's message must reach the caller intact: {message:?}"
+            );
+        }
+        other => panic!("a user throw must never be re-typed as Timeout: {other:?}"),
+    }
+}
+
+#[test]
+fn eval_async_spawned_runs_off_the_calling_task() {
+    let runtime = runtime(Duration::from_secs(5));
+
+    // The spawned path must keep the CALLER's future preemptible: an outer
+    // timeout wrapping it fires even while a CPU-bound program is
+    // mid-execution (the inline async path cannot, because the poll is busy
+    // running JS). The spawned worker itself is still bounded by the
+    // engine's own interrupt, so the detached evaluation cannot run away.
+    let handle = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            let evaluation = tokio::spawn({
+                let runtime = runtime.clone();
+                async move { runtime.eval_async_spawned("while (true) {}").await }
+            });
+            // Cancel the awaiting task almost immediately; the evaluation
+            // future must be cancellable (preemptible) rather than pinned to
+            // the blocked evaluation.
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            evaluation.abort();
+            evaluation.await
+        });
+
+    assert!(
+        handle.is_err(),
+        "the awaiting task must be cancellable while the JS is running: {handle:?}"
+    );
 }

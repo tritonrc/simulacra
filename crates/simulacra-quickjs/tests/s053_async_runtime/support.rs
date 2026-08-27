@@ -202,6 +202,7 @@ pub(super) fn execution_message(error: JsError) -> String {
     }
 }
 
+#[allow(dead_code)] // timeout assertions now use the typed `JsError::Timeout`; kept for callers that still need the string shape
 pub(super) fn assert_timeout_message(message: &str) {
     let lower = message.to_lowercase();
     assert!(

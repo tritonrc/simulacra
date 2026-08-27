@@ -135,6 +135,18 @@ impl ToolOutput {
         self
     }
 
+    /// Override the telemetry-facing preview independently of `content`.
+    ///
+    /// `content` is the model-visible text; `log_preview` is what the
+    /// dispatch layer writes into logs. A tool whose content carries
+    /// material that must never reach telemetry (untrusted fetches, script
+    /// output) uses this to keep the log line to a bounded, content-free
+    /// placeholder while the model still receives the full content.
+    pub fn with_log_preview(mut self, log_preview: impl Into<String>) -> Self {
+        self.log_preview = log_preview.into();
+        self
+    }
+
     /// Convert legacy/raw tool values into the typed contract.
     ///
     /// Objects with both `content` and `is_error` are treated as explicit typed
