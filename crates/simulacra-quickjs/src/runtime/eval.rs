@@ -48,11 +48,33 @@ impl JsRuntime {
     /// bounded by the engine's own interrupt handler, so a detached
     /// evaluation cannot run past the deadline.
     pub async fn eval_async_spawned(&self, code: &str) -> Result<JsOutput, JsError> {
+        self.eval_async_spawned_with_guard::<()>(code, None).await
+    }
+
+    /// [`Self::eval_async_spawned`] with a guard (e.g. a semaphore permit)
+    /// moved INTO the blocking task. The guard is held by the worker for the
+    /// full evaluation and released only when the worker actually finishes —
+    /// so if the caller's await is cancelled or times out, the resource the
+    /// guard protects is not freed early while the detached worker is still
+    /// running.
+    pub async fn eval_async_spawned_with_guard<G>(
+        &self,
+        code: &str,
+        guard: Option<G>,
+    ) -> Result<JsOutput, JsError>
+    where
+        G: Send + 'static,
+    {
         let runtime = self.clone();
         let code = code.to_string();
-        tokio::task::spawn_blocking(move || runtime.eval(&code))
-            .await
-            .map_err(|e| JsError::Runtime(format!("JS eval task failed to join: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            // The guard is bound to the worker's lifetime: dropped here, when
+            // the evaluation is genuinely done, not when the caller's await ends.
+            let _guard = guard;
+            runtime.eval(&code)
+        })
+        .await
+        .map_err(|e| JsError::Runtime(format!("JS eval task failed to join: {e}")))?
     }
 
     async fn eval_async_inner(&self, code: &str) -> Result<JsOutput, JsError> {
@@ -67,11 +89,27 @@ impl JsRuntime {
         let (rt, ctx) = self
             .fresh_async_engine(allowed_remote_urls, fetched_remote_urls)
             .await?;
-        rt.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)))
-            .await;
+        // The interrupt fires INSIDE the engine as an opaque exception whose
+        // text is indistinguishable from a user `throw new Error("interrupted")`.
+        // So the deadline signal is NOT read from the message: the handler sets
+        // this flag as it trips, and a caught exception is a deadline only when
+        // the flag is set. User text is never the classifier.
+        let interrupt_fired = Rc::new(RefCell::new(false));
+        rt.set_interrupt_handler({
+            let interrupt_fired = Rc::clone(&interrupt_fired);
+            Some(Box::new(move || {
+                if Instant::now() >= deadline {
+                    *interrupt_fired.borrow_mut() = true;
+                    true
+                } else {
+                    false
+                }
+            }))
+        })
+        .await;
 
         let is_module = code.contains("import ") || code.contains("export ");
-        ctx.async_with(async |ctx| {
+        let outcome = ctx.async_with(async |ctx| {
             let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
             if self.host_api == JsHostApiProfile::workflow() {
                 install_workflow_api_restrictions(&ctx)
@@ -88,7 +126,14 @@ impl JsRuntime {
                     .await
             }
         })
-        .await
+        .await;
+
+        // Re-type the interrupt as the deadline variant — keyed on the flag,
+        // not the message.
+        match outcome {
+            Err(JsError::Execution(msg)) if *interrupt_fired.borrow() => Err(JsError::Timeout),
+            other => other,
+        }
     }
 
     pub(super) async fn eval_workflow_module_inner<F>(
@@ -254,14 +299,6 @@ impl JsRuntime {
 
         let msg = format!("{caught}");
         let msg = extract_module_loading_error(&msg).unwrap_or(msg);
-        // The interrupt handler surfaces as a plain JS exception whose only
-        // signal is its text — detect it here and re-type as `Timeout` so
-        // callers classify a deadline without pattern-matching error text
-        // (and an ordinary user `throw` containing the same words is not
-        // misclassified).
-        if is_interrupt_message(&msg) {
-            return Err(JsError::Timeout);
-        }
         // The exception text is model-authored content: it rides the
         // returned `JsError::Execution` to the caller (which decides where
         // it may surface), but it is deliberately logged here only at DEBUG
@@ -271,29 +308,4 @@ impl JsRuntime {
         tracing::debug!("uncaught JS exception (message withheld)");
         Err(JsError::Execution(msg))
     }
-}
-
-/// Whether a caught-exception message is the engine's own deadline
-/// interrupt rather than a user-thrown error. QuickJS surfaces the
-/// interrupt as an exception whose formatted text is exactly an error name
-/// followed by "interrupted" (observed as `Error: interrupted`); match that
-/// precise shape so user text like `throw new Error("request timed out")`
-/// or `throw new Error("interrupted my flow")` does not false-positive.
-fn is_interrupt_message(msg: &str) -> bool {
-    // The caught error renders as `"<name>: interrupted"` possibly followed
-    // by a stack trace — accept the interrupt wording only as the whole
-    // message line, not as a substring of a longer user message.
-    msg.lines()
-        .next()
-        .map(|first| {
-            let lower = first.trim().to_lowercase();
-            lower
-                .strip_prefix("error: ")
-                .is_some_and(|rest| rest == "interrupted")
-                || lower
-                    .strip_prefix("internalerror: ")
-                    .is_some_and(|rest| rest == "interrupted")
-                || lower == "interrupted"
-        })
-        .unwrap_or(false)
 }

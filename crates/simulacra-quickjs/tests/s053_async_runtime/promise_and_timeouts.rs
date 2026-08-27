@@ -288,3 +288,45 @@ fn eval_async_spawned_runs_off_the_calling_task() {
         "the awaiting task must be cancellable while the JS is running: {handle:?}"
     );
 }
+
+#[test]
+fn user_thrown_error_named_exactly_interrupted_is_not_retyped() {
+    let runtime = runtime(Duration::from_secs(5));
+
+    // The adversarial shape: a user error whose rendered text is byte-identical
+    // to what the engine's interrupt handler produces ("Error: interrupted").
+    // Classification must key on the interrupt FLAG the handler sets, never on
+    // the message — so this stays a plain Execution error.
+    let error = runtime
+        .eval(r#"throw new Error("interrupted")"#)
+        .expect_err("a user throw must surface as an execution error");
+
+    match error {
+        JsError::Execution(message) => {
+            assert!(
+                message.contains("interrupted"),
+                "the user's message must reach the caller intact: {message:?}"
+            );
+        }
+        other => panic!(
+            "a user throw named exactly 'interrupted' must never be re-typed as Timeout: {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn the_interrupt_itself_is_still_retyped_as_timeout_via_the_flag() {
+    // Control for the flag-based classifier: the genuine engine interrupt (a
+    // CPU-bound loop past the budget) must STILL become Timeout — the flag,
+    // not the message text, is what re-types it.
+    let runtime = runtime(Duration::from_millis(50));
+
+    let error = runtime
+        .eval("while (true) {}")
+        .expect_err("a CPU-bound loop past the budget must be interrupted");
+
+    assert!(
+        matches!(error, JsError::Timeout),
+        "the engine interrupt must surface as Timeout (flag-keyed): {error:?}"
+    );
+}
