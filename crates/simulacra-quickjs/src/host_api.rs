@@ -101,4 +101,10 @@ pub enum JsError {
     /// An uncaught JS exception.
     #[error("execution error: {0}")]
     Execution(String),
+    /// The evaluation exceeded its time budget — either the wall-clock
+    /// deadline wrapped around the engine or the interrupt handler fired
+    /// inside it. Carried as its own variant (not a string) so callers can
+    /// classify a hung program without pattern-matching error text.
+    #[error("JavaScript evaluation timed out")]
+    Timeout,
 }

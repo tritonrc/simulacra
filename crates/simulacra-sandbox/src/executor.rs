@@ -134,6 +134,35 @@ impl ScriptExecutor {
         Ok(ScriptPermit { _permit: permit })
     }
 
+    /// Acquire an OWNED concurrency permit (not borrowed from `self`).
+    ///
+    /// The owned form is what a caller moves into a spawned worker: the permit
+    /// is released when the worker finishes, not when an awaiting future is
+    /// dropped — so a cancelled or timed-out caller cannot free the slot while
+    /// the evaluation is still running.
+    pub async fn acquire_owned_permit(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ScriptExecutorError> {
+        let start = std::time::Instant::now();
+        let permit = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| ScriptExecutorError::SemaphoreClosed)?;
+
+        let wait_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let meters = ExecutorMeters::get();
+        meters.queue_wait.record(wait_ms, &[]);
+
+        if wait_ms > 1.0 {
+            tracing::info!(
+                simulacra.script.queue_wait_ms = wait_ms,
+                "script waited for executor permit"
+            );
+        }
+
+        Ok(permit)
+    }
+
     /// Return the number of available permits.
     #[cfg(test)]
     pub fn available_permits(&self) -> usize {

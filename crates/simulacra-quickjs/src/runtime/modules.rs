@@ -31,7 +31,7 @@ impl JsRuntime {
         });
         let prefetched = tokio::time::timeout(self.timeout, handle)
             .await
-            .map_err(|_| JsError::Execution("JavaScript evaluation timed out".into()))?
+            .map_err(|_| JsError::Timeout)?
             .map_err(|error| JsError::Runtime(format!("module prefetch task failed: {error}")))??;
 
         if !prefetched.sources.is_empty() {

@@ -119,20 +119,18 @@ fn remote_module_code_uses_the_same_execution_timeout_as_inline_code() {
     )
     .expect("failed to create runtime");
 
-    let error = execution_message(
-        runtime
-            .eval(
-                r#"
-                import spin from "https://esm.sh/spin-forever";
-                spin();
-                "#,
-            )
-            .expect_err("remote module infinite loop should time out"),
-    );
+    let error = runtime
+        .eval(
+            r#"
+            import spin from "https://esm.sh/spin-forever";
+            spin();
+            "#,
+        )
+        .expect_err("remote module infinite loop should time out");
 
     assert!(
-        error.to_lowercase().contains("interrupt"),
-        "expected timeout/interrupt error, got: {error}"
+        matches!(error, JsError::Timeout),
+        "a remote module's infinite loop must be interrupted as the typed Timeout variant, got: {error:?}"
     );
 }
 

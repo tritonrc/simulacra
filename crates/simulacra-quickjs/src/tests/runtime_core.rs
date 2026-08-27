@@ -150,30 +150,33 @@ fn host_function_calls_produce_child_spans_under_js_execution() {
 fn uncaught_exceptions_are_logged_at_error_level_with_message_and_stack_trace() {
     let (runtime, _) = make_runtime();
 
-    let (_, _, events) = capture_trace(|| {
-        let _ = runtime.eval(
+    // The exception text is model-authored content: it reaches the CALLER
+    // via the returned JsError, but the runtime must NOT write it into the
+    // log stream — an embedder with a telemetry-privacy boundary cannot have
+    // arbitrary script text in its logs.
+    let (result, _, events) = capture_trace(|| {
+        runtime.eval(
             r#"
             function explode() {
                 throw new Error("boom");
             }
             explode();
             "#,
-        );
+        )
     });
 
-    let error_event = events
-        .iter()
-        .find(|event| event.level == "ERROR")
-        .unwrap_or_else(|| panic!("expected ERROR event for uncaught exception, got {events:#?}"));
-    let text = event_text(error_event);
-
+    let message = execution_message(result.expect_err("an uncaught throw is an execution error"));
     assert!(
-        text.contains("boom"),
-        "expected error log to include exception message, got {error_event:#?}"
+        message.contains("boom"),
+        "the exception message still reaches the caller via the returned error: {message:?}"
     );
+
+    let leaked = events
+        .iter()
+        .any(|event| event_text(event).contains("boom"));
     assert!(
-        text.contains("explode"),
-        "expected error log to include stack trace, got {error_event:#?}"
+        !leaked,
+        "no log event may carry the exception text: {events:#?}"
     );
 }
 
@@ -217,15 +220,10 @@ fn infinite_loop_is_interrupted_by_timeout() {
         .eval("while (true) {}")
         .expect_err("infinite loop should be interrupted by timeout");
 
-    match err {
-        JsError::Execution(msg) => {
-            assert!(
-                msg.contains("interrupted") || msg.contains("Interrupted"),
-                "expected interrupt error, got: {msg}"
-            );
-        }
-        other => panic!("expected execution error from timeout, got {other:?}"),
-    }
+    assert!(
+        matches!(err, JsError::Timeout),
+        "the interrupt handler's exception must be re-typed as Timeout, got: {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

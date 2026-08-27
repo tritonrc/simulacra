@@ -362,10 +362,16 @@ impl Tool for JsExecTool {
             match self.cell.execute_js_async(&code).await {
                 Ok(output) => {
                     let value_str = output.result.unwrap_or_else(|| output.stdout.clone());
-                    Ok(ToolOutput::success(value_str).to_value())
+                    // Script output is model-facing content; keep it out of the
+                    // dispatch layer's result log with a bounded placeholder.
+                    Ok(ToolOutput::success(value_str)
+                        .with_log_preview("[js evaluation output — content is model-facing]")
+                        .to_value())
                 }
                 Err(SandboxError::Js(js_err)) => {
-                    Ok(ToolOutput::error(format!("js error: {js_err}")).to_value())
+                    Ok(ToolOutput::error(format!("js error: {js_err}"))
+                        .with_log_preview("[js evaluation failed — error text is model-facing]")
+                        .to_value())
                 }
                 Err(err) => Err(map_sandbox_error(err)),
             }
