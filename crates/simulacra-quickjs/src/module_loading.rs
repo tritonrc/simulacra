@@ -49,11 +49,10 @@ impl rquickjs::loader::Resolver for SimulacraResolver {
         }
 
         resolve_module_specifier(base, name).map_err(|message| {
-            tracing::error!(
-                specifier = %name,
-                reason = %message,
-                "module resolution failed"
-            );
+            // The specifier is a script-chosen string; only the failure is
+            // logged, never the specifier or the path/URL-bearing reason. The
+            // full reason still rides the returned error to the caller.
+            tracing::error!("module resolution failed");
             rquickjs::Error::new_resolving_message(base, name, message)
         })
     }

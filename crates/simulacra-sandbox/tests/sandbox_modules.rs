@@ -180,11 +180,19 @@ fn fetch_http_produces_a_sandbox_http_fetch_span_with_url_method_and_status() {
     assert!(
         spans.iter().any(|span| {
             span.fields.get("simulacra.operation.name") == Some(&"sandbox_http_fetch".to_string())
-                && span.fields.get("simulacra.http.url") == Some(&url)
                 && span.fields.get("simulacra.http.method") == Some(&"POST".to_string())
                 && span.fields.get("simulacra.http.status") == Some(&"202".to_string())
         }),
-        "expected sandbox_http_fetch span with simulacra.http.url, simulacra.http.method, and simulacra.http.status"
+        "expected sandbox_http_fetch span with simulacra.http.method and simulacra.http.status"
+    );
+    // The URL is script-chosen, so it is withheld from the span — method and
+    // status are the bounded labels. Pin the absence so the privacy boundary
+    // can't silently regress.
+    assert!(
+        spans
+            .iter()
+            .all(|span| !span.fields.contains_key("simulacra.http.url")),
+        "the sandbox_http_fetch span must not carry the script-selected URL: {spans:#?}"
     );
 }
 

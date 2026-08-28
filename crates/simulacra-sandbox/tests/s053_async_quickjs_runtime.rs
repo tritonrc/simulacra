@@ -300,15 +300,25 @@ fn static_remote_module_prefetch_uses_agent_cell_module_fetcher_for_transitive_i
         has_http_request(&entries, leaf_url),
         "transitive remote module should produce an HttpRequest journal entry through AgentCellModuleFetcher"
     );
-    for url in [entry_url, leaf_url] {
-        assert!(
-            spans.iter().any(|span| {
-                span.fields.get("simulacra.operation.name") == Some(&"module_fetch".to_string())
-                    && span.fields.get("simulacra.module.url") == Some(&url.to_string())
-            }),
-            "expected module_fetch span for {url}, got {spans:#?}"
-        );
-    }
+    // The fetch spans exist (one per remote module) but the URL is script-chosen
+    // and withheld from the span — the count and the journal entries are the
+    // discriminant, not a per-URL attribute.
+    let fetch_span_count = spans
+        .iter()
+        .filter(|span| {
+            span.fields.get("simulacra.operation.name") == Some(&"module_fetch".to_string())
+        })
+        .count();
+    assert!(
+        fetch_span_count >= 2,
+        "expected a module_fetch span per remote module (entry + transitive); got {fetch_span_count}"
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|span| !span.fields.contains_key("simulacra.module.url")),
+        "module_fetch spans must not carry the script-selected URL: {spans:#?}"
+    );
 }
 
 #[test]

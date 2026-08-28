@@ -274,9 +274,16 @@ fn remote_module_fetch_uses_agent_cell_proxy_for_budget_journal_and_span_emissio
     assert!(
         spans.iter().any(|span| {
             span.fields.get("simulacra.operation.name") == Some(&"module_fetch".to_string())
-                && span.fields.get("simulacra.module.url") == Some(&url.to_string())
         }),
-        "expected remote module fetches to emit a module_fetch span with the requested URL"
+        "expected remote module fetches to emit a module_fetch span"
+    );
+    // The URL is script-chosen, so it rides the journal entry (model-facing)
+    // but NOT the span — pin the span's privacy boundary.
+    assert!(
+        spans
+            .iter()
+            .all(|span| !span.fields.contains_key("simulacra.module.url")),
+        "the module_fetch span must not carry the script-selected URL: {spans:#?}"
     );
 }
 

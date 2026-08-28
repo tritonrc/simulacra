@@ -140,6 +140,28 @@ impl AgentCell {
         self.script_executor.as_ref()
     }
 
+    /// Replace the cell's virtual filesystem (e.g. to give a child a fresh,
+    /// isolated scratchpad instead of an inherited one).
+    ///
+    /// The lazily-built JS runtime caches an FS proxy bound to the OLD vfs, so
+    /// replacing the filesystem also drops the cached runtime — the next
+    /// evaluation rebuilds it against the new vfs. Without that invalidation a
+    /// swap would silently leave the engine reading the old filesystem.
+    pub fn set_vfs(&mut self, vfs: Arc<dyn VirtualFs>) {
+        self.vfs = vfs;
+        self.js_runtime = SendableJsRuntime::new();
+    }
+
+    /// Bound the cell's VFS write budget (bytes), replacing whatever the
+    /// budget currently allows. Use this to cap how much a cell can stage on
+    /// its filesystem when the shared budget is otherwise unbounded.
+    pub fn set_vfs_byte_budget(&self, max_vfs_bytes: u64) {
+        self.budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_vfs_bytes = max_vfs_bytes;
+    }
+
     /// Register a module source stub for a given URL.
     ///
     /// When `execute_js` encounters an `import` from this URL, the stub source

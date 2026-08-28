@@ -61,11 +61,9 @@ impl JsRuntime {
                     continue;
                 }
                 let resolved = resolve_module_specifier(&base, &specifier).map_err(|message| {
-                    tracing::error!(
-                        specifier = %specifier,
-                        reason = %message,
-                        "module resolution failed"
-                    );
+                    // The specifier is a script-chosen string; only the failure
+                    // is logged, never the specifier or path/URL-bearing reason.
+                    tracing::error!("module resolution failed");
                     JsError::Execution(message)
                 })?;
                 if !is_remote_module_url(&resolved) {
@@ -117,7 +115,6 @@ impl JsRuntime {
                     let _span = tracing::info_span!(
                         "module_fetch",
                         simulacra.operation.name = "module_fetch",
-                        simulacra.module.url = %resolved,
                     )
                     .entered();
 

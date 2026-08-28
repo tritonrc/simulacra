@@ -33,16 +33,13 @@ fn separate_runtimes_do_not_share_the_remote_module_cache() {
             .expect("second runtime import should also succeed");
     });
 
+    // Count module_fetch spans by operation name alone — the URL is no longer
+    // a span attribute (it is script-chosen and withheld from telemetry), so
+    // the count is the discriminant: two runtimes must each fetch (no shared
+    // cache), which is exactly two module_fetch spans.
     let fetch_count = spans
         .iter()
-        .filter(|span| {
-            field_matches(&span.fields, "simulacra.operation.name", "module_fetch")
-                && field_matches(
-                    &span.fields,
-                    "simulacra.module.url",
-                    "https://esm.sh/lodash",
-                )
-        })
+        .filter(|span| field_matches(&span.fields, "simulacra.operation.name", "module_fetch"))
         .count();
 
     assert_eq!(
@@ -259,12 +256,12 @@ fn remote_module_fetch_creates_a_child_span_with_module_url() {
     let fetch_span = find_span(&spans, "module_fetch");
 
     assert_eq!(fetch_span.parent.as_deref(), Some(js_span.name.as_str()));
-    assert_eq!(
-        fetch_span
-            .fields
-            .get("simulacra.module.url")
-            .map(String::as_str),
-        Some("https://esm.sh/lodash")
+    // The URL is script-chosen, so it must NOT be a span attribute — the span
+    // carries only the bounded operation name. Pin the absence so the privacy
+    // boundary can't silently regress.
+    assert!(
+        !fetch_span.fields.contains_key("simulacra.module.url"),
+        "the module_fetch span must not carry the script-selected URL: {fetch_span:#?}"
     );
 }
 
@@ -321,14 +318,23 @@ fn module_resolution_failures_are_logged_at_error_with_specifier_and_reason() {
         );
     });
 
+    // The failure is logged at ERROR, but the specifier and the path/URL-bearing
+    // reason are script-chosen and withheld from telemetry — only the bounded
+    // failure message rides the event. (The full reason still reaches the caller
+    // as the returned error.)
     assert!(
         events.iter().any(|event| {
             event.name.contains("event")
                 && event.level == "ERROR"
-                && event_text(event).contains("bare-specifier")
-                && event_text(event).contains("not allowed")
+                && event_text(event).contains("module resolution failed")
         }),
-        "expected ERROR event for module resolution failure, got {events:#?}"
+        "expected an ERROR event for the module resolution failure, got {events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| !event_text(event).contains("bare-specifier")),
+        "the specifier must not reach the telemetry surface: {events:#?}"
     );
 }
 

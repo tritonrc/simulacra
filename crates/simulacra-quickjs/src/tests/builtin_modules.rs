@@ -450,16 +450,12 @@ fn importing_the_same_remote_url_twice_uses_the_runtime_cache() {
             .expect("second import (cache hit) should succeed");
     });
 
+    // Count module_fetch spans by operation name alone — the URL is no longer
+    // a span attribute (script-chosen, withheld from telemetry). One fetch span
+    // proves the second import hit the cache instead of re-fetching.
     let fetch_count = spans
         .iter()
-        .filter(|span| {
-            field_matches(&span.fields, "simulacra.operation.name", "module_fetch")
-                && field_matches(
-                    &span.fields,
-                    "simulacra.module.url",
-                    "https://esm.sh/lodash",
-                )
-        })
+        .filter(|span| field_matches(&span.fields, "simulacra.operation.name", "module_fetch"))
         .count();
 
     assert_eq!(

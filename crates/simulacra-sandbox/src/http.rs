@@ -48,11 +48,13 @@ pub(crate) fn fetch_http_inner(
     http_client: &dyn HttpClient,
     timeout_ms: Option<u64>,
 ) -> Result<HttpResponse, SandboxError> {
-    // Span first — all subsequent events (denials, budget, journal) nest under it
+    // Span first — all subsequent events (denials, budget, journal) nest under it.
+    // The URL is script-chosen, so it is NOT a span attribute: only the bounded
+    // operation name and method ride the span; the host is checked below and the
+    // full URL stays in the caller-facing error, not in telemetry.
     let span = tracing::info_span!(
         "sandbox_http_fetch",
         simulacra.operation.name = "sandbox_http_fetch",
-        simulacra.http.url = %url,
         simulacra.http.method = %method,
         simulacra.http.status = tracing::field::Empty,
     );

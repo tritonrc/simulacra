@@ -29,11 +29,12 @@ pub(crate) struct AgentCellModuleFetcher {
 impl ModuleFetcher for AgentCellModuleFetcher {
     fn fetch(&self, url: &str) -> Result<String, String> {
         // Module fetch follows its own Golden Rule chain with operation name "module_fetch"
-        // so that OTel events carry the correct operation context.
+        // so that OTel events carry the correct operation context. The URL is
+        // script-chosen, so it is NOT a span attribute — only the bounded
+        // operation name rides the span.
         let _span = tracing::info_span!(
             "module_fetch",
             simulacra.operation.name = "module_fetch",
-            simulacra.module.url = %url,
         )
         .entered();
 
