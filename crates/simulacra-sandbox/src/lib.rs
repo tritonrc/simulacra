@@ -162,6 +162,16 @@ impl AgentCell {
             .max_vfs_bytes = max_vfs_bytes;
     }
 
+    /// The cell's current VFS write budget in bytes (`0` = unlimited).
+    /// Read-only: observability for tests and for callers verifying a
+    /// configured bound.
+    pub fn vfs_byte_budget(&self) -> u64 {
+        self.budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_vfs_bytes
+    }
+
     /// Register a module source stub for a given URL.
     ///
     /// When `execute_js` encounters an `import` from this URL, the stub source
