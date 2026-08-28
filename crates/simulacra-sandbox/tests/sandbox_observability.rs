@@ -178,9 +178,14 @@ fn read_file_produces_a_sandbox_read_file_span_with_vfs_path() {
     assert!(
         spans.iter().any(|span| {
             span.fields.get("simulacra.operation.name") == Some(&"sandbox_read_file".to_string())
-                && span.fields.get("simulacra.vfs.path") == Some(&"/workspace/foo.txt".to_string())
         }),
-        "expected sandbox_read_file span with simulacra.vfs.path"
+        "expected sandbox_read_file span"
+    );
+    // The path is caller-controlled, so it must NOT be a span attribute —
+    // pin the absence so the privacy boundary can't silently regress.
+    assert!(
+        spans.iter().all(|span| !span.fields.contains_key("simulacra.vfs.path")),
+        "the read span must not carry the caller-controlled path: {spans:#?}"
     );
 }
 
@@ -198,10 +203,15 @@ fn write_file_produces_a_sandbox_write_file_span_with_path_and_bytes() {
     assert!(
         spans.iter().any(|span| {
             span.fields.get("simulacra.operation.name") == Some(&"sandbox_write_file".to_string())
-                && span.fields.get("simulacra.vfs.path") == Some(&"/output/result.txt".to_string())
                 && span.fields.get("simulacra.vfs.bytes") == Some(&"5".to_string())
         }),
-        "expected sandbox_write_file span with simulacra.vfs.path and simulacra.vfs.bytes"
+        "expected sandbox_write_file span with simulacra.vfs.bytes"
+    );
+    // The path is caller-controlled — the span carries the bounded byte
+    // count, never the path.
+    assert!(
+        spans.iter().all(|span| !span.fields.contains_key("simulacra.vfs.path")),
+        "the write span must not carry the caller-controlled path: {spans:#?}"
     );
 }
 
@@ -259,13 +269,17 @@ fn capability_denials_emit_warn_events_with_operation_and_reason_on_the_current_
                 && event.current_span.is_some()
                 && event.fields.get("simulacra.capability.operation")
                     == Some(&"write_file".to_string())
-                && event
-                    .fields
-                    .get("simulacra.capability.reason")
-                    .map(|value| value.contains("denied"))
-                    .unwrap_or(false)
         }),
         "expected a WARN event on the current span for capability denial"
+    );
+    // The denial reason embeds the caller-chosen path, so it is deliberately
+    // withheld from the telemetry surface — the test pins that absence so the
+    // privacy boundary can't silently regress.
+    assert!(
+        events.iter().all(|event| !event
+            .fields
+            .contains_key("simulacra.capability.reason")),
+        "the capability-denied warn must not carry the caller-controlled reason: {events:#?}"
     );
 }
 

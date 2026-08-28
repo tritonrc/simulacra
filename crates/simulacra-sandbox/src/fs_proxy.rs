@@ -69,7 +69,9 @@ impl AgentCellFsProxy {
                 size_bytes: size_bytes as u64,
             },
         }) {
-            tracing::error!(error = %err, path, "journal append failed for fs proxy file write");
+            // The path is caller-controlled; only the error and the operation
+            // kind are logged, never the script-chosen path.
+            tracing::error!(error = %err, "journal append failed for fs proxy file write");
         }
     }
 
@@ -139,7 +141,6 @@ impl FsProxy for AgentCellFsProxy {
         let _span = tracing::info_span!(
             "sandbox_fs_proxy_append_file",
             simulacra.operation.name = "sandbox_fs_proxy_append_file",
-            simulacra.vfs.path = path,
             simulacra.vfs.bytes = data.len() as u64,
         )
         .entered();
@@ -168,7 +169,6 @@ impl FsProxy for AgentCellFsProxy {
         let _span = tracing::info_span!(
             "sandbox_fs_proxy_list_dir",
             simulacra.operation.name = "sandbox_fs_proxy_list_dir",
-            simulacra.vfs.path = path,
         )
         .entered();
 
@@ -182,7 +182,6 @@ impl FsProxy for AgentCellFsProxy {
         let _span = tracing::info_span!(
             "sandbox_fs_proxy_stat",
             simulacra.operation.name = "sandbox_fs_proxy_stat",
-            simulacra.vfs.path = path,
         )
         .entered();
 
@@ -200,7 +199,6 @@ impl FsProxy for AgentCellFsProxy {
         let _span = tracing::info_span!(
             "sandbox_fs_proxy_remove",
             simulacra.operation.name = "sandbox_fs_proxy_remove",
-            simulacra.vfs.path = path,
         )
         .entered();
 
@@ -215,8 +213,6 @@ impl FsProxy for AgentCellFsProxy {
         let _span = tracing::info_span!(
             "sandbox_fs_proxy_rename",
             simulacra.operation.name = "sandbox_fs_proxy_rename",
-            simulacra.vfs.path = from,
-            simulacra.vfs.destination = to,
         )
         .entered();
 
@@ -250,7 +246,6 @@ impl FsProxy for AgentCellFsProxy {
         let _span = tracing::info_span!(
             "sandbox_fs_proxy_mkdir",
             simulacra.operation.name = "sandbox_fs_proxy_mkdir",
-            simulacra.vfs.path = path,
         )
         .entered();
 

@@ -25,10 +25,12 @@ pub(crate) fn read_file_inner(
     journal: &Arc<dyn JournalStorage>,
     agent_id: &AgentId,
 ) -> Result<Vec<u8>, SandboxError> {
+    // The caller picks the path (a script-controlled string), so it is NOT a
+    // span attribute: embedding it would write arbitrary model-authored text
+    // into the telemetry surface. The operation name is the bounded label.
     let _span = tracing::info_span!(
         "sandbox_read_file",
         simulacra.operation.name = "sandbox_read_file",
-        simulacra.vfs.path = path,
     )
     .entered();
 
@@ -94,10 +96,11 @@ pub(crate) fn write_file_inner(
     journal: &Arc<dyn JournalStorage>,
     agent_id: &AgentId,
 ) -> Result<(), SandboxError> {
+    // The caller picks the path (a script-controlled string), so it is NOT a
+    // span attribute — only the bounded byte count rides the span.
     let _span = tracing::info_span!(
         "sandbox_write_file",
         simulacra.operation.name = "sandbox_write_file",
-        simulacra.vfs.path = path,
         simulacra.vfs.bytes = data.len() as u64,
     )
     .entered();

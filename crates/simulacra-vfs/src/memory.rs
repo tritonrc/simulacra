@@ -54,7 +54,7 @@ impl VirtualFs for MemoryFs {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
         let path = normalize(path);
         let _span =
-            info_span!("vfs_read", simulacra.operation.name = "vfs_read", simulacra.vfs.path = %path)
+            info_span!("vfs_read", simulacra.operation.name = "vfs_read")
                 .entered();
         let map = self.inner.read().unwrap();
         match map.get(&path) {
@@ -67,7 +67,7 @@ impl VirtualFs for MemoryFs {
     fn write(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
         let path = normalize(path);
         let _span =
-            info_span!("vfs_write", simulacra.operation.name = "vfs_write", simulacra.vfs.path = %path)
+            info_span!("vfs_write", simulacra.operation.name = "vfs_write")
                 .entered();
         if path == "/" {
             return Err(VfsError::NotAFile(path));

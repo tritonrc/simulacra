@@ -335,7 +335,6 @@ fn remote_module_url_capability_denials_emit_warn_events_with_module_fetch_metad
                 )
                 && event.fields.get("simulacra.capability.operation")
                     == Some(&"module_fetch".to_string())
-                && event.fields.contains_key("simulacra.capability.reason")
         }),
         "expected WARN capability-denial event for remote module fetches, got {events:#?}"
     );

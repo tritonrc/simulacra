@@ -59,9 +59,12 @@ where
 {
     if let Err(denied) = check() {
         journal_denial(journal, agent_id, operation, &denied);
+        // The denial reason can embed a caller-controlled value (a path the
+        // script chose), so it is NOT logged — only the bounded operation
+        // name. The full reason still rides the returned error to the caller
+        // (and the journal), which is where the model needs it.
         tracing::warn!(
             simulacra.capability.operation = %operation,
-            simulacra.capability.reason = %denied.reason,
             "capability denied"
         );
         tracing::info!(

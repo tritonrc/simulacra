@@ -263,20 +263,25 @@ pub(super) fn event_field_matches(event: &CapturedEvent, key: &str, expected: &s
 }
 
 pub(super) fn assert_span_with_path(spans: &[CapturedSpan], operation: &str, path: &str) {
+    // The path is caller-controlled, so the span is found by its operation
+    // name and must NOT carry the path as an attribute (the privacy boundary:
+    // no script-chosen path in telemetry). The `path` argument documents which
+    // operation produced the span for the test reader; it is not asserted onto
+    // the span.
+    let _ = path;
     let span = spans
         .iter()
-        .find(|span| {
-            field_matches(span, "simulacra.operation.name", operation)
-                && field_matches(span, "simulacra.vfs.path", path)
-        })
-        .unwrap_or_else(|| {
-            panic!("expected span for operation {operation} and path {path}; got {spans:#?}")
-        });
+        .find(|span| field_matches(span, "simulacra.operation.name", operation))
+        .unwrap_or_else(|| panic!("expected span for operation {operation}; got {spans:#?}"));
 
     assert!(
         span.name.contains(operation),
         "span name should contain {operation}, got {}",
         span.name
+    );
+    assert!(
+        !span.fields.contains_key("simulacra.vfs.path"),
+        "the {operation} span must not carry the caller-controlled path: {span:#?}"
     );
 }
 
