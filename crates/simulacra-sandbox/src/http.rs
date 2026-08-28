@@ -51,11 +51,23 @@ pub(crate) fn fetch_http_inner(
     // Span first — all subsequent events (denials, budget, journal) nest under it.
     // The URL is script-chosen, so it is NOT a span attribute: only the bounded
     // operation name and method ride the span; the host is checked below and the
-    // full URL stays in the caller-facing error, not in telemetry.
+    // full URL stays in the caller-facing error, not in telemetry. The method is
+    // normalized to a closed set so an arbitrary script-supplied string cannot
+    // grow the label surface.
+    let method_label = match method {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "PATCH" => "PATCH",
+        "DELETE" => "DELETE",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        _ => "OTHER",
+    };
     let span = tracing::info_span!(
         "sandbox_http_fetch",
         simulacra.operation.name = "sandbox_http_fetch",
-        simulacra.http.method = %method,
+        simulacra.http.method = %method_label,
         simulacra.http.status = tracing::field::Empty,
     );
     let _guard = span.enter();

@@ -44,7 +44,6 @@ impl FetchProxy for AgentCellFetchProxy {
             match registry.inject_headers_sync(url, &self.tenant_integrations) {
                 Ok(Some(injected)) => {
                     tracing::info!(
-                        url = url,
                         agent_id = ?self.agent_id,
                         "credential injection for outbound fetch"
                     );

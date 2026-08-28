@@ -225,7 +225,6 @@ impl AgentCell {
         let _span = tracing::info_span!(
             "sandbox_path_exists_for_write",
             simulacra.operation.name = "sandbox_path_exists_for_write",
-            simulacra.vfs.path = path,
         )
         .entered();
 
@@ -287,7 +286,6 @@ impl AgentCell {
         let _span = tracing::info_span!(
             "sandbox_list_dir",
             simulacra.operation.name = "sandbox_list_dir",
-            simulacra.vfs.path = path,
         )
         .entered();
 
@@ -329,7 +327,6 @@ impl AgentCell {
         let _span = tracing::info_span!(
             "sandbox_metadata",
             simulacra.operation.name = "sandbox_metadata",
-            simulacra.vfs.path = path,
         )
         .entered();
 

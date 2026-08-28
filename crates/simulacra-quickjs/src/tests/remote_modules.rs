@@ -296,12 +296,17 @@ fn remote_module_cache_hits_emit_a_span_event_with_hit_metadata() {
     });
 
     assert!(
-        events.iter().any(|event| {
-            event.fields.get("simulacra.module.cache") == Some(&"hit".to_string())
-                && event.fields.get("simulacra.module.url")
-                    == Some(&"https://esm.sh/lodash".to_string())
-        }),
+        events
+            .iter()
+            .any(|event| event.fields.get("simulacra.module.cache") == Some(&"hit".to_string())),
         "expected module cache hit span event, got {events:#?}"
+    );
+    // The URL is script-chosen and withheld from telemetry — pin its absence.
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.fields.contains_key("simulacra.module.url")),
+        "the cache-hit event must not carry the script-selected URL: {events:#?}"
     );
 }
 
