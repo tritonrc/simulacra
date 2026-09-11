@@ -65,6 +65,7 @@ Each spec lives in `specs/` and is testable. If code and spec disagree, the spec
 | `specs/S058-capability-aware-tool-advertisement.md` | Active | Capability-aware derived tool views and granular sandbox builtin registration |
 | `specs/S059-context-cache-observability.md` | Active | Context and prompt-cache usage accounting across provider responses, journals, replay, and telemetry |
 | `specs/S060-task-shaped-child-spawning.md` | Active | Role-free child composition: placement selects runtime/capabilities while caller instructions shape purpose across native and ACP children |
+| `specs/S062-placement-target.md` | Active | Opaque `placement_target` on `spawn_agent`: an embedding-defined refinement of the placement, carried unchanged from the tool arguments through the journal to the `AcpChildRequest` |
 
 ## Spec Lifecycle
 

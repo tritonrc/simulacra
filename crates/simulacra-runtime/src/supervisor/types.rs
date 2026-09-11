@@ -366,4 +366,6 @@ pub struct SpawnConfig {
     pub task: String,
     /// Optional caller-supplied shaping instructions, preserved byte-for-byte.
     pub instructions: Option<String>,
+    /// Embedding-defined placement refinement, opaque to the runtime.
+    pub placement_target: Option<String>,
 }

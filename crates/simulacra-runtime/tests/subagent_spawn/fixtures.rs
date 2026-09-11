@@ -45,6 +45,7 @@ fn spawn_config_with_placement(
         placement: placement.into(),
         task: "delegate task".into(),
         instructions: None,
+        placement_target: None,
     }
 }
 

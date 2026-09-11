@@ -52,6 +52,7 @@ fn spawn_config(child_id: &str, parent_id: &str, placement: &str) -> SpawnConfig
         placement: placement.to_string(),
         task: "preserve this task".to_string(),
         instructions: Some("preserve these instructions".to_string()),
+        placement_target: None,
     }
 }
 
@@ -543,6 +544,7 @@ async fn s060_config_backed_spawn_journals_spawned_before_runtime_and_completed_
             backend,
             task,
             instructions,
+            ..
         } if recorded_child.0 == child_id
             && placement == CONFIGURED_PLACEMENT
             && backend == "native"

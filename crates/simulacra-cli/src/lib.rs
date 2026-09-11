@@ -2433,6 +2433,7 @@ task = "bootstrap"
                             placement: "in_process".into(),
                             task: "must be rejected before CLI exposure".into(),
                             instructions: None,
+                            placement_target: None,
                         }),
                         forged_tx,
                     ),

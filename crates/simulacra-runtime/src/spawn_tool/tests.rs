@@ -278,12 +278,12 @@ type ScriptedAcpHandler = dyn Fn(
     + Send
     + Sync;
 
-struct ScriptedAcpRuntime {
+pub(super) struct ScriptedAcpRuntime {
     handler: Arc<ScriptedAcpHandler>,
 }
 
 impl ScriptedAcpRuntime {
-    fn new<F>(handler: F) -> Arc<Self>
+    pub(super) fn new<F>(handler: F) -> Arc<Self>
     where
         F: Fn(
                 AcpChildRequest,
@@ -385,7 +385,7 @@ fn s056_parent_capability() -> CapabilityToken {
     }
 }
 
-fn s056_spawn_config() -> SpawnConfig {
+pub(super) fn s056_spawn_config() -> SpawnConfig {
     SpawnConfig {
         agent_id: AgentId("child-acp-1".into()),
         parent_id: AgentId("parent-1".into()),
@@ -395,10 +395,11 @@ fn s056_spawn_config() -> SpawnConfig {
         placement: "reviewer".into(),
         task: "review the patch".into(),
         instructions: None,
+        placement_target: None,
     }
 }
 
-fn s056_acp_output(
+pub(super) fn s056_acp_output(
     exit_reason: ExitReason,
     content: &str,
     token_usage: TokenUsage,
@@ -420,7 +421,7 @@ fn s056_acp_output(
     }
 }
 
-fn s056_factory(
+pub(super) fn s056_factory(
     acp_child_runtime: Option<Arc<dyn AcpChildRuntime>>,
     activity_sink: Arc<dyn ActivitySink>,
     native_cell_built: Arc<AtomicBool>,
@@ -1076,7 +1077,7 @@ async fn s056_terminal_summary_counts_acp_activity_derived_tool_uses_without_pro
 
 // S061 — Path-Shaped Child Ids from `task_name`.
 
-fn s061_spawn_tool(
+pub(super) fn s061_spawn_tool(
     parent_id: &str,
 ) -> (
     SpawnAgentTool,
@@ -1101,14 +1102,17 @@ fn s061_spawn_tool(
     )
 }
 
-fn s061_capability() -> CapabilityToken {
+pub(super) fn s061_capability() -> CapabilityToken {
     CapabilityToken {
         spawn_placements: vec!["reviewer".into()],
         ..Default::default()
     }
 }
 
-fn s061_arguments(task: &str, task_name: Option<serde_json::Value>) -> serde_json::Value {
+pub(super) fn s061_arguments(
+    task: &str,
+    task_name: Option<serde_json::Value>,
+) -> serde_json::Value {
     let mut arguments = serde_json::json!({
         "placement": "reviewer",
         "task": task,
@@ -1132,7 +1136,7 @@ fn s061_arguments_with_task_name(task: &str, task_name: &str) -> serde_json::Val
     s061_arguments(task, Some(serde_json::Value::String(task_name.into())))
 }
 
-async fn s061_call_and_capture_spawn(
+pub(super) async fn s061_call_and_capture_spawn(
     tool: &SpawnAgentTool,
     receiver: &mut tokio::sync::mpsc::Receiver<SupervisorMessage>,
     arguments: serde_json::Value,
@@ -1215,7 +1219,7 @@ async fn s061_expect_invalid_arguments(
         .await;
 }
 
-async fn s061_expect_invalid_arguments_with_tool(
+pub(super) async fn s061_expect_invalid_arguments_with_tool(
     tool: &SpawnAgentTool,
     receiver: &mut tokio::sync::mpsc::Receiver<SupervisorMessage>,
     arguments: serde_json::Value,
@@ -1662,7 +1666,7 @@ async fn s061_concurrent_identical_auto_slugs_receive_unique_suffixes() {
     assert_eq!(ids, expected);
 }
 
-struct S061CompletingFactory;
+pub(super) struct S061CompletingFactory;
 
 impl TaskFactory for S061CompletingFactory {
     fn validate_spawn_config(&self, _config: &SpawnConfig) -> Result<(), RuntimeError> {

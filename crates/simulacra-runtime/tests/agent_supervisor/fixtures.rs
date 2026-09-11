@@ -67,6 +67,7 @@ fn spawn_config(
         placement: "worker".into(),
         task: String::new(),
         instructions: None,
+        placement_target: None,
     }
 }
 

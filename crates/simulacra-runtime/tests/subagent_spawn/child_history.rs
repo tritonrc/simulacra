@@ -350,6 +350,7 @@ fn widened_child_capabilities_are_rejected_before_the_child_task_starts() {
         placement: "researcher".into(),
         task: String::new(),
         instructions: None,
+        placement_target: None,
     });
 
     assert!(

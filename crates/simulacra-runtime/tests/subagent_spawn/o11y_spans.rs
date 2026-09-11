@@ -252,6 +252,7 @@ async fn supervisor_writes_sub_agent_spawned_journal_entry_to_parent_stream_befo
                 backend,
                 task,
                 instructions,
+                ..
             }
             if child_id.0 == "child-1"
                 && placement == "researcher"

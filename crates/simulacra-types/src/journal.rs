@@ -87,6 +87,9 @@ pub enum JournalEntryKind {
         backend: String,
         task: String,
         instructions: Option<String>,
+        /// Embedding-defined placement refinement, recorded as the caller sent it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement_target: Option<String>,
     },
     SubAgentCompleted {
         child_id: AgentId,
@@ -363,6 +366,7 @@ mod tests {
             backend: "native".into(),
             task: "review the patch".into(),
             instructions: None,
+            placement_target: None,
         });
         let completed = make_entry(JournalEntryKind::SubAgentCompleted {
             child_id: AgentId("child-1".into()),
@@ -371,6 +375,53 @@ mod tests {
         for entry in [spawned, completed] {
             let json = serde_json::to_string(&entry).unwrap();
             let _decoded: JournalEntry = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn sub_agent_spawned_missing_placement_target_decodes_none() {
+        let entry = make_entry(JournalEntryKind::SubAgentSpawned {
+            child_id: AgentId("child-1".into()),
+            placement: "reviewer".into(),
+            backend: "native".into(),
+            task: "review the patch".into(),
+            instructions: None,
+            placement_target: Some("ws-7f3a".into()),
+        });
+        let mut value = serde_json::to_value(&entry).unwrap();
+        let removed = value["entry"]
+            .as_object_mut()
+            .unwrap()
+            .remove("placement_target");
+        assert!(removed.is_some(), "the field must be present to be removed");
+        let decoded: JournalEntry = serde_json::from_value(value).unwrap();
+
+        match decoded.entry {
+            JournalEntryKind::SubAgentSpawned {
+                placement_target, ..
+            } => assert_eq!(placement_target, None),
+            other => panic!("expected SubAgentSpawned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sub_agent_spawned_roundtrips_placement_target() {
+        let entry = make_entry(JournalEntryKind::SubAgentSpawned {
+            child_id: AgentId("child-1".into()),
+            placement: "reviewer".into(),
+            backend: "acp".into(),
+            task: "review the patch".into(),
+            instructions: None,
+            placement_target: Some("ws-7f3a".into()),
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: JournalEntry = serde_json::from_str(&json).unwrap();
+
+        match decoded.entry {
+            JournalEntryKind::SubAgentSpawned {
+                placement_target, ..
+            } => assert_eq!(placement_target.as_deref(), Some("ws-7f3a")),
+            other => panic!("expected SubAgentSpawned, got {other:?}"),
         }
     }
 

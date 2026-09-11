@@ -16,6 +16,8 @@ mod tool;
 mod types;
 
 #[cfg(test)]
+mod placement_target_tests;
+#[cfg(test)]
 mod tests;
 
 pub use child_control_tools::{
