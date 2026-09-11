@@ -684,6 +684,7 @@ fn s060_a40_real_factory_prepare_preserves_typed_before_kill_when_audit_fails() 
         placement: "workspace".into(),
         task: "bounded factory preparation".into(),
         instructions: Some("preserve policy provenance".into()),
+        placement_target: None,
     };
 
     let error = factory

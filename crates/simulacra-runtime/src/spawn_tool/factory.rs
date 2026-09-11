@@ -210,6 +210,7 @@ impl crate::TaskFactory for AgentTaskFactory {
                     task: task.clone(),
                     budget: spawn_config.budget.clone(),
                     capability: effective_capability,
+                    placement_target: spawn_config.placement_target.clone(),
                 };
                 let result = runtime
                     .start_child(request, cancellation, sink, input_queue)

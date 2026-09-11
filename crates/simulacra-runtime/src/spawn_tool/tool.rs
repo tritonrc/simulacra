@@ -7,6 +7,7 @@ const PLACEMENT_DESCRIPTION_PREFIX: &str = "Where I should run this child and wh
 const INSTRUCTIONS_DESCRIPTION: &str = "How I should shape this child for the delegated task, including any relevant available skills and evidence requirements. This does not grant capabilities.";
 const TASK_DESCRIPTION: &str = "The concrete, bounded work I should hand to the child.";
 const TASK_NAME_DESCRIPTION: &str = "Short snake_case name for this child, derived from the task; use lowercase letters, digits, and underscores (for example explore_codebase). The child's id becomes /forge/<task_name>.";
+const PLACEMENT_TARGET_DESCRIPTION: &str = "An embedding-defined refinement of the placement: which workspace, host, or sandbox the child runs in. Opaque to the runtime and passed to the placement's child runtime unchanged. Omit it unless the embedding's guidance names a value.";
 const BUDGET_DESCRIPTION: &str = "The maximum resources I should reserve for this child; each nonzero value must fit within my remaining budget and the placement limits, while zero requests unlimited capacity under the rules below.";
 const CAPABILITIES_DESCRIPTION: &str = "Capabilities I should remove from this child's placement envelope; these values can only attenuate access.";
 const MAX_INSTRUCTION_BYTES: usize = 65_536;
@@ -47,6 +48,8 @@ struct SpawnArguments {
     capabilities: Option<SpawnCapabilities>,
     #[serde(default)]
     task_name: Option<String>,
+    #[serde(default)]
+    placement_target: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -160,6 +163,10 @@ impl simulacra_types::Tool for SpawnAgentTool {
                     "task_name": {
                         "type": "string",
                         "description": TASK_NAME_DESCRIPTION
+                    },
+                    "placement_target": {
+                        "type": "string",
+                        "description": PLACEMENT_TARGET_DESCRIPTION
                     },
                     "budget": {
                         "type": "object",
@@ -306,6 +313,7 @@ impl simulacra_types::Tool for SpawnAgentTool {
                 placement: parsed.placement.clone(),
                 task: parsed.task,
                 instructions,
+                placement_target: parsed.placement_target,
             };
             let (result_tx, result_rx) = tokio::sync::oneshot::channel();
             crate::supervisor::register_spawn_parent_span(
@@ -385,6 +393,7 @@ fn validate_argument_shape(
         "instructions",
         "task",
         "task_name",
+        "placement_target",
         "budget",
         "capabilities",
     ];
@@ -402,6 +411,12 @@ fn validate_argument_shape(
         .is_some_and(|value| !value.is_string())
     {
         return invalid_field("task_name", "must be a string");
+    }
+    if object
+        .get("placement_target")
+        .is_some_and(|value| !value.is_string())
+    {
+        return invalid_field("placement_target", "must be a string");
     }
 
     let budget = object

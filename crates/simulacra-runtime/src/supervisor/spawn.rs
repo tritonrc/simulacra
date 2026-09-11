@@ -370,6 +370,7 @@ impl AgentSupervisor {
                 backend: child_backend.to_string(),
                 task: config.task.clone(),
                 instructions: config.instructions.clone(),
+                placement_target: config.placement_target.clone(),
             },
         };
         journal

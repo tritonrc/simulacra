@@ -383,6 +383,7 @@ async fn s060_a32_one_thousand_concurrent_spawns_receive_opaque_unique_ids() {
                 backend,
                 task,
                 instructions,
+                ..
             } => {
                 assert_eq!(placement, "workspace");
                 assert_eq!(backend, "native");

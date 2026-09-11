@@ -142,6 +142,7 @@ async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
         placement: "worker".into(),
         task: String::new(),
         instructions: None,
+        placement_target: None,
     };
 
     // Spawn the child (increments used_sub_agents)
@@ -155,6 +156,7 @@ async fn child_budget_deduction_increases_parent_used_tokens_turns_cost() {
             placement: "worker".into(),
             task: String::new(),
             instructions: None,
+            placement_target: None,
         })
         .expect("spawn should succeed");
 
@@ -205,6 +207,7 @@ fn multiple_child_deductions_accumulate_in_parent() {
             placement: "worker".into(),
             task: String::new(),
             instructions: None,
+            placement_target: None,
         };
 
         supervisor.handle_completion(&config);

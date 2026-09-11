@@ -22,6 +22,9 @@ pub struct AcpChildRequest {
     pub task: String,
     pub budget: ResourceBudget,
     pub capability: CapabilityToken,
+    /// Embedding-defined placement refinement, opaque to the runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_target: Option<String>,
 }
 
 /// Runtime port for ACP-backed child agents.
