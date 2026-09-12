@@ -64,9 +64,7 @@ impl OverlayFs {
 impl VirtualFs for OverlayFs {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
         let path = normalize(path);
-        let _span =
-            info_span!("vfs_read", simulacra.operation.name = "vfs_read")
-                .entered();
+        let _span = info_span!("vfs_read", simulacra.operation.name = "vfs_read").entered();
 
         if self.is_whited_out(&path) {
             return Err(VfsError::NotFound(path));
@@ -80,9 +78,7 @@ impl VirtualFs for OverlayFs {
 
     fn write(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
         let path = normalize(path);
-        let _span =
-            info_span!("vfs_write", simulacra.operation.name = "vfs_write")
-                .entered();
+        let _span = info_span!("vfs_write", simulacra.operation.name = "vfs_write").entered();
 
         // Clear whiteout (and ancestor whiteouts) so the file becomes visible again.
         self.clear_whiteouts_recursive(&path);
