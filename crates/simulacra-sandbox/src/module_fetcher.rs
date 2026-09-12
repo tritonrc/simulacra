@@ -32,11 +32,8 @@ impl ModuleFetcher for AgentCellModuleFetcher {
         // so that OTel events carry the correct operation context. The URL is
         // script-chosen, so it is NOT a span attribute — only the bounded
         // operation name rides the span.
-        let _span = tracing::info_span!(
-            "module_fetch",
-            simulacra.operation.name = "module_fetch",
-        )
-        .entered();
+        let _span = tracing::info_span!("module_fetch", simulacra.operation.name = "module_fetch",)
+            .entered();
 
         // Check for a pre-registered stub before attempting HTTP.
         // Stubs still need capability + budget checks via the shared guard helpers,

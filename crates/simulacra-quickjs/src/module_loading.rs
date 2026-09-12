@@ -356,10 +356,7 @@ impl rquickjs::loader::Loader for SimulacraLoader {
                 })?;
 
             if !self.fetched_remote_urls.borrow().contains(name) {
-                tracing::info!(
-                    simulacra.module.cache = "hit",
-                    "module cache hit"
-                );
+                tracing::info!(simulacra.module.cache = "hit", "module cache hit");
             }
             source
         } else if name.starts_with('/') {

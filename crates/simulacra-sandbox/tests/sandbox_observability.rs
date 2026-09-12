@@ -184,7 +184,9 @@ fn read_file_produces_a_sandbox_read_file_span_with_vfs_path() {
     // The path is caller-controlled, so it must NOT be a span attribute —
     // pin the absence so the privacy boundary can't silently regress.
     assert!(
-        spans.iter().all(|span| !span.fields.contains_key("simulacra.vfs.path")),
+        spans
+            .iter()
+            .all(|span| !span.fields.contains_key("simulacra.vfs.path")),
         "the read span must not carry the caller-controlled path: {spans:#?}"
     );
 }
@@ -210,7 +212,9 @@ fn write_file_produces_a_sandbox_write_file_span_with_path_and_bytes() {
     // The path is caller-controlled — the span carries the bounded byte
     // count, never the path.
     assert!(
-        spans.iter().all(|span| !span.fields.contains_key("simulacra.vfs.path")),
+        spans
+            .iter()
+            .all(|span| !span.fields.contains_key("simulacra.vfs.path")),
         "the write span must not carry the caller-controlled path: {spans:#?}"
     );
 }
@@ -276,9 +280,9 @@ fn capability_denials_emit_warn_events_with_operation_and_reason_on_the_current_
     // withheld from the telemetry surface — the test pins that absence so the
     // privacy boundary can't silently regress.
     assert!(
-        events.iter().all(|event| !event
-            .fields
-            .contains_key("simulacra.capability.reason")),
+        events
+            .iter()
+            .all(|event| !event.fields.contains_key("simulacra.capability.reason")),
         "the capability-denied warn must not carry the caller-controlled reason: {events:#?}"
     );
 }
