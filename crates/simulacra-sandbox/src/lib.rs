@@ -172,6 +172,23 @@ impl AgentCell {
             .max_vfs_bytes
     }
 
+    /// The identity every journal entry this cell writes is attributed to.
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    /// Replace the identity this cell journals under (e.g. to give a spawned
+    /// child its own name instead of the construction default).
+    ///
+    /// `prepare_js_runtime` copies the id into the fs proxy, module fetcher,
+    /// and fetch proxy when it lazily builds the cached runtime, so a swap
+    /// also drops that runtime — otherwise a JS-side read or fetch would keep
+    /// journaling under the id the cell no longer has.
+    pub fn set_agent_id(&mut self, agent_id: AgentId) {
+        self.agent_id = agent_id;
+        self.js_runtime = SendableJsRuntime::new();
+    }
+
     /// Register a module source stub for a given URL.
     ///
     /// When `execute_js` encounters an `import` from this URL, the stub source

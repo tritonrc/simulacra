@@ -84,6 +84,11 @@ fn build_child_cell(
         Arc::clone(&child_proc.journal),
         http_client,
     );
+    // Children inherit the parent's journal, so without this every cell in a
+    // supervision tree writes under the construction default and a child's
+    // entries cannot be told from a sibling's. It lands before the configurator
+    // and the registrar because both receive this cell and read the id off it.
+    cell.set_agent_id(spec.spawn_config.agent_id.clone());
     if let Some(executor) = &spec.script_executor {
         cell.set_script_executor(executor.clone());
     }

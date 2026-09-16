@@ -1,7 +1,7 @@
 # S061 — Path-Shaped Child Ids from `task_name`
 
 **Status:** Active — implemented
-**Crates involved:** `simulacra-runtime`
+**Crates involved:** `simulacra-runtime`, `simulacra-sandbox`
 
 ## Dependencies
 
@@ -64,6 +64,14 @@ The composed path is the `SpawnConfig.agent_id` and flows unchanged through
 the acknowledgement (`child_id`), journal (`SubAgentSpawned`/`SubAgentCompleted`),
 activity events, roster, and every child-control tool. Nothing downstream
 parses the id; it remains opaque outside this spec's composition rule.
+
+Native child cells carry that same `SpawnConfig.agent_id` before the cell
+configurator and child tool registrar run, so sandbox journal entries and
+host-supplied child tools can attribute operations to the child. `AgentCell`
+exposes `agent_id(&self) -> &AgentId` and
+`set_agent_id(&mut self, agent_id: AgentId)`. Directly constructed cells retain
+the default `"sandbox"` identity; root construction in the CLI and server is
+unchanged.
 
 ## Segment validation
 
@@ -150,6 +158,19 @@ legacy fallback id in the existing `child-{nanos:016x}{counter:016x}` format.
 - [x] A valid `task_name` flows into journal, activity, and roster payloads
   unchanged (asserted through the existing spawn acknowledgement and captured
   `SpawnConfig`, with no re-minting of the id).
+
+### Child cell identity
+
+- [ ] A native spawned child's cell reports its `SpawnConfig.agent_id` through
+  `agent_id()`, including inside the cell configurator.
+- [ ] A capability denial or file write produced by a native child's cell
+  carries the child's path id in the inherited journal.
+- [ ] A shared `ChildToolRegistrar` invoked during real native spawns observes
+  each child's own id on the cell it receives.
+- [ ] Two children spawned in the same supervision tree have distinct cell ids
+  matching their spawn ids.
+- [ ] A directly constructed `AgentCell` reports `"sandbox"`; setting its id
+  updates the accessor and subsequent sandbox journal attribution.
 
 ### Auto-slug
 
