@@ -483,6 +483,49 @@ mod tests {
     /// `Serialize`/`Deserialize`, and hosts round-trip it that way. The derived
     /// path has to agree: empty blocks leave no key, and a payload written
     /// before the field existed still deserializes.
+    /// `from_value` is lenient by contract: a `provider_content` that does not
+    /// parse as a block array degrades to an empty vector and nothing else
+    /// moves. The failure this guards against is the whole object falling
+    /// through to the `Self::success(other.to_string())` arm, which would turn
+    /// `content` into the serialized object and lose `is_error`.
+    #[test]
+    fn from_value_with_unparseable_provider_content_keeps_every_other_field() {
+        let baseline = ToolOutput::from_value(json!({
+            "content": "look at this",
+            "is_error": true,
+            "log_preview": "look",
+            "structured": {"width": 800}
+        }));
+
+        for malformed in [
+            json!("not a block array"),
+            json!(17),
+            json!(["not an object", 3, null]),
+        ] {
+            let decoded = ToolOutput::from_value(json!({
+                "content": "look at this",
+                "is_error": true,
+                "log_preview": "look",
+                "structured": {"width": 800},
+                "provider_content": malformed
+            }));
+
+            assert_eq!(
+                decoded.provider_content,
+                Vec::<ProviderContentBlock>::new(),
+                "malformed provider_content {malformed} should degrade to no blocks"
+            );
+            assert_eq!(decoded.content, "look at this");
+            assert!(decoded.is_error);
+            assert_eq!(decoded.log_preview, "look");
+            assert_eq!(decoded.structured, Some(json!({"width": 800})));
+            assert_eq!(
+                decoded, baseline,
+                "malformed provider_content {malformed} should change nothing but the blocks"
+            );
+        }
+    }
+
     #[test]
     fn derived_serde_omits_empty_provider_blocks_and_defaults_them_when_absent() {
         let serialized = serde_json::to_value(ToolOutput::success("plain text"))
