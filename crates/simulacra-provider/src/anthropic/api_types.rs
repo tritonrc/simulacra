@@ -524,11 +524,16 @@ mod tests {
         })
     }
 
+    /// The whole wire form of an API message. Assertions compare against this
+    /// rather than a single block so a stray block anywhere in the message
+    /// fails the test.
+    fn api_message_json(api_message: &ApiMessage) -> serde_json::Value {
+        serde_json::to_value(api_message).expect("api message should serialize to JSON")
+    }
+
     /// The wire form of the first `tool_result` block in an API message.
     fn tool_result_json(api_message: &ApiMessage) -> Option<serde_json::Value> {
-        let serialized =
-            serde_json::to_value(api_message).expect("api message should serialize to JSON");
-        serialized["content"]
+        api_message_json(api_message)["content"]
             .as_array()?
             .iter()
             .find(|block| block["type"] == "tool_result")
@@ -984,17 +989,20 @@ mod tests {
 
         assert_eq!(request.messages.len(), 2);
         assert_eq!(
-            tool_result_json(&request.messages[1]),
-            Some(json!({
-                "type": "tool_result",
-                "tool_use_id": "X",
-                "content": [
-                    { "type": "text", "text": "screen follows" },
-                    { "type": "image", "source": base64_source("first") },
-                    { "type": "image", "source": url_source("https://example.test/second.png") },
-                    { "type": "image", "source": file_source("file_third") }
-                ]
-            }))
+            api_message_json(&request.messages[1]),
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "X",
+                    "content": [
+                        { "type": "text", "text": "screen follows" },
+                        { "type": "image", "source": base64_source("first") },
+                        { "type": "image", "source": url_source("https://example.test/second.png") },
+                        { "type": "image", "source": file_source("file_third") }
+                    ]
+                }]
+            })
         );
     }
 
@@ -1008,14 +1016,17 @@ mod tests {
         let request = build_request_parts(&messages, &[], "claude-test", 1024);
 
         assert_eq!(
-            tool_result_json(&request.messages[1]),
-            Some(json!({
-                "type": "tool_result",
-                "tool_use_id": "X",
-                "content": [
-                    { "type": "image", "source": base64_source("only") }
-                ]
-            }))
+            api_message_json(&request.messages[1]),
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "X",
+                    "content": [
+                        { "type": "image", "source": base64_source("only") }
+                    ]
+                }]
+            })
         );
     }
 
@@ -1073,20 +1084,40 @@ mod tests {
         ];
 
         let request = build_request_parts(&messages, &[], "claude-test", 1024);
-        let serialized = serialized_request(&request);
 
-        assert!(!serialized.contains("ignored-"));
+        assert_eq!(request.messages.len(), 2);
         assert_eq!(
-            tool_result_json(&request.messages[1]),
-            Some(json!({
-                "type": "tool_result",
-                "tool_use_id": "X",
-                "content": [
-                    { "type": "text", "text": "plain result" },
-                    { "type": "image", "source": url_source("https://example.test/kept.png") },
-                    { "type": "image", "source": base64_source("kept-last") }
+            serde_json::to_value(&request).expect("request should serialize to JSON"),
+            json!({
+                "model": "claude-test",
+                "max_tokens": 1024,
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            { "type": "text", "text": "use tool" },
+                            {
+                                "type": "tool_use",
+                                "id": "X",
+                                "name": "tool_X",
+                                "input": { "id": "X" }
+                            }
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "X",
+                            "content": [
+                                { "type": "text", "text": "plain result" },
+                                { "type": "image", "source": url_source("https://example.test/kept.png") },
+                                { "type": "image", "source": base64_source("kept-last") }
+                            ]
+                        }]
+                    }
                 ]
-            }))
+            })
         );
     }
 
@@ -1101,5 +1132,46 @@ mod tests {
 
         assert!(!serialized.contains("assistant-image"));
         assert_eq!(serialized, ASSISTANT_TEXT_ONLY_REQUEST);
+    }
+
+    /// Dropping the assistant image must not be done by dropping the assistant
+    /// branch's provider blocks wholesale: a `thinking` block on the same
+    /// message still has to reach the request, in its existing position.
+    #[test]
+    fn build_request_parts_keeps_assistant_thinking_while_dropping_an_image() {
+        let mut message = assistant("assistant text", &[]);
+        message.provider_content = vec![
+            ProviderContentBlock {
+                provider: "anthropic".into(),
+                value: json!({
+                    "type": "thinking",
+                    "thinking": "assistant thinking",
+                    "signature": "sig"
+                }),
+            },
+            anthropic_image_block(base64_source("assistant-image")),
+        ];
+        let messages = vec![message];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(
+            serde_json::to_value(&request).expect("request should serialize to JSON"),
+            json!({
+                "model": "claude-test",
+                "max_tokens": 1024,
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "assistant thinking",
+                            "signature": "sig"
+                        },
+                        { "type": "text", "text": "assistant text" }
+                    ]
+                }]
+            })
+        );
     }
 }

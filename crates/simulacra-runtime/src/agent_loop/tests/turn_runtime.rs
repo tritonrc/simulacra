@@ -422,15 +422,13 @@ async fn replaying_a_serialized_live_journal_rebuilds_the_same_tool_message() {
         serde_json::from_str(&persisted).expect("persisted journal entries should deserialize");
     assert_eq!(replay_entries.len(), live_entries.len());
 
-    // The provider has no responses: any live call during replay fails the turn.
-    let mut replay_tools = ToolRegistry::new();
-    replay_tools
-        .register(Box::new(EchoTool))
-        .expect("echo tool registration should succeed");
+    // The provider has no responses and no tool is registered: anything the
+    // replayed turn does not restore from the journal fails or comes back as
+    // an unknown-tool error, never as a re-execution that happens to agree.
     let mut replay_agent = AgentLoop::with_clock_and_replay(
         default_config(),
         Box::new(FakeProvider::new(vec![])),
-        replay_tools,
+        ToolRegistry::new(),
         Box::new(PassthroughContext),
         Arc::new(InMemoryJournalStorage::new()),
         default_budget(),
@@ -508,14 +506,10 @@ async fn legacy_tool_result_entry_without_provider_content_replays_with_empty_bl
         .expect("a tool result entry without provider_content must still deserialize"),
     );
 
-    let mut tools = ToolRegistry::new();
-    tools
-        .register(Box::new(EchoTool))
-        .expect("echo tool registration should succeed");
     let mut agent = AgentLoop::with_clock_and_replay(
         default_config(),
         Box::new(FakeProvider::new(vec![])),
-        tools,
+        ToolRegistry::new(),
         Box::new(PassthroughContext),
         Arc::new(InMemoryJournalStorage::new()),
         default_budget(),
@@ -534,6 +528,53 @@ async fn legacy_tool_result_entry_without_provider_content_replays_with_empty_bl
     assert_eq!(legacy.content, "legacy recorded text");
     assert_eq!(
         legacy.provider_content,
+        Vec::<simulacra_types::ProviderContentBlock>::new()
+    );
+}
+
+#[tokio::test]
+async fn a_failing_call_after_one_with_blocks_does_not_inherit_them() {
+    let expected_blocks = runtime_provider_blocks();
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(EchoTool))
+        .expect("echo tool registration should succeed");
+    let mut agent = build_loop(
+        FakeProvider::new(vec![multi_tool_call_response(vec![
+            ToolCallMessage {
+                id: "with-blocks".into(),
+                name: "echo".into(),
+                arguments: typed_echo_arguments("image attached", &expected_blocks),
+            },
+            ToolCallMessage {
+                id: "no-blocks".into(),
+                name: "missing_tool".into(),
+                arguments: serde_json::json!({}),
+            },
+        ])]),
+        tools,
+        Box::new(PassthroughContext),
+        Arc::new(InMemoryJournalStorage::new()),
+        default_budget(),
+    );
+    let mut messages = conversation("one tool with blocks, one that fails");
+
+    agent
+        .run_single_turn(&mut messages)
+        .await
+        .expect("a failing second call should still produce both tool results");
+
+    assert_eq!(
+        tool_message(&messages, "with-blocks").provider_content,
+        expected_blocks
+    );
+    let failed = tool_message(&messages, "no-blocks");
+    assert_eq!(
+        failed.content,
+        "ERROR: execution failed: unknown tool: missing_tool"
+    );
+    assert_eq!(
+        failed.provider_content,
         Vec::<simulacra_types::ProviderContentBlock>::new()
     );
 }

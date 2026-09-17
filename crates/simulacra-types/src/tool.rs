@@ -463,4 +463,43 @@ mod tests {
         assert_eq!(decoded.content, "legacy plain text");
         assert_eq!(decoded.provider_content, Vec::<ProviderContentBlock>::new());
     }
+
+    /// `to_value`/`from_value` are hand-written, but `ToolOutput` also derives
+    /// `Serialize`/`Deserialize`, and hosts round-trip it that way. The derived
+    /// path has to agree: empty blocks leave no key, and a payload written
+    /// before the field existed still deserializes.
+    #[test]
+    fn derived_serde_omits_empty_provider_blocks_and_defaults_them_when_absent() {
+        let serialized = serde_json::to_value(ToolOutput::success("plain text"))
+            .expect("tool output should serialize");
+
+        assert!(
+            serialized.get("provider_content").is_none(),
+            "empty provider blocks must not be serialized"
+        );
+
+        let decoded: ToolOutput = serde_json::from_value(json!({
+            "content": "legacy plain text",
+            "is_error": false,
+            "log_preview": "legacy plain text"
+        }))
+        .expect("a payload without provider_content must still deserialize");
+
+        assert_eq!(decoded.provider_content, Vec::<ProviderContentBlock>::new());
+
+        let carried = ToolOutput {
+            content: "screenshot ready".into(),
+            is_error: false,
+            log_preview: "screenshot ready".into(),
+            structured: None,
+            hook_input: None,
+            hook_output: None,
+            provider_content: vec![image_block("first"), image_block("second")],
+        };
+        let round_tripped: ToolOutput =
+            serde_json::from_value(serde_json::to_value(&carried).expect("should serialize"))
+                .expect("should deserialize");
+
+        assert_eq!(round_tripped.provider_content, carried.provider_content);
+    }
 }
