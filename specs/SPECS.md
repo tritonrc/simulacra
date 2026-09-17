@@ -33,3 +33,4 @@
 | [S056](S056-acp-child-agents.md) | ACP Child Agents | Active | `simulacra-config`, `simulacra-runtime`, `simulacra-cli`, `simulacra-server` |
 | [S057](S057-skill-activated-mcp-catalogs.md) | Skill-Activated MCP Catalogs | Active | `simulacra-config`, `simulacra-cli`, `simulacra-runtime`, `simulacra-tool`, `simulacra-mcp`, `simulacra-types` |
 | [S061](S061-path-shaped-child-ids.md) | Path-Shaped Child Ids from `task_name` | Active | `simulacra-runtime` |
+| [S063](S063-tool-result-provider-content.md) | Provider Content Blocks on Tool Results | Active | `simulacra-types`, `simulacra-tool`, `simulacra-runtime`, `simulacra-provider` |
