@@ -76,7 +76,12 @@ The blocks travel with the text from execution to the provider request:
    denial, execution error — produces an empty vector.
 2. `ToolExecutionResult` carries them. The `cancelled()` constructor and
    the approval-denied construction in `turn/tools.rs` produce an empty
-   vector.
+   vector. Dispatch has **two** live paths — `execute_one` and
+   `execute_parallel_batch` — and both must carry the blocks. They share
+   `spawn_tool`, so a correct change to that one site serves both; a
+   change that only reaches the serial path would pass every serial test
+   and drop the blocks on every parallel batch, which is why one assertion
+   below exercises the parallel path specifically.
 3. The tool `Message` carries them in `provider_content` instead of
    `vec![]`.
 4. The `JournalEntryKind::ToolResult` entry records them, with
@@ -131,6 +136,20 @@ when empty), then the image blocks in order. Non-`anthropic` blocks and
 serves the assistant branch; an assistant message has no caller producing
 image blocks, and widening it would let one through silently.
 
+### The blocks live as long as the message does
+
+A `Role::Tool` message stays in the conversation, and the adapter rebuilds
+the whole message list on every request. So an image block, once emitted,
+is re-sent on every later request in the same loop — and its visual
+tokens are billed each time — for as long as the host retains the
+message. That is deliberate and unchanged from how `thinking` blocks and
+computer-use screenshots already behave; this spec adds no retention or
+compaction policy, and a host that wants a shorter lifetime bounds it by
+what it keeps in history (a host that drops `provider_content` when it
+persists messages gets a one-turn lifetime for free). It is stated here
+because it is a cost the runtime imposes silently, not because the runtime
+should do anything about it.
+
 ## Non-goals
 
 - **No `document`, `base64`, or other block types by name.** The adapter
@@ -154,6 +173,8 @@ image blocks, and widening it would let one through silently.
 - [ ] A tool returning image blocks produces a `Role::Tool` `Message` whose
   `provider_content` holds those blocks and whose `content` is the text;
   the journal `ToolResult` entry for that call records the same blocks.
+  This holds on both dispatch paths: a serial call, and a batch of two or
+  more parallel-capable calls, where each result keeps its own blocks.
 - [ ] Capability denial, execution error, cancellation, and approval denial
   each produce a tool `Message` with empty `provider_content`.
 - [ ] Replaying a journal whose `ToolResult` entry carries blocks builds a
