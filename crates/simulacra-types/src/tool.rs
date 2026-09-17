@@ -93,6 +93,9 @@ pub struct ToolOutput {
     pub hook_input: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook_output: Option<serde_json::Value>,
+    /// Provider-native blocks sent inside this result alongside `content`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_content: Vec<crate::ProviderContentBlock>,
 }
 
 impl ToolOutput {
@@ -105,6 +108,7 @@ impl ToolOutput {
             structured: None,
             hook_input: None,
             hook_output: None,
+            provider_content: Vec::new(),
         }
     }
 
@@ -117,6 +121,7 @@ impl ToolOutput {
             structured: None,
             hook_input: None,
             hook_output: None,
+            provider_content: Vec::new(),
         }
     }
 
@@ -171,6 +176,11 @@ impl ToolOutput {
                 structured: map.get("structured").cloned(),
                 hook_input: map.get("hook_input").cloned(),
                 hook_output: map.get("hook_output").cloned(),
+                provider_content: map
+                    .get("provider_content")
+                    .cloned()
+                    .and_then(|blocks| serde_json::from_value(blocks).ok())
+                    .unwrap_or_default(),
             };
         }
 
@@ -195,6 +205,11 @@ impl ToolOutput {
             }
             if let Some(hook_output) = &self.hook_output {
                 map.insert("hook_output".into(), hook_output.clone());
+            }
+            if !self.provider_content.is_empty()
+                && let Ok(blocks) = serde_json::to_value(&self.provider_content)
+            {
+                map.insert("provider_content".into(), blocks);
             }
         }
         value

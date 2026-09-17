@@ -128,13 +128,22 @@ pub(super) fn replay_llm_response(
     }
 }
 
+/// A tool result restored from the journal: its text, its error flag, and the
+/// provider blocks the live call attached to it.
+pub(super) type ReplayedToolResult = (String, bool, Vec<simulacra_types::ProviderContentBlock>);
+
 /// Extract tool result from a replayed ToolResult journal entry.
-pub(super) fn replay_tool_result(kind: &JournalEntryKind) -> Result<(String, bool), RuntimeError> {
+pub(super) fn replay_tool_result(
+    kind: &JournalEntryKind,
+) -> Result<ReplayedToolResult, RuntimeError> {
     if let JournalEntryKind::ToolResult {
-        content, is_error, ..
+        content,
+        is_error,
+        provider_content,
+        ..
     } = kind
     {
-        Ok((content.clone(), *is_error))
+        Ok((content.clone(), *is_error, provider_content.clone()))
     } else {
         Err(RuntimeError::Journal(
             simulacra_types::JournalError::Storage(format!(

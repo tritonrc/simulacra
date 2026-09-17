@@ -44,10 +44,12 @@ pub(crate) enum ApiRequestContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    #[serde(rename = "image")]
+    Image { source: serde_json::Value },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -56,6 +58,14 @@ pub(crate) enum ApiRequestContentBlock {
     },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
+}
+
+/// A `tool_result` carries either plain text or a block array.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<ApiRequestContentBlock>),
 }
 
 #[derive(Debug, Serialize)]
@@ -267,6 +277,23 @@ fn anthropic_provider_blocks(
         .collect()
 }
 
+/// The Anthropic `image` blocks a tool attached to its result, in order.
+/// `source` is whatever the host supplied; the adapter does not read it.
+fn anthropic_tool_result_images(blocks: &[ProviderContentBlock]) -> Vec<ApiRequestContentBlock> {
+    blocks
+        .iter()
+        .filter(|block| block.provider == "anthropic")
+        .filter(|block| block.value.get("type").and_then(|t| t.as_str()) == Some("image"))
+        .map(|block| ApiRequestContentBlock::Image {
+            source: block
+                .value
+                .get("source")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        })
+        .collect()
+}
+
 fn tool_result_count(messages: &[Message]) -> usize {
     messages
         .iter()
@@ -349,11 +376,24 @@ pub(crate) fn build_request_parts<'a>(
                 let Some(tool_call_id) = msg.tool_call_id.clone() else {
                     continue;
                 };
+                let images = anthropic_tool_result_images(&msg.provider_content);
+                let content = if images.is_empty() {
+                    ToolResultContent::Text(msg.content.clone())
+                } else {
+                    let mut blocks = Vec::with_capacity(images.len() + 1);
+                    if !msg.content.is_empty() {
+                        blocks.push(ApiRequestContentBlock::Text {
+                            text: msg.content.clone(),
+                        });
+                    }
+                    blocks.extend(images);
+                    ToolResultContent::Blocks(blocks)
+                };
                 api_messages.push(ApiMessage {
                     role: "user".into(),
                     content: ApiMessageContent::Blocks(vec![ApiRequestContentBlock::ToolResult {
                         tool_use_id: tool_call_id,
-                        content: msg.content.clone(),
+                        content,
                         is_error: false,
                     }]),
                 });

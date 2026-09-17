@@ -184,6 +184,7 @@
                     tool_name: "echo".into(),
                     content: "wrong entry kind".into(),
                     is_error: false,
+                    provider_content: Vec::new(),
                 },
             },
         ];

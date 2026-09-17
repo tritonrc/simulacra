@@ -406,6 +406,7 @@ fn journal_plan(cell: &AgentCell, tool_name: &str, count: usize) -> Result<(), S
             tool_name: tool_name.to_string(),
             content: format!("planned {} VFS mutation(s)", count),
             is_error: false,
+            provider_content: Vec::new(),
         },
     }) {
         Ok(()) => Ok(()),
@@ -488,6 +489,7 @@ fn journal_execution_failure(cell: &AgentCell, tool_name: &str, err: &VfsError) 
             tool_name: tool_name.to_string(),
             content: err.to_string(),
             is_error: true,
+            provider_content: Vec::new(),
         },
     }) {
         tracing::error!(error = %journal_err, "journal append failed for VFS mutation error");

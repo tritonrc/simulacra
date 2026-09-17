@@ -45,10 +45,11 @@ impl AgentLoop {
             let replayed_result = self.take_replay_tool_result(&tc.id, &tc.name)?;
             let was_replayed = replayed_result.is_some();
             let result = match replayed_result {
-                Some((content, is_error)) => ToolExecutionResult {
+                Some((content, is_error, provider_content)) => ToolExecutionResult {
                     content,
                     is_error,
                     cancelled: false,
+                    provider_content,
                 },
                 None => match self.await_tool_approval(tc).await? {
                     ToolApprovalDecision::Approved => {
@@ -59,6 +60,7 @@ impl AgentLoop {
                         content: format!("approval denied: {reason}"),
                         is_error: true,
                         cancelled: false,
+                        provider_content: Vec::new(),
                     },
                 },
             };
@@ -200,6 +202,7 @@ impl AgentLoop {
             tool_name: tc.name.clone(),
             content: result.content.clone(),
             is_error: result.is_error,
+            provider_content: result.provider_content.clone(),
         })?;
 
         let error_prefix = if result.is_error { "ERROR: " } else { "" };
@@ -208,7 +211,7 @@ impl AgentLoop {
             content: format!("{error_prefix}{}", result.content),
             tool_calls: vec![],
             tool_call_id: Some(tc.id.clone()),
-            provider_content: vec![],
+            provider_content: result.provider_content,
         })
     }
 }

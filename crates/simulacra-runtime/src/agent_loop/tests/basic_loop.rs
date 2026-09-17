@@ -394,6 +394,7 @@ fn s059_two_turn_replay_entries(
                 tool_name: "echo".into(),
                 content: r#"{"msg":"cached replay"}"#.into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
         JournalEntry {
@@ -535,6 +536,7 @@ async fn s059_replayed_agent_run_restores_cache_counters_from_llm_response() {
                 tool_name: "echo".into(),
                 content: r#"{"msg":"cached replay"}"#.into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
         JournalEntry {

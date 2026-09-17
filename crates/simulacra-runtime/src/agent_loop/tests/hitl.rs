@@ -142,6 +142,7 @@ async fn request_input_tool_waits_for_input_response_and_journals_tool_result() 
                 tool_name,
                 content,
                 is_error: false,
+                ..
             } if id == "input-1"
                 && tool_name == REQUEST_INPUT_TOOL_NAME
                 && content == "human supplied context"
@@ -419,6 +420,7 @@ async fn replay_consumes_recorded_hitl_tool_result_without_waiting() {
                 tool_name: REQUEST_INPUT_TOOL_NAME.into(),
                 content: "recorded human response".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
     ];

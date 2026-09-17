@@ -321,6 +321,7 @@ async fn replay_rejects_idless_v3_tool_result_without_executing_the_tool() {
                 tool_name: "echo".into(),
                 content: "legacy final".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
     ];
@@ -467,6 +468,7 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
                 tool_name: "echo".into(),
                 content: "nested collision".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
         JournalEntry {
@@ -479,6 +481,7 @@ async fn replay_tool_result_skips_nested_sandbox_entries_between_tool_call_and_f
                 tool_name: "echo".into(),
                 content: "recorded final".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
     ];
@@ -585,6 +588,7 @@ async fn replay_fails_when_current_tool_result_id_is_missing_after_nested_collis
                 tool_name: "echo".into(),
                 content: "nested same-name result".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
         JournalEntry {

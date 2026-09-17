@@ -6,12 +6,12 @@ pub(super) async fn execute_tool_live(
     tc: &simulacra_types::ToolCallMessage,
     capability: &CapabilityToken,
     agent_name: &str,
-) -> (String, bool) {
+) -> (String, bool, Vec<simulacra_types::ProviderContentBlock>) {
     let result = tools
         .call_output(&tc.name, tc.arguments.clone(), capability)
         .await;
     match result {
-        Ok(output) => (output.content, output.is_error),
+        Ok(output) => (output.content, output.is_error, output.provider_content),
         Err(ref e @ simulacra_types::ToolError::CapabilityDenied(ref denied)) => {
             tracing::warn!(
                 simulacra.capability.operation = %denied.operation,
@@ -20,8 +20,8 @@ pub(super) async fn execute_tool_live(
                 gen_ai.agent.name = agent_name,
                 "capability denied"
             );
-            (e.to_string(), true)
+            (e.to_string(), true, Vec::new())
         }
-        Err(e) => (e.to_string(), true),
+        Err(e) => (e.to_string(), true, Vec::new()),
     }
 }

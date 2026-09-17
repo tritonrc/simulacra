@@ -145,6 +145,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
                 tool_name: "parallel_a".into(),
                 content: "replayed a".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
         replay_entry(
@@ -164,6 +165,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
                 tool_name: "parallel_b".into(),
                 content: "replayed b".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
     ];

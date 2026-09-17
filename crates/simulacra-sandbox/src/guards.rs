@@ -236,6 +236,7 @@ pub(crate) fn journal_denial(
                 denied.operation, denied.reason
             ),
             is_error: true,
+            provider_content: Vec::new(),
         },
     });
 }
@@ -259,6 +260,7 @@ pub(crate) fn journal_budget_exhaustion(
                 exhausted.resource, exhausted.used, exhausted.limit
             ),
             is_error: true,
+            provider_content: Vec::new(),
         },
     });
 }
