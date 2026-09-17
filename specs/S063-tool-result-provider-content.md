@@ -80,6 +80,12 @@ loudly; it is accepted, and pinned, so nobody later mistakes it for a bug.
 
 ### Blast radius of the field
 
+`ToolOutput` is fully `pub` with no `#[non_exhaustive]`, and hosts are its
+intended constructors, so the new field breaks every host-side struct
+literal at the pin bump. That is the cost of a public plain struct before
+1.0 and is accepted; a host adds `provider_content: Vec::new()` once per
+literal.
+
 `JournalEntryKind::ToolResult` is a struct variant constructed and
 exhaustively matched at roughly twenty-five sites across five crates —
 the runtime's turn loop, the sandbox's nested side-effect entries
@@ -181,6 +187,14 @@ what it keeps in history (a host that drops `provider_content` when it
 persists messages gets a one-turn lifetime for free). It is stated here
 because it is a cost the runtime imposes silently, not because the runtime
 should do anything about it.
+
+The same is true of the journal: blocks enter the `ToolResult` entry
+verbatim and are stored and re-serialized on every journal read and write,
+with no truncation in the storage layer. That is required by the replay
+contract — a replayed turn must be able to rebuild the same request — so a
+host that hands the runtime a large inline block (a base64 image, say) is
+choosing to store it in every journal copy. A host that wants small
+journals passes a reference, not the bytes.
 
 ## Non-goals
 
