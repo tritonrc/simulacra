@@ -1,6 +1,7 @@
 use super::*;
 use tracing::Instrument;
 
+// No `Eq`: `ProviderContentBlock` holds a `serde_json::Value`.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ToolExecutionResult {
     pub(super) content: String,

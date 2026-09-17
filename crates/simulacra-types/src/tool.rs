@@ -1,4 +1,4 @@
-use crate::CapabilityToken;
+use crate::{CapabilityToken, ProviderContentBlock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -95,7 +95,7 @@ pub struct ToolOutput {
     pub hook_output: Option<serde_json::Value>,
     /// Provider-native blocks sent inside this result alongside `content`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub provider_content: Vec<crate::ProviderContentBlock>,
+    pub provider_content: Vec<ProviderContentBlock>,
 }
 
 impl ToolOutput {
@@ -206,10 +206,11 @@ impl ToolOutput {
             if let Some(hook_output) = &self.hook_output {
                 map.insert("hook_output".into(), hook_output.clone());
             }
-            if !self.provider_content.is_empty()
-                && let Ok(blocks) = serde_json::to_value(&self.provider_content)
-            {
-                map.insert("provider_content".into(), blocks);
+            if !self.provider_content.is_empty() {
+                map.insert(
+                    "provider_content".into(),
+                    serde_json::json!(self.provider_content),
+                );
             }
         }
         value
@@ -479,10 +480,6 @@ mod tests {
         assert_eq!(decoded.provider_content, Vec::<ProviderContentBlock>::new());
     }
 
-    /// `to_value`/`from_value` are hand-written, but `ToolOutput` also derives
-    /// `Serialize`/`Deserialize`, and hosts round-trip it that way. The derived
-    /// path has to agree: empty blocks leave no key, and a payload written
-    /// before the field existed still deserializes.
     /// `from_value` is lenient by contract: a `provider_content` that does not
     /// parse as a block array degrades to an empty vector and nothing else
     /// moves. The failure this guards against is the whole object falling
@@ -526,6 +523,10 @@ mod tests {
         }
     }
 
+    /// `to_value`/`from_value` are hand-written, but `ToolOutput` also derives
+    /// `Serialize`/`Deserialize`, and hosts round-trip it that way. The derived
+    /// path has to agree: empty blocks leave no key, and a payload written
+    /// before the field existed still deserializes.
     #[test]
     fn derived_serde_omits_empty_provider_blocks_and_defaults_them_when_absent() {
         let serialized = serde_json::to_value(ToolOutput::success("plain text"))
