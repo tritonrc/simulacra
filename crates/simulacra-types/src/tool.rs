@@ -357,3 +357,110 @@ pub enum ToolError {
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProviderContentBlock;
+    use serde_json::json;
+
+    fn image_block(label: &str) -> ProviderContentBlock {
+        ProviderContentBlock {
+            provider: "anthropic".into(),
+            value: json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": label
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn tool_output_value_roundtrip_preserves_provider_blocks_in_order() {
+        let output = ToolOutput {
+            content: "screenshot ready".into(),
+            is_error: false,
+            log_preview: "screenshot ready".into(),
+            structured: Some(json!({"width": 800})),
+            hook_input: Some(json!({"requested": true})),
+            hook_output: Some(json!({"allowed": true})),
+            provider_content: vec![image_block("first"), image_block("second")],
+        };
+
+        let value = output.to_value();
+
+        assert_eq!(
+            value["provider_content"],
+            json!([
+                {
+                    "provider": "anthropic",
+                    "value": {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "first"
+                        }
+                    }
+                },
+                {
+                    "provider": "anthropic",
+                    "value": {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "second"
+                        }
+                    }
+                }
+            ])
+        );
+
+        let decoded = ToolOutput::from_value(value);
+
+        assert_eq!(decoded.provider_content, output.provider_content);
+        assert_eq!(decoded.content, "screenshot ready");
+        assert_eq!(decoded.structured, Some(json!({"width": 800})));
+    }
+
+    #[test]
+    fn tool_output_constructors_start_with_no_provider_blocks() {
+        let none = Vec::<ProviderContentBlock>::new();
+
+        assert_eq!(ToolOutput::success("plain text").provider_content, none);
+        assert_eq!(ToolOutput::error("boom").provider_content, none);
+        assert_eq!(
+            ToolOutput::success("plain text")
+                .with_structured(json!({"ok": true}))
+                .with_hook_input(json!({"in": 1}))
+                .with_hook_output(json!({"out": 2}))
+                .with_log_preview("preview")
+                .provider_content,
+            none
+        );
+    }
+
+    #[test]
+    fn tool_output_empty_provider_blocks_are_omitted_and_default_when_absent() {
+        let output = ToolOutput::success("plain text");
+        let value = output.to_value();
+
+        assert!(
+            value.get("provider_content").is_none(),
+            "empty provider blocks must not be serialized"
+        );
+
+        let decoded = ToolOutput::from_value(json!({
+            "content": "legacy plain text",
+            "is_error": false,
+            "log_preview": "legacy plain text"
+        }));
+
+        assert_eq!(decoded.content, "legacy plain text");
+        assert_eq!(decoded.provider_content, Vec::<ProviderContentBlock>::new());
+    }
+}

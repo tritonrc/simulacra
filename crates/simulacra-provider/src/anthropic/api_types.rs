@@ -524,18 +524,75 @@ mod tests {
         })
     }
 
-    fn tool_result_content(api_message: &ApiMessage) -> Option<&str> {
-        let ApiMessageContent::Blocks(blocks) = &api_message.content else {
-            return None;
-        };
-        blocks.iter().find_map(|block| {
-            if let ApiRequestContentBlock::ToolResult { content, .. } = block {
-                Some(content.as_str())
-            } else {
-                None
-            }
-        })
+    /// The wire form of the first `tool_result` block in an API message.
+    fn tool_result_json(api_message: &ApiMessage) -> Option<serde_json::Value> {
+        let serialized =
+            serde_json::to_value(api_message).expect("api message should serialize to JSON");
+        serialized["content"]
+            .as_array()?
+            .iter()
+            .find(|block| block["type"] == "tool_result")
+            .cloned()
     }
+
+    /// The plain-string `content` of the first `tool_result` block, if it is
+    /// a plain string on the wire.
+    fn tool_result_content(api_message: &ApiMessage) -> Option<String> {
+        tool_result_json(api_message)?["content"]
+            .as_str()
+            .map(ToOwned::to_owned)
+    }
+
+    fn tool_with_provider_content(
+        tool_call_id: &str,
+        content: &str,
+        provider_content: Vec<ProviderContentBlock>,
+    ) -> Message {
+        Message {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: Some(tool_call_id.into()),
+            provider_content,
+        }
+    }
+
+    /// An Anthropic `image` block whose `source` is whatever the host supplied.
+    fn anthropic_image_block(source: serde_json::Value) -> ProviderContentBlock {
+        ProviderContentBlock {
+            provider: "anthropic".into(),
+            value: json!({ "type": "image", "source": source }),
+        }
+    }
+
+    fn base64_source(data: &str) -> serde_json::Value {
+        json!({ "type": "base64", "media_type": "image/png", "data": data })
+    }
+
+    fn url_source(url: &str) -> serde_json::Value {
+        json!({ "type": "url", "url": url })
+    }
+
+    /// A `file` source carrying an extra nested field the adapter has never
+    /// heard of; it must come out exactly as it went in.
+    fn file_source(file_id: &str) -> serde_json::Value {
+        json!({ "type": "file", "file_id": file_id, "extra": { "nested": true } })
+    }
+
+    fn serialized_request(request: &ApiRequest<'_>) -> String {
+        serde_json::to_string(request).expect("request should serialize to JSON")
+    }
+
+    /// Exact bytes the adapter produced for `assistant("use tool", &["X"])`
+    /// followed by `tool("X", "plain result")` before tool results could carry
+    /// provider blocks. Captured by running `build_request_parts` on that
+    /// input and recording `serde_json::to_string` of the result.
+    const PLAIN_TOOL_RESULT_REQUEST: &str = r#"{"model":"claude-test","max_tokens":1024,"messages":[{"role":"assistant","content":[{"type":"text","text":"use tool"},{"type":"tool_use","id":"X","name":"tool_X","input":{"id":"X"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"X","content":"plain result"}]}]}"#;
+
+    /// Exact bytes the adapter produced for a lone assistant message whose
+    /// `provider_content` holds one Anthropic block it does not forward,
+    /// captured the same way as `PLAIN_TOOL_RESULT_REQUEST`.
+    const ASSISTANT_TEXT_ONLY_REQUEST: &str = r#"{"model":"claude-test","max_tokens":1024,"messages":[{"role":"assistant","content":[{"type":"text","text":"assistant text"}]}]}"#;
 
     fn has_tool_use(api_message: &ApiMessage, id: &str) -> bool {
         let ApiMessageContent::Blocks(blocks) = &api_message.content else {
@@ -876,7 +933,10 @@ mod tests {
             .collect();
 
         assert_eq!(tool_results.len(), 1);
-        assert_eq!(tool_result_content(tool_results[0]), Some("paused"));
+        assert_eq!(
+            tool_result_content(tool_results[0]).as_deref(),
+            Some("paused")
+        );
         assert_eq!(request.messages.len(), 4);
         assert!(has_tool_use(&request.messages[0], "X"));
         assert_eq!(tool_result_id(&request.messages[1]), Some("X"));
@@ -890,5 +950,156 @@ mod tests {
             &request.messages[3].content,
             ApiMessageContent::Text(content) if content == "ship it"
         ));
+    }
+
+    #[test]
+    fn build_request_parts_keeps_tool_result_without_images_byte_identical() {
+        let messages = vec![assistant("use tool", &["X"]), tool("X", "plain result")];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(serialized_request(&request), PLAIN_TOOL_RESULT_REQUEST);
+        assert_eq!(
+            tool_result_content(&request.messages[1]).as_deref(),
+            Some("plain result")
+        );
+    }
+
+    #[test]
+    fn build_request_parts_places_tool_text_before_anthropic_images_with_sources_untouched() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content(
+                "X",
+                "screen follows",
+                vec![
+                    anthropic_image_block(base64_source("first")),
+                    anthropic_image_block(url_source("https://example.test/second.png")),
+                    anthropic_image_block(file_source("file_third")),
+                ],
+            ),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(
+            tool_result_json(&request.messages[1]),
+            Some(json!({
+                "type": "tool_result",
+                "tool_use_id": "X",
+                "content": [
+                    { "type": "text", "text": "screen follows" },
+                    { "type": "image", "source": base64_source("first") },
+                    { "type": "image", "source": url_source("https://example.test/second.png") },
+                    { "type": "image", "source": file_source("file_third") }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn build_request_parts_omits_empty_tool_text_when_images_are_present() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content("X", "", vec![anthropic_image_block(base64_source("only"))]),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(
+            tool_result_json(&request.messages[1]),
+            Some(json!({
+                "type": "tool_result",
+                "tool_use_id": "X",
+                "content": [
+                    { "type": "image", "source": base64_source("only") }
+                ]
+            }))
+        );
+    }
+
+    /// Blocks the `Role::Tool` branch must ignore: a foreign provider's image,
+    /// and Anthropic blocks whose type is not `image`.
+    fn ignored_tool_blocks() -> Vec<ProviderContentBlock> {
+        vec![
+            ProviderContentBlock {
+                provider: "openai".into(),
+                value: json!({
+                    "type": "image",
+                    "source": url_source("https://example.test/ignored-foreign.png")
+                }),
+            },
+            ProviderContentBlock {
+                provider: "anthropic".into(),
+                value: json!({
+                    "type": "thinking",
+                    "thinking": "ignored-thinking",
+                    "signature": "sig"
+                }),
+            },
+            ProviderContentBlock {
+                provider: "anthropic".into(),
+                value: json!({ "type": "text", "text": "ignored-text-block" }),
+            },
+        ]
+    }
+
+    #[test]
+    fn build_request_parts_ignores_non_image_tool_blocks_and_stays_byte_identical() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content("X", "plain result", ignored_tool_blocks()),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+        let serialized = serialized_request(&request);
+
+        assert_eq!(serialized, PLAIN_TOOL_RESULT_REQUEST);
+        assert!(!serialized.contains("ignored-"));
+    }
+
+    #[test]
+    fn build_request_parts_ignores_non_image_tool_blocks_alongside_images() {
+        let mut blocks = ignored_tool_blocks();
+        blocks.insert(
+            1,
+            anthropic_image_block(url_source("https://example.test/kept.png")),
+        );
+        blocks.push(anthropic_image_block(base64_source("kept-last")));
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content("X", "plain result", blocks),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+        let serialized = serialized_request(&request);
+
+        assert!(!serialized.contains("ignored-"));
+        assert_eq!(
+            tool_result_json(&request.messages[1]),
+            Some(json!({
+                "type": "tool_result",
+                "tool_use_id": "X",
+                "content": [
+                    { "type": "text", "text": "plain result" },
+                    { "type": "image", "source": url_source("https://example.test/kept.png") },
+                    { "type": "image", "source": base64_source("kept-last") }
+                ]
+            }))
+        );
+    }
+
+    #[test]
+    fn build_request_parts_does_not_emit_assistant_image_blocks() {
+        let mut message = assistant("assistant text", &[]);
+        message.provider_content = vec![anthropic_image_block(base64_source("assistant-image"))];
+        let messages = vec![message];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+        let serialized = serialized_request(&request);
+
+        assert!(!serialized.contains("assistant-image"));
+        assert_eq!(serialized, ASSISTANT_TEXT_ONLY_REQUEST);
     }
 }

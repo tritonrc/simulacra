@@ -78,6 +78,7 @@ async fn cancellation_during_non_waiting_tool_returns_cancelled_error_result() {
     assert!(messages
         .iter()
         .any(|message| message.content == "ERROR: cancelled by user"));
+    assert_tool_message_has_no_provider_content(&messages, "ERROR: cancelled by user");
 }
 
 struct CleanupWaitingTool {
@@ -174,4 +175,5 @@ async fn cancellation_during_waiting_tool_waits_for_cleanup_before_cancelled_res
     assert!(messages
         .iter()
         .any(|message| message.content == "ERROR: cancelled by user"));
+    assert_tool_message_has_no_provider_content(&messages, "ERROR: cancelled by user");
 }

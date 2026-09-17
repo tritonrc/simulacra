@@ -361,6 +361,7 @@ async fn tool_approval_denial_returns_error_result_without_executing_tool() {
     assert!(messages.iter().any(|message| {
         message.role == Role::Tool && message.content == "ERROR: approval denied: not allowed"
     }));
+    assert_tool_message_has_no_provider_content(&messages, "ERROR: approval denied: not allowed");
     while let Ok(event) = event_rx.try_recv() {
         assert!(
             !matches!(event, ActivityEvent::ToolStart { tool_call_id, .. } if tool_call_id == "deny-1"),
