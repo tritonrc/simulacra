@@ -251,6 +251,7 @@ async fn each_parallel_batch_result_carries_its_own_provider_blocks() {
             name: "parallel_echo_b",
         }))
         .expect("parallel echo tool b should register");
+    let journal = Arc::new(InMemoryJournalStorage::new());
     let mut agent = build_loop(
         FakeProvider::new(vec![multi_tool_call_response(vec![
             ToolCallMessage {
@@ -266,7 +267,7 @@ async fn each_parallel_batch_result_carries_its_own_provider_blocks() {
         ])]),
         tools,
         Box::new(PassthroughContext),
-        Arc::new(InMemoryJournalStorage::new()),
+        journal.clone(),
         default_budget(),
     );
     let mut messages = conversation("parallel blocks");
@@ -282,4 +283,38 @@ async fn each_parallel_batch_result_carries_its_own_provider_blocks() {
     assert_eq!(b.content, "b text");
     assert_eq!(a.provider_content, blocks_a);
     assert_eq!(b.provider_content, blocks_b);
+
+    // The messages are only half of it: the journal entries have to carry the
+    // blocks too, attributed to the right call. Comparing every `ToolResult`
+    // entry as one ordered list fails on a dropped entry, on blocks written
+    // under the wrong `tool_call_id`, and on the two results being swapped.
+    let entries = journal
+        .read_all(&AgentId("test-agent".into()))
+        .expect("journal entries should be readable");
+    let recorded = entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                provider_content,
+                ..
+            } => Some((
+                tool_call_id.clone(),
+                content.clone(),
+                *is_error,
+                provider_content.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        recorded,
+        vec![
+            (Some("tc-a".to_string()), "a text".to_string(), false, blocks_a),
+            (Some("tc-b".to_string()), "b text".to_string(), false, blocks_b),
+        ]
+    );
 }
