@@ -65,7 +65,29 @@ result through them (`registry.rs:251-263`). A host that constructs
 that, but a host that returns a raw object must not have its blocks
 dropped by the conversion.
 
+`from_value` is lenient by contract — it returns `Self`, not a `Result`,
+and coerces every legacy shape rather than refusing one. A
+`provider_content` value that is present but does not parse as
+`Vec<ProviderContentBlock>` therefore yields an **empty** vector, the same
+as an absent key. That is a decision, not an accident: the alternative is
+a signature change that every existing caller would have to absorb, to
+guard a path the only planned host never takes (it overrides
+`output_from_value` and builds the struct directly). The cost is that a
+malformed blocks array makes an image silently vanish rather than fail
+loudly; it is accepted, and pinned, so nobody later mistakes it for a bug.
+
 `success`, `error`, and every other constructor produce an empty vector.
+
+### Blast radius of the field
+
+`JournalEntryKind::ToolResult` is a struct variant constructed and
+exhaustively matched at roughly twenty-five sites across five crates —
+the runtime's turn loop, the sandbox's nested side-effect entries
+(`file_io`, `fs_proxy`, `guards`, `vfs_mutation`, `lib`), and a dozen test
+fixtures. Adding a field to it touches every one: each literal gains
+`provider_content: Vec::new()` and each exhaustive pattern gains `..`. None
+of those edits changes behavior, but a change to this variant should budget
+for them rather than discover them from the compiler.
 
 ### The runtime threads them through, unchanged
 
@@ -168,6 +190,10 @@ should do anything about it.
   `to_value` → `from_value` with the blocks intact and in order; one with
   empty `provider_content` serializes with no `provider_content` key and
   deserializes from a value lacking the key.
+- [ ] `from_value` on an object whose `provider_content` is present but is
+  not a valid block array (a string, a number, an array of non-objects)
+  yields an empty `provider_content` and leaves `content`, `is_error`, and
+  `structured` exactly as they would be without the key.
 - [ ] A registered tool whose raw value carries `provider_content` reaches
   `ToolRegistry::call_output` with the blocks intact.
 - [ ] A tool returning image blocks produces a `Role::Tool` `Message` whose
