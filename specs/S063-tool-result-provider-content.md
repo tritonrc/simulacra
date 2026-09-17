@@ -113,6 +113,16 @@ The blocks travel with the text from execution to the provider request:
    them beside `(content, is_error)`, so a replayed turn builds the same
    `Message` the live one did.
 
+   This holds for every journal replay can consume today, which means
+   serial journals. A journal written by a live **parallel batch** cannot
+   be replayed at all, blocks or no blocks: the live path journals every
+   `ToolCall` before executing the batch, and the replay scan does not
+   tolerate a `ToolCall` between a call and its result
+   (tritonrc/simulacra#31). That defect predates this spec, lives in code
+   this spec does not touch, and is fixed on its own; when it is, the
+   blocks ride along because the entry already carries them and the
+   consumer already reads them.
+
 The runtime does not inspect a block's `value`. It is opaque here exactly
 as it is for assistant `thinking` blocks.
 
@@ -203,10 +213,11 @@ should do anything about it.
   more parallel-capable calls, where each result keeps its own blocks.
 - [ ] Capability denial, execution error, cancellation, and approval denial
   each produce a tool `Message` with empty `provider_content`.
-- [ ] Replaying a journal whose `ToolResult` entry carries blocks builds a
-  `Message` with the same `provider_content` as the live turn did; a
-  journal entry written before this spec (no `provider_content` key)
-  replays with an empty vector.
+- [ ] Replaying a serial journal whose `ToolResult` entry carries blocks
+  builds a `Message` with the same `provider_content` as the live turn did;
+  a journal entry written before this spec (no `provider_content` key)
+  replays with an empty vector. (Parallel-batch journals are excluded
+  until tritonrc/simulacra#31 is fixed.)
 - [ ] The Anthropic request for a tool message with no image blocks is
   byte-identical to the request built before this change.
 - [ ] The Anthropic request for a tool message with `n` `anthropic` image
