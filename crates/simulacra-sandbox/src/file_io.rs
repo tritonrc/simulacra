@@ -59,6 +59,7 @@ pub(crate) fn read_file_inner(
                     tool_name: "read_file".to_string(),
                     content: err.to_string(),
                     is_error: true,
+                    provider_content: Vec::new(),
                 },
             }) {
                 tracing::error!(error = %journal_err, "journal append failed for read_file error");
@@ -78,6 +79,7 @@ pub(crate) fn read_file_inner(
             tool_name: "read_file".to_string(),
             content: format!("read {} bytes from {}", data.len(), path),
             is_error: false,
+            provider_content: Vec::new(),
         },
     }) {
         tracing::error!(error = %err, "journal append failed for read_file");

@@ -50,8 +50,8 @@ use crate::activity_sink::{ActivitySink, NoopActivitySink};
 use crate::replay::JournalReplayIterator;
 use meters::RuntimeMeters;
 use replay_helpers::{
-    describe_replay_entry, entry_kind_name, replay_entries_match, replay_llm_response,
-    replay_tool_result,
+    ReplayedToolResult, describe_replay_entry, entry_kind_name, replay_entries_match,
+    replay_llm_response, replay_tool_result,
 };
 use tool_execution::execute_tool_live;
 use tool_runtime::{ToolCallRuntime, ToolExecutionResult};

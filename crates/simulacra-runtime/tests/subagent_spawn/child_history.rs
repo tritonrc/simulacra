@@ -447,6 +447,7 @@ fn parent_replay_reuses_recorded_spawn_agent_tool_result_without_a_live_child_ru
                 tool_name: "spawn_agent".into(),
                 content: r#"{"child_id":"child-1","placement":"researcher","exit_reason":"completed","message":"done","token_usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
     ];

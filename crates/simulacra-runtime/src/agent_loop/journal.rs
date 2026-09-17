@@ -105,7 +105,7 @@ impl AgentLoop {
         &mut self,
         tool_call_id: &str,
         tool_name: &str,
-    ) -> Result<Option<(String, bool)>, RuntimeError> {
+    ) -> Result<Option<ReplayedToolResult>, RuntimeError> {
         if !self.has_replay_entry() {
             return Ok(None);
         }
@@ -167,7 +167,7 @@ impl AgentLoop {
     pub(super) fn consume_replay_tool_result_at(
         &mut self,
         offset: usize,
-    ) -> Result<Option<(String, bool)>, RuntimeError> {
+    ) -> Result<Option<ReplayedToolResult>, RuntimeError> {
         let mut selected = None;
         for idx in 0..=offset {
             let kind = self

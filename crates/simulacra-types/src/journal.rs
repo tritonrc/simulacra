@@ -1,4 +1,4 @@
-use crate::{AgentId, Message, ResourceBudget, TokenUsage};
+use crate::{AgentId, Message, ProviderContentBlock, ResourceBudget, TokenUsage};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -73,6 +73,9 @@ pub enum JournalEntryKind {
         tool_name: String,
         content: String,
         is_error: bool,
+        /// Provider-native blocks the tool attached to this result.
+        #[serde(default)]
+        provider_content: Vec<ProviderContentBlock>,
     },
     ShellCommand {
         command: String,
@@ -303,6 +306,7 @@ mod tests {
             tool_name: "read_file".into(),
             content: "file contents here".into(),
             is_error: false,
+            provider_content: Vec::new(),
         });
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: JournalEntry = serde_json::from_str(&json).unwrap();
@@ -312,6 +316,7 @@ mod tests {
                 tool_name,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(tool_call_id.as_deref(), Some("tc-1"));
                 assert_eq!(tool_name, "read_file");
@@ -330,6 +335,7 @@ mod tests {
             tool_name: "exec".into(),
             content: "permission denied".into(),
             is_error: true,
+            provider_content: Vec::new(),
         });
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: JournalEntry = serde_json::from_str(&json).unwrap();
@@ -541,6 +547,7 @@ mod tests {
             tool_name: "".into(),
             content: "".into(),
             is_error: false,
+            provider_content: Vec::new(),
         });
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: JournalEntry = serde_json::from_str(&json).unwrap();

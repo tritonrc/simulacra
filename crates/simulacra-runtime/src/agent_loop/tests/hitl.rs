@@ -142,6 +142,7 @@ async fn request_input_tool_waits_for_input_response_and_journals_tool_result() 
                 tool_name,
                 content,
                 is_error: false,
+                ..
             } if id == "input-1"
                 && tool_name == REQUEST_INPUT_TOOL_NAME
                 && content == "human supplied context"
@@ -361,6 +362,7 @@ async fn tool_approval_denial_returns_error_result_without_executing_tool() {
     assert!(messages.iter().any(|message| {
         message.role == Role::Tool && message.content == "ERROR: approval denied: not allowed"
     }));
+    assert_tool_message_has_no_provider_content(&messages, "ERROR: approval denied: not allowed");
     while let Ok(event) = event_rx.try_recv() {
         assert!(
             !matches!(event, ActivityEvent::ToolStart { tool_call_id, .. } if tool_call_id == "deny-1"),
@@ -418,6 +420,7 @@ async fn replay_consumes_recorded_hitl_tool_result_without_waiting() {
                 tool_name: REQUEST_INPUT_TOOL_NAME.into(),
                 content: "recorded human response".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
     ];

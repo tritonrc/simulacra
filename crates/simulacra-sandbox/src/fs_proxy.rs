@@ -86,6 +86,7 @@ impl AgentCellFsProxy {
                 tool_name: operation.to_string(),
                 content,
                 is_error,
+                provider_content: Vec::new(),
             },
         }) {
             tracing::error!(error = %err, operation, "journal append failed for fs proxy");

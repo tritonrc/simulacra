@@ -75,12 +75,13 @@ async fn replay_frontier_after_recorded_request_transitions_to_live_provider() {
 fn replay_tool_result_preserves_error_state() {
     // Edge case: replay of ToolResult entries must preserve is_error so resumed runs do not
     // silently reinterpret tool failures as successful tool outputs.
-    let (content, is_error) = replay_tool_result(&JournalEntryKind::ToolResult {
+    let (content, is_error, _) = replay_tool_result(&JournalEntryKind::ToolResult {
         tool_call_id: Some("tc-1".into()),
 
         tool_name: "echo".into(),
         content: "tool exploded".into(),
         is_error: true,
+        provider_content: Vec::new(),
     })
     .expect("tool results should replay");
 

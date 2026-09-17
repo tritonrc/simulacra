@@ -145,6 +145,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
                 tool_name: "parallel_a".into(),
                 content: "replayed a".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
         replay_entry(
@@ -164,6 +165,7 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
                 tool_name: "parallel_b".into(),
                 content: "replayed b".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         ),
     ];
@@ -188,4 +190,131 @@ async fn replay_tool_batches_use_recorded_serial_results_even_when_tools_are_par
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>();
     assert_eq!(tool_contents, vec!["replayed a", "replayed b"]);
+}
+
+/// Echoes its arguments and declares itself safe to run in a parallel batch,
+/// so a batch can be given results that differ per call.
+struct ParallelEchoTool {
+    name: &'static str,
+}
+
+impl simulacra_types::Tool for ParallelEchoTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.into(),
+            description: "Echoes input".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    fn call(
+        &self,
+        arguments: serde_json::Value,
+        _capability: &CapabilityToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, simulacra_types::ToolError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { Ok(arguments) })
+    }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+}
+
+fn image_block(data: &str) -> simulacra_types::ProviderContentBlock {
+    simulacra_types::ProviderContentBlock {
+        provider: "anthropic".into(),
+        value: serde_json::json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": "image/png", "data": data }
+        }),
+    }
+}
+
+#[tokio::test]
+async fn each_parallel_batch_result_carries_its_own_provider_blocks() {
+    let blocks_a = vec![image_block("batch-a")];
+    let blocks_b = vec![image_block("batch-b-first"), image_block("batch-b-second")];
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Box::new(ParallelEchoTool {
+            name: "parallel_echo_a",
+        }))
+        .expect("parallel echo tool a should register");
+    tools
+        .register(Box::new(ParallelEchoTool {
+            name: "parallel_echo_b",
+        }))
+        .expect("parallel echo tool b should register");
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let mut agent = build_loop(
+        FakeProvider::new(vec![multi_tool_call_response(vec![
+            ToolCallMessage {
+                id: "tc-a".into(),
+                name: "parallel_echo_a".into(),
+                arguments: typed_echo_arguments("a text", &blocks_a),
+            },
+            ToolCallMessage {
+                id: "tc-b".into(),
+                name: "parallel_echo_b".into(),
+                arguments: typed_echo_arguments("b text", &blocks_b),
+            },
+        ])]),
+        tools,
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+    let mut messages = conversation("parallel blocks");
+
+    agent
+        .run_single_turn(&mut messages)
+        .await
+        .expect("parallel tool turn should succeed");
+
+    let a = tool_message(&messages, "tc-a");
+    let b = tool_message(&messages, "tc-b");
+    assert_eq!(a.content, "a text");
+    assert_eq!(b.content, "b text");
+    assert_eq!(a.provider_content, blocks_a);
+    assert_eq!(b.provider_content, blocks_b);
+
+    // The messages are only half of it: the journal entries have to carry the
+    // blocks too, attributed to the right call. Comparing every `ToolResult`
+    // entry as one ordered list fails on a dropped entry, on blocks written
+    // under the wrong `tool_call_id`, and on the two results being swapped.
+    let entries = journal
+        .read_all(&AgentId("test-agent".into()))
+        .expect("journal entries should be readable");
+    let recorded = entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            JournalEntryKind::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                provider_content,
+                ..
+            } => Some((
+                tool_call_id.clone(),
+                content.clone(),
+                *is_error,
+                provider_content.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        recorded,
+        vec![
+            (Some("tc-a".to_string()), "a text".to_string(), false, blocks_a),
+            (Some("tc-b".to_string()), "b text".to_string(), false, blocks_b),
+        ]
+    );
 }

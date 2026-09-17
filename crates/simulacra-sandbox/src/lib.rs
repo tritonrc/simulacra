@@ -329,6 +329,7 @@ impl AgentCell {
                     tool_name: "list_dir".to_string(),
                     content: format!("listed {} entries in {}", entries.len(), path),
                     is_error: false,
+                    provider_content: Vec::new(),
                 },
             });
             if let Err(err) = append_result {

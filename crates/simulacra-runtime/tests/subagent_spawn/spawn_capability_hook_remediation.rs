@@ -369,6 +369,7 @@ async fn s060_a26_a27_a36_nested_spawn_uses_immediate_callers_effective_capabili
                 tool_name,
                 content,
                 is_error: true,
+                ..
             } if tool_call_id == "s060-forbidden-root-only-placement"
                 && tool_name == "spawn_agent" =>
             {

@@ -134,6 +134,7 @@ async fn replay_resume_preserves_provider_native_content_for_live_continuation()
                 tool_name: "echo".into(),
                 content: "{\"msg\":\"from replay\"}".into(),
                 is_error: false,
+                provider_content: Vec::new(),
             },
         },
     ];

@@ -1,19 +1,26 @@
 use super::*;
 use tracing::Instrument;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// No `Eq`: `ProviderContentBlock` holds a `serde_json::Value`.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct ToolExecutionResult {
     pub(super) content: String,
     pub(super) is_error: bool,
     pub(super) cancelled: bool,
+    pub(super) provider_content: Vec<simulacra_types::ProviderContentBlock>,
 }
 
 impl ToolExecutionResult {
-    fn new(content: String, is_error: bool) -> Self {
+    fn new(
+        content: String,
+        is_error: bool,
+        provider_content: Vec<simulacra_types::ProviderContentBlock>,
+    ) -> Self {
         Self {
             content,
             is_error,
             cancelled: false,
+            provider_content,
         }
     }
 
@@ -22,6 +29,7 @@ impl ToolExecutionResult {
             content: "cancelled by user".into(),
             is_error: true,
             cancelled: true,
+            provider_content: Vec::new(),
         }
     }
 }
@@ -95,9 +103,9 @@ impl ToolCallRuntime {
         let span = tracing::Span::current();
         tokio::spawn(
             async move {
-                let (content, is_error) =
+                let (content, is_error, provider_content) =
                     execute_tool_live(tools.as_ref(), &call, &capability, &agent_name).await;
-                ToolExecutionResult::new(content, is_error)
+                ToolExecutionResult::new(content, is_error, provider_content)
             }
             .instrument(span),
         )
@@ -147,7 +155,9 @@ impl ToolCallRuntime {
     ) -> ToolExecutionResult {
         match result {
             Ok(result) => result,
-            Err(err) => ToolExecutionResult::new(format!("tool task failed: {err}"), true),
+            Err(err) => {
+                ToolExecutionResult::new(format!("tool task failed: {err}"), true, Vec::new())
+            }
         }
     }
 }
