@@ -1161,6 +1161,174 @@ mod tests {
         );
     }
 
+    /// The adapter passes `source` through; it does not require one. A block
+    /// with no `source` key is still forwarded, with a null source.
+    #[test]
+    fn build_request_parts_forwards_an_image_block_that_has_no_source() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content(
+                "X",
+                "plain result",
+                vec![ProviderContentBlock {
+                    provider: "anthropic".into(),
+                    value: json!({ "type": "image" }),
+                }],
+            ),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(
+            api_message_json(&request.messages[1]),
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "X",
+                    "content": [
+                        { "type": "text", "text": "plain result" },
+                        { "type": "image", "source": null }
+                    ]
+                }]
+            })
+        );
+    }
+
+    /// Which source shapes Anthropic accepts is the host's contract, not the
+    /// adapter's: a scalar and an array both go out as they came in.
+    #[test]
+    fn build_request_parts_forwards_a_source_that_is_not_an_object() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content(
+                "X",
+                "plain result",
+                vec![
+                    anthropic_image_block(json!("not-an-object")),
+                    anthropic_image_block(json!([1, 2])),
+                ],
+            ),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(
+            api_message_json(&request.messages[1]),
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "X",
+                    "content": [
+                        { "type": "text", "text": "plain result" },
+                        { "type": "image", "source": "not-an-object" },
+                        { "type": "image", "source": [1, 2] }
+                    ]
+                }]
+            })
+        );
+    }
+
+    /// A block whose `value` is not an object has no `type` to read, so it is
+    /// ignored like any other non-image block rather than emitted or panicked
+    /// on.
+    #[test]
+    fn build_request_parts_ignores_an_anthropic_block_whose_value_is_not_an_object() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content(
+                "X",
+                "plain result",
+                vec![
+                    ProviderContentBlock {
+                        provider: "anthropic".into(),
+                        value: json!("ignored-scalar-value"),
+                    },
+                    ProviderContentBlock {
+                        provider: "anthropic".into(),
+                        value: json!(7),
+                    },
+                    ProviderContentBlock {
+                        provider: "anthropic".into(),
+                        value: json!(["ignored-array-value"]),
+                    },
+                ],
+            ),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(serialized_request(&request), PLAIN_TOOL_RESULT_REQUEST);
+    }
+
+    /// An error result is carried as an `ERROR: ` prefix on the text (the wire
+    /// `is_error` stays off, which this spec does not change). The prefixed
+    /// text still leads the block array.
+    #[test]
+    fn build_request_parts_keeps_error_prefixed_text_ahead_of_the_images() {
+        let messages = vec![
+            assistant("use tool", &["X"]),
+            tool_with_provider_content(
+                "X",
+                "ERROR: tool blew up",
+                vec![anthropic_image_block(base64_source("after-the-error"))],
+            ),
+        ];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(
+            api_message_json(&request.messages[1]),
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "X",
+                    "content": [
+                        { "type": "text", "text": "ERROR: tool blew up" },
+                        { "type": "image", "source": base64_source("after-the-error") }
+                    ]
+                }]
+            })
+        );
+    }
+
+    /// A tool message with no `tool_call_id` is an orphan. It produces no
+    /// request message, and its images reach no other message either.
+    #[test]
+    fn build_request_parts_emits_nothing_for_an_orphan_tool_message_with_images() {
+        let mut orphan = tool_with_provider_content(
+            "X",
+            "plain result",
+            vec![anthropic_image_block(base64_source("orphan-image"))],
+        );
+        orphan.tool_call_id = None;
+        let messages = vec![assistant("use tool", &["X"]), orphan];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(
+            serde_json::to_value(&request).expect("request should serialize to JSON"),
+            json!({
+                "model": "claude-test",
+                "max_tokens": 1024,
+                "messages": [{
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "use tool" },
+                        {
+                            "type": "tool_use",
+                            "id": "X",
+                            "name": "tool_X",
+                            "input": { "id": "X" }
+                        }
+                    ]
+                }]
+            })
+        );
+    }
+
     #[test]
     fn build_request_parts_does_not_emit_assistant_image_blocks() {
         let mut message = assistant("assistant text", &[]);
