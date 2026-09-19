@@ -5,7 +5,9 @@ use crate::{Message, Role};
 
 mod budget;
 mod masking;
+mod pinned;
 mod window;
+mod window_unpinned;
 
 fn msg(role: Role, content: &str) -> Message {
     Message {
