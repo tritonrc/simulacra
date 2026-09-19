@@ -96,7 +96,6 @@ impl ContextStrategy for ObservationMaskingStrategy {
         } else {
             (false, masked)
         };
-        let _ = system;
 
         let mut start_idx = rest.len();
         for (i, msg) in rest.iter().enumerate().rev() {
@@ -113,7 +112,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
 
         // The kept window is valid but not yet bounded — see
         // `enforce_token_budget`.
-        enforce_token_budget(&mut result, token_limit);
+        enforce_token_budget(&mut result, token_limit, usize::from(system));
 
         result
     }

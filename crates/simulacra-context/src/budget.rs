@@ -96,19 +96,23 @@ pub(crate) fn truncate_to_tokens(content: &str, target_tokens: u64) -> String {
 /// every later turn rebuilt the same oversized prompt and the conversation
 /// wedged permanently.
 ///
+/// `fixed_head` is the count of leading messages the caller has already
+/// committed to: the system message plus any pinned prefix. No pass removes
+/// them, though content shrinking still applies.
+///
 /// Four passes, cheapest reclamation first:
 ///   0. leading normalization — drop non-User messages from the front (after
-///      system) until the window begins with a user turn, the shape providers
-///      require. Runs even when the window is within budget: the backward walk
-///      can select an assistant-first window on its own.
+///      the fixed head) until the window begins with a user turn, the shape
+///      providers require. Runs even when the window is within budget: the
+///      backward walk can select an assistant-first window on its own.
 ///   1. tool results are elided oldest-first (they dominate context), sparing
 ///      the most recent one — the model usually needs it verbatim to act;
 ///   2. remaining oversized content is truncated oldest-first to a prefix plus
 ///      a marker, so the newest turns keep their detail longest;
 ///   3. if the window STILL exceeds the budget (many small messages, each
 ///      under the floor; irreducible provider blocks), whole messages are
-///      dropped oldest-first, keeping the system message and at least the
-///      final message, then the front is re-normalized.
+///      dropped oldest-first, keeping the fixed head and at least the final
+///      message, then the front is re-normalized.
 ///
 /// `provider_content` is never rewritten, so thinking blocks round-trip
 /// unchanged. Passes 1–2 never remove a message; pass 3 removes whole
@@ -117,11 +121,15 @@ pub(crate) fn truncate_to_tokens(content: &str, target_tokens: u64) -> String {
 /// half.
 ///
 /// Guarantee: the result is bounded by `token_limit` plus an irreducible
-/// residual — the system message and the final message's floor/provider
-/// blocks. It is never proportional to transcript length or tool-output
-/// volume, the terms that actually run away.
-pub(crate) fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64) {
-    normalize_leading(messages);
+/// residual — the fixed head and the final message's floor/provider blocks. It
+/// is never proportional to transcript length or tool-output volume, the terms
+/// that actually run away.
+pub(crate) fn enforce_token_budget(
+    messages: &mut Vec<Message>,
+    token_limit: u64,
+    fixed_head: usize,
+) {
+    normalize_leading(messages, fixed_head);
 
     let mut costs: Vec<u64> = messages.iter().map(message_tokens).collect();
     let mut total: u64 = costs.iter().sum();
@@ -187,18 +195,18 @@ pub(crate) fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64
     // BLOCKS oldest-first. A block is one message, except an assistant carrying
     // tool_calls, which takes its contiguous tool results with it — dropping
     // half of that pair would leave a dangling tool_use or an orphaned
-    // tool_result, both provider-invalid. The system message, the block holding
+    // tool_result, both provider-invalid. The fixed head, the block holding
     // the last user turn (the transcript's anchor), and the final block are
     // never dropped; if only those remain, the residual is accepted — after
     // passes 1–2 it is a handful of floor-sized messages, not the
     // transcript-proportional overflow this pass exists to stop.
     if total > token_limit {
-        let offset = usize::from(messages[0].role == Role::System);
         let last_user = messages.iter().rposition(|m| m.role == Role::User);
 
-        // Block start indices, oldest-first.
+        // Block start indices, oldest-first. Blocks begin after the fixed
+        // head, so no committed index can land inside one.
         let mut blocks: Vec<(usize, usize)> = Vec::new(); // (start, end_exclusive)
-        let mut i = offset;
+        let mut i = fixed_head.min(messages.len());
         while i < messages.len() {
             let mut end = i + 1;
             if !messages[i].tool_calls.is_empty() {
@@ -232,21 +240,25 @@ pub(crate) fn enforce_token_budget(messages: &mut Vec<Message>, token_limit: u64
         if dropped.iter().any(|&d| d) {
             let mut keep = dropped.iter().map(|&d| !d);
             messages.retain(|_| keep.next().unwrap());
-            normalize_leading(messages);
+            normalize_leading(messages, fixed_head);
         }
     }
 }
 
-/// Drop non-User messages from the front of the window (after any system
-/// message) until the first conversational message is a user turn — the shape
-/// providers require — as long as a later user turn exists to anchor on. A
-/// window with no user message at all is left as-is rather than emptied.
-pub(crate) fn normalize_leading(messages: &mut Vec<Message>) {
-    let offset = usize::from(!messages.is_empty() && messages[0].role == Role::System);
-    let Some(rel_user) = messages[offset..].iter().position(|m| m.role == Role::User) else {
+/// Drop non-User messages from the front of the window (after the `fixed_head`
+/// messages the caller committed to) until the first conversational message is
+/// a user turn — the shape providers require — as long as a later user turn
+/// exists to anchor on. A window with no user message after the head is left
+/// as-is rather than emptied.
+pub(crate) fn normalize_leading(messages: &mut Vec<Message>, fixed_head: usize) {
+    let fixed_head = fixed_head.min(messages.len());
+    let Some(rel_user) = messages[fixed_head..]
+        .iter()
+        .position(|m| m.role == Role::User)
+    else {
         return;
     };
     if rel_user > 0 {
-        messages.drain(offset..offset + rel_user);
+        messages.drain(fixed_head..fixed_head + rel_user);
     }
 }

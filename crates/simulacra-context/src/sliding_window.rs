@@ -1,24 +1,29 @@
-//! The sliding-window strategy: keep the system prefix and as much of the
-//! recent tail as the token budget allows.
+//! The sliding-window strategy: keep the system prefix, a pinned prefix behind
+//! it, and as much of the recent tail as the token budget allows.
 
 use crate::budget::{enforce_token_budget, kept_window_start};
 use crate::{ContextStrategy, Message, Role, message_tokens};
 
 /// Sliding-window context strategy.
 ///
-/// Keeps the system message (first message if it has role System)
-/// plus as many recent messages as fit within the token limit.
-/// Sizes the kept window with a real BPE token counter (cl100k_base).
-pub struct SlidingWindowStrategy;
+/// Keeps the system message (first message if it has role System), a pinned
+/// prefix of messages directly after it, plus as many recent messages as fit
+/// within the token limit. Sizes the kept window with a real BPE token counter
+/// (cl100k_base).
+pub struct SlidingWindowStrategy {
+    pinned_prefix: usize,
+}
 
 impl SlidingWindowStrategy {
     pub fn new() -> Self {
-        Self
+        Self::with_pinned_prefix(0)
     }
 
-    /// Estimate tokens for a message with the shared BPE encoder.
-    fn estimate_tokens(message: &Message) -> u64 {
-        message_tokens(message)
+    /// The `n` messages directly after System are never evicted by the tail
+    /// scan, leading normalisation, or the block-drop pass. Content-shrinking
+    /// passes still apply to them.
+    pub fn with_pinned_prefix(n: usize) -> Self {
+        Self { pinned_prefix: n }
     }
 }
 
@@ -34,41 +39,40 @@ impl ContextStrategy for SlidingWindowStrategy {
             return Vec::new();
         }
 
-        let mut result = Vec::new();
-        let mut remaining = token_limit;
+        let offset = usize::from(messages[0].role == Role::System);
+        let head_end = (offset + self.pinned_prefix).min(messages.len());
+        let (head, rest) = messages.split_at(head_end);
 
-        // Preserve the system message if present.
-        let rest = if messages[0].role == Role::System {
-            let cost = Self::estimate_tokens(&messages[0]);
-            // System is always kept (its instructions matter even when it alone
-            // exceeds budget); saturate so we never underflow. We do NOT early
-            // return here — the kept-window fallback below still keeps the most
-            // recent user turn, so the result is never system-only / empty.
-            remaining = remaining.saturating_sub(cost);
-            result.push(messages[0].clone());
-            &messages[1..]
-        } else {
-            messages
-        };
+        // The head is always kept — its instructions and the frames rebuilt
+        // behind them matter even when they alone exceed the budget — so
+        // saturate rather than underflow, and do NOT early return: the
+        // kept-window fallback below still restores the most recent user turn.
+        let mut remaining = token_limit;
+        for message in head {
+            remaining = remaining.saturating_sub(message_tokens(message));
+        }
+        let mut result = head.to_vec();
 
         // Walk from the end to find the start index that fits within budget.
-        let mut start_idx = rest.len();
-        for (i, msg) in rest.iter().enumerate().rev() {
-            let cost = Self::estimate_tokens(msg);
+        let mut start = rest.len();
+        for (i, message) in rest.iter().enumerate().rev() {
+            let cost = message_tokens(message);
             if cost > remaining {
                 break;
             }
             remaining -= cost;
-            start_idx = i;
+            start = i;
         }
 
-        // Never start with orphaned tool results.
-        let start_idx = kept_window_start(rest, start_idx);
-        result.extend_from_slice(&rest[start_idx..]);
+        // Anchored on `rest`, not the whole slice: a pinned synthetic user
+        // frame must never act as the last-user anchor and drag the tail back
+        // in behind it.
+        let start = kept_window_start(rest, start);
+        result.extend_from_slice(&rest[start..]);
 
         // The kept window is valid but not yet bounded — see
         // `enforce_token_budget`.
-        enforce_token_budget(&mut result, token_limit);
+        enforce_token_budget(&mut result, token_limit, head_end);
 
         result
     }
