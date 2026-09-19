@@ -10,6 +10,7 @@ pub(super) struct RuntimeMeters {
     pub(super) budget_tokens_used: Counter<u64>,
     pub(super) budget_turns_used: Counter<u64>,
     pub(super) budget_exhaustions: Counter<u64>,
+    pub(super) context_messages_dropped: Counter<u64>,
 }
 
 impl RuntimeMeters {
@@ -34,6 +35,12 @@ impl RuntimeMeters {
                 budget_exhaustions: meter
                     .u64_counter("simulacra.budget.exhaustions")
                     .with_description("Total budget exhaustions")
+                    .build(),
+                context_messages_dropped: meter
+                    .u64_counter("simulacra.context.messages_dropped")
+                    .with_description(
+                        "Net message-count reduction of a provider request by context compaction",
+                    )
                     .build(),
             }
         })

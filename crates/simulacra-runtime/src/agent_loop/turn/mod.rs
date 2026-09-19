@@ -81,6 +81,20 @@ impl AgentLoop {
             context_limit,
         );
         let compacted = self.context_strategy.compact(messages, remaining_tokens);
+        let dropped = messages.len().saturating_sub(compacted.len());
+        if dropped > 0 {
+            // No attributes: the agent id already embeds a conversation id, so a
+            // per-conversation series would be unbounded.
+            RuntimeMeters::get()
+                .context_messages_dropped
+                .add(dropped as u64, &[]);
+            tracing::warn!(
+                agent_id = %self.config.agent_id.0,
+                input = messages.len(),
+                output = compacted.len(),
+                "context compaction dropped messages"
+            );
+        }
         let step = StepContext::new(compacted, tool_defs);
         let budget_before_operation = self.budget.clone();
 
