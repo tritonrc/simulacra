@@ -1,8 +1,8 @@
+use crate::test_support::{CapturingJournal, NullJournal};
 use crate::*;
 use simulacra_http::{HttpError, HttpRequest, HttpResponse as FhHttpResponse};
 use simulacra_types::{
-    AgentId, CheckpointData, JournalEntry, JournalEntryKind, JournalError, JournalStorage,
-    NetworkPermission, PathPattern, TokenUsage, VirtualFs,
+    JournalEntryKind, JournalStorage, NetworkPermission, PathPattern, VirtualFs,
 };
 use simulacra_vfs::MemoryFs;
 
@@ -54,93 +54,6 @@ fn cap_name_for_write_routes_non_memory_paths_to_paths_write() {
     assert_eq!(cap_name_for_write("/workspace/file.md"), "paths_write");
     assert_eq!(cap_name_for_write("/var/memory.bak/x"), "paths_write");
     assert_eq!(cap_name_for_write("/mntfoo/x"), "paths_write");
-}
-
-struct NullJournal;
-
-#[derive(Default)]
-struct CapturingJournal {
-    entries: Mutex<Vec<JournalEntry>>,
-}
-
-impl CapturingJournal {
-    fn entries(&self) -> Vec<JournalEntry> {
-        self.entries.lock().unwrap().clone()
-    }
-}
-
-impl JournalStorage for NullJournal {
-    fn append(&self, _entry: JournalEntry) -> Result<(), JournalError> {
-        Ok(())
-    }
-    fn read_all(&self, _agent_id: &AgentId) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(vec![])
-    }
-    fn query_token_usage(&self, _agent_id: &AgentId) -> Result<TokenUsage, JournalError> {
-        Ok(TokenUsage::default())
-    }
-    fn save_checkpoint(
-        &self,
-        _agent_id: &AgentId,
-        _after_entry: usize,
-        _data: CheckpointData,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-    fn fork_from(
-        &self,
-        _agent_id: &AgentId,
-        _checkpoint_idx: usize,
-    ) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(vec![])
-    }
-    fn read_from(
-        &self,
-        _agent_id: &AgentId,
-        _start_index: usize,
-    ) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(vec![])
-    }
-}
-
-impl JournalStorage for CapturingJournal {
-    fn append(&self, entry: JournalEntry) -> Result<(), JournalError> {
-        self.entries.lock().unwrap().push(entry);
-        Ok(())
-    }
-
-    fn read_all(&self, _agent_id: &AgentId) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(self.entries())
-    }
-
-    fn query_token_usage(&self, _agent_id: &AgentId) -> Result<TokenUsage, JournalError> {
-        Ok(TokenUsage::default())
-    }
-
-    fn save_checkpoint(
-        &self,
-        _agent_id: &AgentId,
-        _after_entry: usize,
-        _data: CheckpointData,
-    ) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    fn fork_from(
-        &self,
-        _agent_id: &AgentId,
-        _checkpoint_idx: usize,
-    ) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(vec![])
-    }
-
-    fn read_from(
-        &self,
-        _agent_id: &AgentId,
-        _start_index: usize,
-    ) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(vec![])
-    }
 }
 
 fn make_cell(capability: CapabilityToken) -> AgentCell {
@@ -425,7 +338,7 @@ fn shell_curl_increments_used_turns_for_both_shell_and_http() {
     );
 
     let result = cell
-        .execute_shell("curl http://allowed.example.com/data")
+        .execute_shell("curl https://allowed.example.com/data")
         .unwrap();
     assert_eq!(result.exit_code, 0);
 
@@ -461,7 +374,7 @@ fn shell_curl_records_both_shell_and_http_journal_entries() {
     );
 
     let result = cell
-        .execute_shell("curl http://api.example.com/endpoint")
+        .execute_shell("curl https://api.example.com/endpoint")
         .unwrap();
     assert_eq!(result.exit_code, 0);
 
@@ -473,7 +386,7 @@ fn shell_curl_records_both_shell_and_http_journal_entries() {
             &e.entry,
             JournalEntryKind::HttpRequest { method, url, status }
                 if method == "GET"
-                    && url == "http://api.example.com/endpoint"
+                    && url == "https://api.example.com/endpoint"
                     && *status == 200
         )
     });
@@ -487,7 +400,7 @@ fn shell_curl_records_both_shell_and_http_journal_entries() {
         matches!(
             &e.entry,
             JournalEntryKind::ShellCommand { command, exit_code }
-                if command == "curl http://api.example.com/endpoint" && *exit_code == 0
+                if command == "curl https://api.example.com/endpoint" && *exit_code == 0
         )
     });
     assert!(

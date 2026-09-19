@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use rquickjs::module::Module;
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Value};
@@ -49,6 +50,9 @@ impl JsRuntime {
         &self,
         root_source: &str,
     ) -> Result<PrefetchedRemoteModules, JsError> {
+        // The join in the caller only abandons this task on timeout; the walk
+        // itself must stop at the same deadline instead of fetching forever.
+        let deadline = Instant::now() + self.timeout;
         let mut stack = vec![("<eval>".to_string(), root_source.to_string())];
         let mut visited = HashSet::new();
         let mut allowed_remote_urls = HashSet::new();
@@ -106,6 +110,11 @@ impl JsRuntime {
                 let remote_source = if let Some(source) = cached {
                     source
                 } else {
+                    // The deadline binds EVERY fetch: a wide graph importing
+                    // many siblings must stop like a deep chain does.
+                    if Instant::now() >= deadline {
+                        return Err(JsError::Timeout);
+                    }
                     let fetcher = self.module_fetcher.as_ref().ok_or_else(|| {
                         JsError::Execution(format!(
                             "No module fetcher configured for remote module: '{resolved}'"
