@@ -229,3 +229,57 @@ fn a_prefix_of_zero_ignores_tool_calls_on_the_system_message() {
         "tool_calls on the system message must not move a boundary that is not pinned"
     );
 }
+
+/// The same two exchanges with a user turn between them, so the second one can
+/// outlive the boundary on a generous budget and be evicted on a tight one.
+fn exchanges_split_by_a_user_turn() -> Vec<Message> {
+    vec![
+        msg(Role::System, "system"),
+        msg(Role::User, "q"),
+        caller(&["c1", "c2"]),
+        result("c1"),
+        result("c2"),
+        msg(Role::User, "mid"),
+        caller(&["c3", "c4"]),
+        result("c4"),
+        result("c3"),
+        msg(Role::User, "next"),
+    ]
+}
+
+/// The sweep above accepts any extra complete exchange in the protected
+/// region, so an over-reaching boundary satisfies it; only an exact expected
+/// window turns pinning the next exchange into a failure. A prefix of 2 puts
+/// the boundary on the first exchange's owner and 3 puts it inside that
+/// exchange's result run; both must protect indices 0..5 and nothing beyond.
+fn assert_exact_window(messages: &[Message], limit: u64, expected: &[usize]) {
+    for pinned in [2, 3] {
+        let out = SlidingWindowStrategy::with_pinned_prefix(pinned).compact(messages, limit);
+        let want: Vec<Message> = expected.iter().map(|i| messages[*i].clone()).collect();
+        assert_eq!(
+            shape(&out),
+            shape(&want),
+            "pinned {pinned} limit {limit}: the protected region is the first exchange alone"
+        );
+    }
+}
+
+#[test]
+fn a_boundary_in_the_first_exchange_does_not_pin_the_second() {
+    let messages = two_exchanges();
+    // The second exchange leads with its assistant owner, so once it is outside
+    // the head the leading normalisation re-anchors the tail on "next" — on any
+    // budget. Pinning it instead would keep indices 5..8 here.
+    for limit in LIMITS {
+        assert_exact_window(&messages, limit, &[0, 1, 2, 3, 4, 8]);
+    }
+}
+
+#[test]
+fn an_unpinned_exchange_is_governed_by_the_budget() {
+    let messages = exchanges_split_by_a_user_turn();
+    let whole: Vec<usize> = (0..messages.len()).collect();
+
+    assert_exact_window(&messages, 1_000_000, &whole);
+    assert_exact_window(&messages, 0, &[0, 1, 2, 3, 4, 9]);
+}
