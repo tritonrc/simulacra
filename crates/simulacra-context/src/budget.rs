@@ -35,6 +35,31 @@ pub(crate) fn kept_window_start(msgs: &[Message], start: usize) -> usize {
     }
 }
 
+/// Extend an exclusive head boundary to the end of the tool exchange it lands
+/// in. An exchange is an assistant message carrying `tool_calls` plus the
+/// contiguous run of `Role::Tool` messages answering it; a boundary inside one
+/// leaves either a dangling call or an orphaned result, both provider-invalid.
+/// Walks back from the boundary over any results to the assistant that owns
+/// them, then forward to the end of that owner's run — by role and position,
+/// never by call id, so results answering out of order still travel together.
+pub(crate) fn exchange_edge(msgs: &[Message], head_end: usize) -> usize {
+    if head_end == 0 || head_end > msgs.len() {
+        return head_end;
+    }
+    let mut owner = head_end - 1;
+    while owner > 0 && msgs[owner].role == Role::Tool {
+        owner -= 1;
+    }
+    if msgs[owner].tool_calls.is_empty() {
+        return head_end;
+    }
+    let mut end = head_end;
+    while end < msgs.len() && msgs[end].role == Role::Tool {
+        end += 1;
+    }
+    end
+}
+
 /// Sum of [`message_tokens`] over a window. Only used by the test-module
 /// `total_tokens` helper, so it is compiled only under `cfg(test)` — otherwise
 /// `-D warnings` fails the plain build on dead code.

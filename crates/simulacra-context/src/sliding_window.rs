@@ -1,7 +1,7 @@
 //! The sliding-window strategy: keep the system prefix, a pinned prefix behind
 //! it, and as much of the recent tail as the token budget allows.
 
-use crate::budget::{enforce_token_budget, kept_window_start};
+use crate::budget::{enforce_token_budget, exchange_edge, kept_window_start};
 use crate::{ContextStrategy, Message, Role, message_tokens};
 
 /// Sliding-window context strategy.
@@ -22,6 +22,11 @@ impl SlidingWindowStrategy {
     /// The `n` messages directly after System are never evicted by the tail
     /// scan, leading normalisation, or the block-drop pass. Content-shrinking
     /// passes still apply to them.
+    ///
+    /// The caller's pinned prefix must be provider-valid on its own, i.e. begin
+    /// with a `Role::User` turn. More than `n` messages are protected when `n`
+    /// lands inside a tool exchange: the boundary moves to the end of that
+    /// exchange, which enlarges the protected residual accordingly.
     pub fn with_pinned_prefix(n: usize) -> Self {
         Self { pinned_prefix: n }
     }
@@ -44,12 +49,11 @@ impl ContextStrategy for SlidingWindowStrategy {
             .saturating_add(self.pinned_prefix)
             .min(messages.len());
 
-        // A pinned call's results are not orphans: keep them with the head so
-        // the boundary never lands between a tool_use and its tool_result.
-        if head_end > 0 && !messages[head_end - 1].tool_calls.is_empty() {
-            while head_end < messages.len() && messages[head_end].role == Role::Tool {
-                head_end += 1;
-            }
+        // Snap to an exchange edge: a boundary anywhere inside a call/result
+        // run would strand one half of it. Only pinning moves the boundary, so
+        // a prefix of zero keeps the System-only head untouched.
+        if self.pinned_prefix > 0 {
+            head_end = exchange_edge(messages, head_end);
         }
 
         let (head, rest) = messages.split_at(head_end);
