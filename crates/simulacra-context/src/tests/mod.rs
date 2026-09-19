@@ -6,6 +6,8 @@ use crate::{Message, Role};
 mod budget;
 mod masking;
 mod pinned;
+mod pinned_budget;
+mod pinned_validity;
 mod window;
 mod window_unpinned;
 
@@ -31,4 +33,14 @@ fn tool_msg(content: &str) -> Message {
 
 fn total_tokens(msgs: &[Message]) -> u64 {
     window_tokens(msgs)
+}
+
+/// The shape every hydrated turn arrives in: the system prompt, then the two
+/// synthetic frames the engine rebuilds each turn and pins behind it.
+fn head() -> Vec<Message> {
+    vec![
+        msg(Role::System, "system"),
+        msg(Role::User, "<conversation-state/>"),
+        msg(Role::User, "<history-window total=\"9\" hidden=\"4\">"),
+    ]
 }

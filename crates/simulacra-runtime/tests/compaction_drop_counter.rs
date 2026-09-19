@@ -31,21 +31,38 @@ const TURNS: &str = "simulacra.agent.turns";
 
 // ── Metric capture ───────────────────────────────────────────────
 
+/// One exported data point: its value and its attribute set. The attributes
+/// are kept because a total cannot see them — a counter labelled with the agent
+/// id sums to exactly the same number as an unlabelled one.
+#[derive(Clone, Debug)]
+struct Point {
+    value: u64,
+    attributes: Vec<String>,
+}
+
 #[derive(Clone, Default)]
-struct CounterCapture(Arc<Mutex<HashMap<String, u64>>>);
+struct CounterCapture(Arc<Mutex<HashMap<String, Vec<Point>>>>);
 
 impl PushMetricExporter for CounterCapture {
     async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
-        let mut totals = HashMap::new();
+        let mut series: HashMap<String, Vec<Point>> = HashMap::new();
         for scope in metrics.scope_metrics() {
             for metric in scope.metrics() {
                 if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
-                    let total: u64 = sum.data_points().map(|point| point.value()).sum();
-                    *totals.entry(metric.name().to_string()).or_insert(0) += total;
+                    let points = series.entry(metric.name().to_string()).or_default();
+                    for point in sum.data_points() {
+                        points.push(Point {
+                            value: point.value(),
+                            attributes: point
+                                .attributes()
+                                .map(|kv| format!("{}={}", kv.key, kv.value))
+                                .collect(),
+                        });
+                    }
                 }
             }
         }
-        *self.0.lock().unwrap() = totals;
+        *self.0.lock().unwrap() = series;
         Ok(())
     }
 
@@ -86,6 +103,10 @@ impl Telemetry {
     /// Cumulative totals, so a read is a point in a running series rather than
     /// a value that starts at zero.
     fn total(&self, name: &str) -> u64 {
+        self.points(name).iter().map(|point| point.value).sum()
+    }
+
+    fn points(&self, name: &str) -> Vec<Point> {
         self.provider
             .force_flush()
             .expect("the test reader should flush on demand");
@@ -94,8 +115,8 @@ impl Telemetry {
             .lock()
             .unwrap()
             .get(name)
-            .copied()
-            .unwrap_or(0)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -270,6 +291,20 @@ async fn a_truncating_strategy_counts_the_messages_it_dropped() {
         telemetry.total(DROPPED) - before,
         2,
         "{DROPPED} must move by the number of messages dropped, not merely exist"
+    );
+
+    // The agent id embeds a conversation id, so labelling this counter with it
+    // would open an unbounded series per conversation. A total cannot see that:
+    // only the data points can.
+    let points = telemetry.points(DROPPED);
+    assert_eq!(
+        points.len(),
+        1,
+        "{DROPPED} must be a single series, got {points:?}"
+    );
+    assert!(
+        points[0].attributes.is_empty(),
+        "{DROPPED} must carry no attributes, got {points:?}"
     );
 }
 

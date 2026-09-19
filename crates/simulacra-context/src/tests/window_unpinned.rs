@@ -1,6 +1,12 @@
-//! Sliding-window selection with an explicitly empty pinned prefix. Each test
-//! restates its counterpart's expected output as a literal, so a prefix of zero
-//! is pinned to today's behaviour rather than to whatever `new()` happens to do.
+//! Sliding-window selection with an explicitly empty pinned prefix, so a prefix
+//! of zero is pinned to today's behaviour rather than to whatever `new()`
+//! happens to do. Most tests here restate their counterpart's expected output
+//! as a literal. Four do not: `keeps_system_and_recent_*`,
+//! `sliding_window_system_exceeds_budget_still_preserved_*`,
+//! `sliding_window_keeps_a_coherent_block_when_recent_tools_exceed_budget_*`
+//! and `sliding_window_keeps_user_turn_when_single_message_exceeds_budget_*`
+//! are deliberate mirrors of the originals in `window.rs` and carry the same
+//! weaker shape assertions, unchanged on purpose.
 
 use super::{msg, tool_msg};
 use crate::{ContextStrategy, Message, Role, SlidingWindowStrategy};

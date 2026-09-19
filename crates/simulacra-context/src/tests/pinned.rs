@@ -1,16 +1,6 @@
-use super::msg;
+use super::{head, msg};
 use crate::{ContextStrategy, Message, Role, SlidingWindowStrategy};
 use simulacra_types::ToolCallMessage;
-
-/// The shape every hydrated turn arrives in: the system prompt, then the two
-/// synthetic frames the engine rebuilds each turn and pins behind it.
-fn head() -> Vec<Message> {
-    vec![
-        msg(Role::System, "system"),
-        msg(Role::User, "<conversation-state/>"),
-        msg(Role::User, "<history-window total=\"9\" hidden=\"4\">"),
-    ]
-}
 
 #[test]
 fn pinned_messages_survive_when_nothing_of_the_rest_fits_and_the_last_user_is_restored() {
@@ -57,40 +47,51 @@ fn a_pinned_assistant_directly_after_system_survives_normalisation() {
 }
 
 #[test]
-fn the_block_drop_pass_removes_middle_blocks_and_never_a_pinned_one() {
+fn the_block_drop_pass_drops_middle_blocks_and_stops_once_the_budget_is_met() {
     let mut messages = head();
-    for i in 0..5 {
-        messages.push(msg(Role::User, &format!("u{i} {}", "x".repeat(400))));
-        messages.push(msg(Role::Assistant, &format!("a{i} {}", "x".repeat(400))));
+    messages.push(msg(Role::User, &format!("BLOCK_0 {}", "x".repeat(400))));
+    for n in 1..5 {
+        messages.push(msg(
+            Role::Assistant,
+            &format!("BLOCK_{n} {}", "x".repeat(400)),
+        ));
     }
 
-    // Every conversational message here costs 54 tokens — under
-    // MIN_KEPT_CONTENT_TOKENS, so tool elision and truncation can reclaim
-    // nothing and the block-drop pass is the only pass that can act. The
-    // budget pays for the system message and the final exchange exactly, so
-    // the pinned frames are pure overflow: the pass is entered, reaches them,
-    // and must refuse to drop them.
-    let system_cost = crate::message_tokens(&messages[0]);
-    let last_block: u64 = messages[messages.len() - 2..]
-        .iter()
-        .map(crate::message_tokens)
-        .sum();
-    let out =
-        SlidingWindowStrategy::with_pinned_prefix(2).compact(&messages, system_cost + last_block);
+    // Why this sizing: every block costs the same K (role is not priced), and
+    // K is under MIN_KEPT_CONTENT_TOKENS, so elision and truncation reclaim
+    // nothing and the drop pass is the only pass that can act. The last-user
+    // anchor reaches back to BLOCK_0, so all five blocks enter that pass
+    // whatever the tail scan chose. A limit of head + 3K leaves room for three:
+    // BLOCK_0 (the last user turn) and BLOCK_4 (the final block) are protected,
+    // so the pass drops BLOCK_1 and BLOCK_2 — and is then inside budget, so it
+    // must stop and leave BLOCK_3 standing.
+    let head_cost: u64 = messages[..3].iter().map(crate::message_tokens).sum();
+    let costs: Vec<u64> = messages[3..].iter().map(crate::message_tokens).collect();
+    let k = costs[0];
+    assert!(
+        costs.iter().all(|&c| c == k) && k < crate::budget::MIN_KEPT_CONTENT_TOKENS,
+        "fixture premise: five equal blocks under the content floor, got {costs:?}"
+    );
+
+    let out = SlidingWindowStrategy::with_pinned_prefix(2).compact(&messages, head_cost + 3 * k);
 
     let contents: Vec<&str> = out.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents.len(), 6, "got {contents:?}");
     assert_eq!(contents[0], "system");
     assert_eq!(contents[1], "<conversation-state/>");
     assert_eq!(contents[2], "<history-window total=\"9\" hidden=\"4\">");
-    assert!(
-        contents.last().unwrap().starts_with("a4"),
-        "the final block must survive, got {:?}",
-        contents.last()
-    );
-    assert!(
-        !contents.iter().any(|c| c.starts_with("u1")),
-        "a middle block must still be droppable, got {contents:?}"
-    );
+    for kept in ["BLOCK_0", "BLOCK_3", "BLOCK_4"] {
+        assert!(
+            contents.iter().any(|c| c.starts_with(kept)),
+            "{kept} must survive the drop pass, got {contents:?}"
+        );
+    }
+    for gone in ["BLOCK_1", "BLOCK_2"] {
+        assert!(
+            !contents.iter().any(|c| c.starts_with(gone)),
+            "{gone} must be dropped, got {contents:?}"
+        );
+    }
 }
 
 #[test]

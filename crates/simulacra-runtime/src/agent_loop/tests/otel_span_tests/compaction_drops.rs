@@ -1,5 +1,17 @@
 use super::*;
 
+/// The drop report's own message text. Matching on it — rather than on the
+/// presence of fields whose names merely end in "input"/"output" — keeps any
+/// other event carrying such a field from standing in for this one.
+const DROP_REPORT: &str = "context compaction dropped messages";
+
+fn drop_reports(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+    events
+        .iter()
+        .filter(|event| event.fields.get("message").map(String::as_str) == Some(DROP_REPORT))
+        .collect()
+}
+
 /// Drives three provider turns against a strategy that keeps the three most
 /// recent messages after the system prompt. The conversation reaches the
 /// compaction call site at lengths 2, 4 and 6, so only the last of the three
@@ -39,15 +51,7 @@ async fn a_truncating_strategy_reports_the_messages_it_dropped() {
         .expect("three canned responses should complete the run");
 
     let events = captured_events.lock().unwrap();
-    let drop_reports: Vec<&CapturedEvent> = events
-        .iter()
-        .filter(|event| {
-            event
-                .fields
-                .keys()
-                .any(|field| field.ends_with("input") || field.ends_with("output"))
-        })
-        .collect();
+    let drop_reports = drop_reports(&events);
 
     assert_eq!(
         drop_reports.len(),
@@ -59,21 +63,25 @@ async fn a_truncating_strategy_reports_the_messages_it_dropped() {
 
     let input = report
         .fields
-        .iter()
-        .find(|(field, _)| field.ends_with("input"))
-        .map(|(_, value)| value.as_str())
+        .get("input")
+        .map(String::as_str)
         .expect("the drop report must name the pre-compaction message count");
     let output = report
         .fields
-        .iter()
-        .find(|(field, _)| field.ends_with("output"))
-        .map(|(_, value)| value.as_str())
+        .get("output")
+        .map(String::as_str)
         .expect("the drop report must name the post-compaction message count");
 
     assert_eq!(
         (input, output),
         ("6", "4"),
         "the reported lengths must be the real message counts at the call site"
+    );
+    assert_eq!(
+        report.fields.get("agent_id").map(String::as_str),
+        Some("test-agent"),
+        "the drop report must name the agent whose history was cut, got {:?}",
+        report.fields
     );
     assert_eq!(
         report.level, "WARN",
@@ -104,10 +112,7 @@ async fn a_passthrough_strategy_reports_nothing() {
         .expect("three canned responses should complete the run");
 
     let events = captured_events.lock().unwrap();
-    let reported: Vec<&CapturedEvent> = events
-        .iter()
-        .filter(|event| event.fields.keys().any(|field| field.ends_with("input")))
-        .collect();
+    let reported = drop_reports(&events);
 
     assert!(
         reported.is_empty(),
