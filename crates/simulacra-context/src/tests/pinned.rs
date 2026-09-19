@@ -1,4 +1,4 @@
-use super::{head, msg};
+use super::{head, msg, total_tokens};
 use crate::{ContextStrategy, Message, Role, SlidingWindowStrategy};
 use simulacra_types::ToolCallMessage;
 
@@ -29,21 +29,30 @@ fn pinned_messages_survive_when_nothing_of_the_rest_fits_and_the_last_user_is_re
 }
 
 #[test]
-fn a_pinned_assistant_directly_after_system_survives_normalisation() {
+fn normalisation_starts_at_the_pinned_boundary_not_the_system_offset() {
+    // A pinned prefix must itself be provider-valid, so it opens with a user
+    // turn; the assistant that normalisation has to reach sits after it.
     let messages = vec![
         msg(Role::System, "system"),
-        msg(Role::Assistant, "pinned note"),
+        msg(Role::User, "pinned note"),
+        msg(Role::Assistant, "stray"),
         msg(Role::User, "q"),
         msg(Role::Assistant, "a"),
     ];
 
     let out = SlidingWindowStrategy::with_pinned_prefix(1).compact(&messages, 1_000_000);
 
+    let contents: Vec<(&Role, &str)> = out.iter().map(|m| (&m.role, m.content.as_str())).collect();
     assert_eq!(
-        out[1].content, "pinned note",
-        "leading normalisation must not evict a pinned non-user message"
+        contents,
+        vec![
+            (&Role::System, "system"),
+            (&Role::User, "pinned note"),
+            (&Role::User, "q"),
+            (&Role::Assistant, "a"),
+        ],
+        "the pinned turn survives and the assistant above the boundary is drained"
     );
-    assert_eq!(out.len(), 4);
 }
 
 #[test]
@@ -158,12 +167,26 @@ fn the_reproduction_keeps_both_prefixes_and_the_latest_user() {
     messages.push(msg(Role::Assistant, "All done."));
     messages.push(msg(Role::User, "What distinctive fact did I tell you?"));
 
-    let out = SlidingWindowStrategy::with_pinned_prefix(2).compact(&messages, 800_000);
+    let limit = 800_000;
+    let out = SlidingWindowStrategy::with_pinned_prefix(2).compact(&messages, limit);
 
     assert_eq!(out[1].content, "<conversation-state/>");
     assert_eq!(out[2].content, "<history-window total=\"9\" hidden=\"4\">");
     assert_eq!(
         out.last().unwrap().content,
         "What distinctive fact did I tell you?"
+    );
+    // The contents above hold for an implementation that compacts nothing, and
+    // this input is a million tokens over the limit.
+    assert!(
+        total_tokens(&out) <= limit,
+        "the window must be inside the budget, got {} > {limit}",
+        total_tokens(&out)
+    );
+    assert!(
+        out.len() < messages.len(),
+        "the window must be shorter than the transcript, got {} of {}",
+        out.len(),
+        messages.len()
     );
 }

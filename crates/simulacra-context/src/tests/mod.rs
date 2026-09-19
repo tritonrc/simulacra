@@ -7,6 +7,7 @@ mod budget;
 mod masking;
 mod pinned;
 mod pinned_budget;
+mod pinned_exchange;
 mod pinned_validity;
 mod window;
 mod window_unpinned;

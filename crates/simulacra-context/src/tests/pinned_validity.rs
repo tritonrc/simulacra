@@ -38,10 +38,27 @@ fn exchange() -> Vec<Message> {
 #[test]
 fn no_pinned_boundary_splits_a_tool_exchange() {
     let messages = exchange();
+    let whole = contents(&messages);
+    // Pinned 1 ends the head on the user turn, so normalisation drains the
+    // exchange sitting above the boundary. Every other boundary keeps it.
+    let drained = vec![
+        (&Role::System, "system"),
+        (&Role::User, "q"),
+        (&Role::User, "next"),
+    ];
+
     for pinned in 0..=4 {
         // A budget far above the fixture's cost, so the pinned prefix is the
         // only thing that can move the window boundary.
         let out = SlidingWindowStrategy::with_pinned_prefix(pinned).compact(&messages, 1_000_000);
+
+        // The pairing loops below iterate zero times over a window stripped of
+        // calls and results, so pin what the window actually holds first.
+        assert_eq!(
+            &contents(&out),
+            if pinned == 1 { &drained } else { &whole },
+            "pinned {pinned}: unexpected window"
+        );
 
         for result in out.iter().filter(|m| m.role == Role::Tool) {
             let id = result
@@ -85,16 +102,26 @@ fn a_prefix_at_the_numeric_ceiling_pins_everything_after_system() {
 #[test]
 fn a_pinned_leading_message_survives_without_a_system_prompt() {
     // No System at index 0, so the head offset is 0 and the pinned prefix is
-    // the only thing holding this assistant in place: at budget 0 the tail scan
-    // selects nothing and leading normalisation would otherwise evict it.
-    let messages = vec![msg(Role::Assistant, "pinned note"), msg(Role::User, "q")];
+    // the only thing holding this turn in place. A pinned prefix must be
+    // provider-valid, so it is a user turn and the assistant follows it.
+    let messages = vec![
+        msg(Role::User, "pinned note"),
+        msg(Role::Assistant, "stray"),
+        msg(Role::User, "q"),
+    ];
 
-    let out = SlidingWindowStrategy::with_pinned_prefix(1).compact(&messages, 0);
+    // At 0 the tail scan selects nothing; at a budget that fits everything
+    // normalisation drains the assistant above the boundary. Either way the
+    // pinned turn leads the window.
+    for limit in [0, 1_000_000] {
+        let out = SlidingWindowStrategy::with_pinned_prefix(1).compact(&messages, limit);
 
-    assert_eq!(
-        contents(&out),
-        vec![(&Role::Assistant, "pinned note"), (&Role::User, "q")]
-    );
+        assert_eq!(
+            contents(&out),
+            vec![(&Role::User, "pinned note"), (&Role::User, "q")],
+            "limit {limit}"
+        );
+    }
 }
 
 #[test]
