@@ -39,7 +39,7 @@ impl RuntimeMeters {
                 context_messages_dropped: meter
                     .u64_counter("simulacra.context.messages_dropped")
                     .with_description(
-                        "Messages removed from a provider request by context compaction",
+                        "Net message-count reduction of a provider request by context compaction",
                     )
                     .build(),
             }

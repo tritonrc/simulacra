@@ -40,7 +40,18 @@ impl ContextStrategy for SlidingWindowStrategy {
         }
 
         let offset = usize::from(messages[0].role == Role::System);
-        let head_end = (offset + self.pinned_prefix).min(messages.len());
+        let mut head_end = offset
+            .saturating_add(self.pinned_prefix)
+            .min(messages.len());
+
+        // A pinned call's results are not orphans: keep them with the head so
+        // the boundary never lands between a tool_use and its tool_result.
+        if head_end > 0 && !messages[head_end - 1].tool_calls.is_empty() {
+            while head_end < messages.len() && messages[head_end].role == Role::Tool {
+                head_end += 1;
+            }
+        }
+
         let (head, rest) = messages.split_at(head_end);
 
         // The head is always kept — its instructions and the frames rebuilt
