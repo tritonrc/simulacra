@@ -23,10 +23,18 @@ impl SlidingWindowStrategy {
     /// scan, leading normalisation, or the block-drop pass. Content-shrinking
     /// passes still apply to them.
     ///
-    /// The caller's pinned prefix must be provider-valid on its own, i.e. begin
-    /// with a `Role::User` turn. More than `n` messages are protected when `n`
-    /// lands inside a tool exchange: the boundary moves to the end of that
-    /// exchange, which enlarges the protected residual accordingly.
+    /// A non-empty pinned prefix must begin with a `Role::User` turn: pinning an
+    /// assistant directly after System would hold a shape providers reject, and
+    /// silently un-pinning it would contradict the pin.
+    ///
+    /// More than `n` messages are protected when `n` lands inside a tool
+    /// exchange — the boundary moves to the end of that exchange, so a complete
+    /// contiguous exchange crossing it is kept whole — which enlarges the
+    /// protected residual accordingly.
+    ///
+    /// Normalisation still runs on the messages after the pinned range, so an
+    /// assistant turn immediately following it is dropped whichever budget
+    /// applies; the pin protects its own range, not what abuts it.
     pub fn with_pinned_prefix(n: usize) -> Self {
         Self { pinned_prefix: n }
     }
