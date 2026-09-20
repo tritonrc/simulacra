@@ -7,4 +7,5 @@ mod path_and_crypto;
 mod process_and_fetch;
 mod remote_modules;
 mod runtime_core;
+mod walk_deadline;
 mod web_globals;

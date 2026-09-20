@@ -415,3 +415,15 @@ pub enum SandboxError {
 #[cfg(test)]
 #[path = "unit_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod http_fetch_guard_tests;
+
+#[cfg(test)]
+mod http_fetch_guard_support;
+
+#[cfg(test)]
+mod http_fetch_side_paths_tests;
+
+#[cfg(test)]
+mod test_support;
