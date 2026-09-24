@@ -5,7 +5,7 @@ const S060_PLACEMENT_DESCRIPTION_PREFIX: &str = "Where I should run this child a
 const S060_INSTRUCTIONS_DESCRIPTION: &str = "How I should shape this child for the delegated task, including any relevant available skills and evidence requirements. This does not grant capabilities.";
 const S060_TASK_DESCRIPTION: &str = "The concrete, bounded work I should hand to the child.";
 const S060_BUDGET_DESCRIPTION: &str = "The maximum resources I should reserve for this child; each nonzero value must fit within my remaining budget and the placement limits, while zero requests unlimited capacity under the rules below.";
-const S060_CAPABILITIES_DESCRIPTION: &str = "Capabilities I should remove from this child's placement envelope; these values can only attenuate access.";
+const S060_CAPABILITIES_DESCRIPTION: &str = "What this child keeps. A field I supply is intersected with the placement envelope and my own grants, so it can only narrow access; a field I omit inherits the envelope, bounded by my grants.";
 
 fn s060_budget(
     max_tokens: u64,
@@ -303,14 +303,14 @@ fn s060_a08_spawn_schema_is_flat_and_matches_the_complete_contract() {
             "type": "object",
             "description": S060_CAPABILITIES_DESCRIPTION,
             "properties": {
-                "network": { "type": "array", "items": { "type": "string" } },
-                "mcp_tools": { "type": "array", "items": { "type": "string" } },
-                "shell": { "type": "boolean" },
-                "javascript": { "type": "boolean" },
-                "python": { "type": "boolean" },
-                "paths_write": { "type": "array", "items": { "type": "string" } },
-                "paths_read": { "type": "array", "items": { "type": "string" } },
-                "spawn_placements": { "type": "array", "items": { "type": "string" } }
+                "network": { "type": "array", "items": { "type": "string" }, "description": "Network grants this child keeps." },
+                "mcp_tools": { "type": "array", "items": { "type": "string" }, "description": "MCP tool grants this child keeps, as exact grant strings such as mcp:<server>:<tool>." },
+                "shell": { "type": "boolean", "description": "Whether this child keeps shell access; true keeps it only where the envelope grants it." },
+                "javascript": { "type": "boolean", "description": "Whether this child keeps JavaScript execution; true keeps it only where the envelope grants it." },
+                "python": { "type": "boolean", "description": "Whether this child keeps Python execution; true keeps it only where the envelope grants it." },
+                "paths_write": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps write access to." },
+                "paths_read": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps read access to." },
+                "spawn_placements": { "type": "array", "items": { "type": "string" }, "description": "Placements this child keeps permission to spawn its own children into." }
             },
             "additionalProperties": false
         })
