@@ -204,16 +204,16 @@ The `spawn_agent` schema is a flat object:
     },
     "capabilities": {
       "type": "object",
-      "description": "Capabilities I should remove from this child's placement envelope; these values can only attenuate access.",
+      "description": "What this child keeps. A field I supply is intersected with the placement envelope and my own grants, so it can only narrow access; a field I omit inherits the envelope, bounded by my grants.",
       "properties": {
-        "network": { "type": "array", "items": { "type": "string" } },
-        "mcp_tools": { "type": "array", "items": { "type": "string" } },
-        "shell": { "type": "boolean" },
-        "javascript": { "type": "boolean" },
-        "python": { "type": "boolean" },
-        "paths_write": { "type": "array", "items": { "type": "string" } },
-        "paths_read": { "type": "array", "items": { "type": "string" } },
-        "spawn_placements": { "type": "array", "items": { "type": "string" } }
+        "network": { "type": "array", "items": { "type": "string" }, "description": "Network grants this child keeps." },
+        "mcp_tools": { "type": "array", "items": { "type": "string" }, "description": "MCP tool grants this child keeps, as exact grant strings such as mcp:<server>:<tool>." },
+        "shell": { "type": "boolean", "description": "Whether this child keeps shell access; true keeps it only where the envelope grants it." },
+        "javascript": { "type": "boolean", "description": "Whether this child keeps JavaScript execution; true keeps it only where the envelope grants it." },
+        "python": { "type": "boolean", "description": "Whether this child keeps Python execution; true keeps it only where the envelope grants it." },
+        "paths_write": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps write access to." },
+        "paths_read": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps read access to." },
+        "spawn_placements": { "type": "array", "items": { "type": "string" }, "description": "Placements this child keeps permission to spawn its own children into." }
       },
       "additionalProperties": false
     }
