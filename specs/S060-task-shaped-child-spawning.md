@@ -188,7 +188,7 @@ The `spawn_agent` schema is a flat object:
     },
     "task": {
       "type": "string",
-      "description": "The concrete, bounded work I should hand to the child."
+      "description": "The concrete, bounded work I should hand to the child. Naming a tool or operation here does not grant it."
     },
     "budget": {
       "type": "object",
@@ -204,10 +204,10 @@ The `spawn_agent` schema is a flat object:
     },
     "capabilities": {
       "type": "object",
-      "description": "What this child keeps. A field I supply is intersected with the placement envelope and my own grants, so it can only narrow access; a field I omit inherits the envelope, bounded by my grants.",
+      "description": "What this child keeps. A field I supply is intersected with the placement envelope and my own grants, so it can only narrow access; a field I omit inherits the envelope, bounded by my grants. An empty list retains no grants in that field; false disables that capability.",
       "properties": {
         "network": { "type": "array", "items": { "type": "string" }, "description": "Network grants this child keeps." },
-        "mcp_tools": { "type": "array", "items": { "type": "string" }, "description": "MCP tool grants this child keeps, as exact grant strings such as mcp:<server>:<tool>." },
+        "mcp_tools": { "type": "array", "items": { "type": "string" }, "description": "MCP tool grants this child keeps, as exact grant strings such as mcp:<server>:<tool>. Each MCP tool call requires a matching grant." },
         "shell": { "type": "boolean", "description": "Whether this child keeps shell access; true keeps it only where the envelope grants it." },
         "javascript": { "type": "boolean", "description": "Whether this child keeps JavaScript execution; true keeps it only where the envelope grants it." },
         "python": { "type": "boolean", "description": "Whether this child keeps Python execution; true keeps it only where the envelope grants it." },
