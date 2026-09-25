@@ -3,9 +3,9 @@ use simulacra_runtime::SpawnAgentGuidance;
 const S060_DEFAULT_SPAWN_DESCRIPTION: &str = "I can start a supervised child for one concrete, bounded, independent task. Choose where I run it with placement and shape how it works with instructions; placement supplies an environment and capabilities, not a role. I return a live handle, not the child's final answer.";
 const S060_PLACEMENT_DESCRIPTION_PREFIX: &str = "Where I should run this child and which host-supplied capability envelope it receives. This selects placement, not a role.";
 const S060_INSTRUCTIONS_DESCRIPTION: &str = "How I should shape this child for the delegated task, including any relevant available skills and evidence requirements. This does not grant capabilities.";
-const S060_TASK_DESCRIPTION: &str = "The concrete, bounded work I should hand to the child.";
+const S060_TASK_DESCRIPTION: &str = "The concrete, bounded work I should hand to the child. Naming a tool or operation here does not grant it.";
 const S060_BUDGET_DESCRIPTION: &str = "The maximum resources I should reserve for this child; each nonzero value must fit within my remaining budget and the placement limits, while zero requests unlimited capacity under the rules below.";
-const S060_CAPABILITIES_DESCRIPTION: &str = "What this child keeps. A field I supply is intersected with the placement envelope and my own grants, so it can only narrow access; a field I omit inherits the envelope, bounded by my grants.";
+const S060_CAPABILITIES_DESCRIPTION: &str = "What this child keeps. A field I supply is intersected with the placement envelope and my own grants, so it can only narrow access; a field I omit inherits the envelope, bounded by my grants. An empty list retains no grants in that field; false disables that capability.";
 
 fn s060_budget(
     max_tokens: u64,
@@ -304,7 +304,7 @@ fn s060_a08_spawn_schema_is_flat_and_matches_the_complete_contract() {
             "description": S060_CAPABILITIES_DESCRIPTION,
             "properties": {
                 "network": { "type": "array", "items": { "type": "string" }, "description": "Network grants this child keeps." },
-                "mcp_tools": { "type": "array", "items": { "type": "string" }, "description": "MCP tool grants this child keeps, as exact grant strings such as mcp:<server>:<tool>." },
+                "mcp_tools": { "type": "array", "items": { "type": "string" }, "description": "MCP tool grants this child keeps, as exact grant strings such as mcp:<server>:<tool>. Each MCP tool call requires a matching grant." },
                 "shell": { "type": "boolean", "description": "Whether this child keeps shell access; true keeps it only where the envelope grants it." },
                 "javascript": { "type": "boolean", "description": "Whether this child keeps JavaScript execution; true keeps it only where the envelope grants it." },
                 "python": { "type": "boolean", "description": "Whether this child keeps Python execution; true keeps it only where the envelope grants it." },
