@@ -1,5 +1,5 @@
-//! Streaming responses: the idle timeout that bounds them, Anthropic's
-//! in-stream `error` event, and a body read that gives out.
+//! Failures after response headers: the idle timeout that bounds a read,
+//! Anthropic's in-stream `error` event, and a body read that gives out.
 
 use std::time::Duration;
 
@@ -39,14 +39,17 @@ pub(super) fn from_event(event: &serde_json::Value) -> ProviderError {
     }
 }
 
-/// A stream that stops sending is a transient failure worth a retry.
-pub(super) fn stream_read_error(err: reqwest::Error) -> ProviderError {
-    if err.is_timeout() {
-        return ProviderError::Transport(
-            "the provider stopped sending the streamed response; retry.".into(),
-        );
+/// A response that stops sending past the idle timeout is a transient
+/// failure worth a retry. `part` names what was being read.
+pub(super) fn read_error(part: &'static str) -> impl Fn(reqwest::Error) -> ProviderError {
+    move |err| {
+        if err.is_timeout() {
+            return ProviderError::Transport(format!(
+                "the provider stopped sending the {part}; retry."
+            ));
+        }
+        ProviderError::Other(format!("failed to read {part}: {err}"))
     }
-    ProviderError::Other(format!("failed to read response chunk: {err}"))
 }
 
 #[cfg(test)]
@@ -174,32 +177,56 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn a_stream_that_stops_sending_after_headers_is_a_retryable_transport_failure() {
+    /// Serves headers and the start of a body, then stops sending until the
+    /// test is done with it.
+    fn stalling_server(
+        head: &'static [u8],
+    ) -> (String, mpsc::Sender<()>, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
         let (release, released) = mpsc::channel::<()>();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let _ = socket.read(&mut [0_u8; 4096]);
-            let _ = socket.write_all(
-                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                  transfer-encoding: chunked\r\n\r\n6\r\ndata: \r\n",
-            );
+            let _ = socket.write_all(head);
             let _ = released.recv();
         });
+        (url, release, server)
+    }
 
+    fn assert_retryable_transport<T>(result: Result<T, ProviderError>) {
+        match result {
+            Err(error @ ProviderError::Transport(_)) => assert!(error.is_retryable()),
+            Err(other) => panic!("expected a transport failure, got {other:?}"),
+            Ok(_) => panic!("a stalled response must not complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_stops_sending_after_headers_is_a_retryable_transport_failure() {
+        let (url, release, server) = stalling_server(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+              transfer-encoding: chunked\r\n\r\n6\r\ndata: \r\n",
+        );
         struct Sink;
         impl HttpStreamSink for Sink {}
         let client = ReqwestClient::with_read_timeout(Duration::from_millis(300));
         let result = client.post_stream(&url, &[], b"{}", &mut Sink).await;
         let _ = release.send(());
         server.join().unwrap();
+        assert_retryable_transport(result);
+    }
 
-        match result {
-            Err(error @ ProviderError::Transport(_)) => assert!(error.is_retryable()),
-            Err(other) => panic!("expected a transport failure, got {other:?}"),
-            Ok(_) => panic!("a stalled stream must not complete"),
-        }
+    #[tokio::test]
+    async fn a_response_body_that_stops_sending_is_a_retryable_transport_failure() {
+        let (url, release, server) = stalling_server(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+              content-length: 100\r\n\r\n{\"id\":",
+        );
+        let client = ReqwestClient::with_read_timeout(Duration::from_millis(300));
+        let result = client.post(&url, &[], b"{}").await;
+        let _ = release.send(());
+        server.join().unwrap();
+        assert_retryable_transport(result);
     }
 }

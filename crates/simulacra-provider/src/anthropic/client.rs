@@ -14,7 +14,7 @@ use simulacra_types::{
 use tracing::Instrument;
 
 use super::output_cap;
-use super::stream_error::{self, stream_read_error};
+use super::stream_error::{self, read_error};
 use crate::transport::{TransportStage, transport_error};
 
 // ── OTel meters ──────────────────────────────────────────────────
@@ -182,10 +182,7 @@ impl HttpClient for ReqwestClient {
                         .map(|val| (k.as_str().to_lowercase(), val.to_owned()))
                 })
                 .collect();
-            let resp_body = resp
-                .bytes()
-                .await
-                .map_err(|e| ProviderError::Other(format!("failed to read response body: {e}")))?;
+            let resp_body = resp.bytes().await.map_err(read_error("response body"))?;
 
             Ok(HttpResponse {
                 status,
@@ -229,7 +226,7 @@ impl HttpClient for ReqwestClient {
             sink.begin(status, &resp_headers)?;
 
             let mut resp_body = Vec::new();
-            while let Some(chunk) = resp.chunk().await.map_err(stream_read_error)? {
+            while let Some(chunk) = resp.chunk().await.map_err(read_error("response chunk"))? {
                 resp_body.extend_from_slice(&chunk);
                 sink.chunk(&chunk)?;
             }
