@@ -546,7 +546,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 serde_json::from_str(&args_str).unwrap_or_else(|e| {
                     tracing::warn!(
                         tool_name = name.as_str(),
-                        raw_args = args_str.as_str(),
+                        raw_args_len = args_str.len(),
                         error = %e,
                         "tool_use input_json failed to parse, falling back to empty object"
                     );

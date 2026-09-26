@@ -424,7 +424,7 @@ impl OpenAiProvider {
                             serde_json::from_str(args_str).unwrap_or_else(|e| {
                                 tracing::warn!(
                                     tool_name = name.as_str(),
-                                    raw_args = args_str,
+                                    raw_args_len = args_str.len(),
                                     error = %e,
                                     "tool call arguments failed to parse as JSON, falling back to empty object"
                                 );
@@ -643,7 +643,7 @@ impl<'a> OpenAiSseAccumulator<'a> {
                     serde_json::from_str(&args_str).unwrap_or_else(|e| {
                         tracing::warn!(
                             tool_name = name.as_str(),
-                            raw_args = args_str.as_str(),
+                            raw_args_len = args_str.len(),
                             error = %e,
                             "tool call arguments failed to parse as JSON, falling back to empty object"
                         );
