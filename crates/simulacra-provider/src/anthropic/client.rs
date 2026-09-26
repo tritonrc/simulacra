@@ -13,6 +13,8 @@ use simulacra_types::{
 };
 use tracing::Instrument;
 
+use super::output_cap;
+use super::stream_error::{self, stream_read_error};
 use crate::transport::{TransportStage, transport_error};
 
 // ── OTel meters ──────────────────────────────────────────────────
@@ -134,15 +136,18 @@ pub(crate) struct HttpResponse {
 
 // ── Reqwest-backed client ──────────────────────────────────────────
 
-struct ReqwestClient {
+pub(super) struct ReqwestClient {
     client: reqwest::Client,
 }
 
 impl ReqwestClient {
     fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        Self::with_read_timeout(stream_error::READ_IDLE_TIMEOUT)
+    }
+
+    pub(super) fn with_read_timeout(read_timeout: std::time::Duration) -> Self {
+        let client = stream_error::idle_timeout_client(read_timeout);
+        Self { client }
     }
 }
 
@@ -224,11 +229,7 @@ impl HttpClient for ReqwestClient {
             sink.begin(status, &resp_headers)?;
 
             let mut resp_body = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|e| ProviderError::Other(format!("failed to read response chunk: {e}")))?
-            {
+            while let Some(chunk) = resp.chunk().await.map_err(stream_read_error)? {
                 resp_body.extend_from_slice(&chunk);
                 sink.chunk(&chunk)?;
             }
@@ -252,6 +253,7 @@ pub struct AnthropicProvider {
     api_key: String,
     model: String,
     http: Box<dyn HttpClient>,
+    max_output_tokens: u32,
 }
 
 impl AnthropicProvider {
@@ -261,7 +263,14 @@ impl AnthropicProvider {
             api_key: api_key.into().trim().to_owned(),
             model: model.into(),
             http: Box::new(ReqwestClient::new()),
+            max_output_tokens: output_cap::DEFAULT_MAX_OUTPUT_TOKENS,
         }
+    }
+
+    /// Per-request output token cap (`max_tokens` on the wire).
+    pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
+        self.max_output_tokens = max_output_tokens.max(1);
+        self
     }
 
     /// Create a provider with a custom HTTP client (for testing).
@@ -275,6 +284,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             model: model.into(),
             http,
+            max_output_tokens: output_cap::DEFAULT_MAX_OUTPUT_TOKENS,
         }
     }
 
@@ -364,6 +374,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
             Some("content_block_stop") => self.process_content_block_stop(&event),
             Some("message_delta") => self.process_message_delta(&event),
             Some("message_stop") => {}
+            Some("error") => return Err(stream_error::from_event(&event)),
             _ => {}
         }
         Ok(())
@@ -703,14 +714,7 @@ impl Provider for AnthropicProvider {
         }
 
         // Build and serialize the request body synchronously.
-        // Derive max_tokens from remaining budget, clamped to a sane range.
-        // A budget max_tokens of 0 means unlimited — use the default cap.
-        let max_tokens = if budget.max_tokens == 0 {
-            8192u32
-        } else {
-            let remaining = budget.max_tokens.saturating_sub(budget.used_tokens);
-            (remaining.min(8192) as u32).max(1)
-        };
+        let max_tokens = output_cap::request_max_tokens(budget, self.max_output_tokens);
         let api_req = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
         let body = match serde_json::to_vec(&api_req) {
             Ok(b) => b,
@@ -924,12 +928,7 @@ impl StreamingProvider for AnthropicProvider {
             return Box::pin(async move { Err(ProviderError::BudgetExhausted(e)) });
         }
 
-        let max_tokens = if budget.max_tokens == 0 {
-            8192u32
-        } else {
-            let remaining = budget.max_tokens.saturating_sub(budget.used_tokens);
-            (remaining.min(8192) as u32).max(1)
-        };
+        let max_tokens = output_cap::request_max_tokens(budget, self.max_output_tokens);
         let api_req = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
         let body = match serde_json::to_vec(&api_req) {
             Ok(b) => b,
