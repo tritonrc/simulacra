@@ -125,6 +125,14 @@ mod tests {
         assert_eq!(bodies.lock().unwrap()[0]["max_tokens"], 16_000);
     }
 
+    #[test]
+    fn the_configured_cap_is_readable_back() {
+        let (configured, _) = capped_provider(Some(128_000));
+        assert_eq!(configured.max_output_tokens(), 128_000);
+        let (default, _) = capped_provider(None);
+        assert_eq!(default.max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
     #[tokio::test]
     async fn unconfigured_provider_keeps_the_default_cap() {
         let (provider, bodies) = capped_provider(None);

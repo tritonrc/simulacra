@@ -229,4 +229,54 @@ mod tests {
         server.join().unwrap();
         assert_retryable_transport(result);
     }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Tool arguments carry file contents, so the parse-failure warning
+    /// names their size, never the text.
+    #[tokio::test]
+    async fn malformed_tool_arguments_are_logged_by_length_not_content() {
+        const SSE: &str = concat!(
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"workspace_write\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"content\\\":\\\"SECRET_FILE_BODY\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        );
+        let logs = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let _ = stream(SSE).await;
+
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("failed to parse"),
+            "the warning fires: {text}"
+        );
+        assert!(text.contains("raw_args_len=28"), "{text}");
+        assert!(!text.contains("SECRET_FILE_BODY"), "{text}");
+    }
 }

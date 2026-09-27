@@ -289,6 +289,11 @@ impl AnthropicProvider {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// The per-request output token cap this provider sends.
+    pub fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+    }
 }
 
 /// Parse a streaming SSE response body into a single `ProviderResponse`.
@@ -546,7 +551,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 serde_json::from_str(&args_str).unwrap_or_else(|e| {
                     tracing::warn!(
                         tool_name = name.as_str(),
-                        raw_args = args_str.as_str(),
+                        raw_args_len = args_str.len(),
                         error = %e,
                         "tool_use input_json failed to parse, falling back to empty object"
                     );
