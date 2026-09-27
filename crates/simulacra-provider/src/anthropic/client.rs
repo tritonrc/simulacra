@@ -289,6 +289,11 @@ impl AnthropicProvider {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// The per-request output token cap this provider sends.
+    pub fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+    }
 }
 
 /// Parse a streaming SSE response body into a single `ProviderResponse`.
