@@ -150,8 +150,12 @@ impl ActiveTurn {
 /// Result of a single turn in the agent loop.
 #[derive(Debug)]
 pub enum TurnResult {
-    /// Model produced a final text response (no tool calls).
-    Complete(Message),
+    /// Model produced a final text response (no tool calls). `finish_reason`
+    /// lets the loop runner tell a refusal apart from an ordinary stop.
+    Complete {
+        message: Message,
+        finish_reason: simulacra_types::FinishReason,
+    },
     /// Model requested tool calls. Contains the assistant message with tool_calls
     /// and the tool results that were dispatched.
     ToolCallsProcessed {

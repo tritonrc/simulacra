@@ -819,6 +819,7 @@ fn child_exit_success(exit_reason: &simulacra_types::ExitReason) -> Option<bool>
         simulacra_types::ExitReason::Error(_)
         | simulacra_types::ExitReason::GuardrailTripped(_)
         | simulacra_types::ExitReason::PolicyKill { .. }
+        | simulacra_types::ExitReason::Refusal
         | simulacra_types::ExitReason::Cancelled => Some(false),
         simulacra_types::ExitReason::AwaitingApproval => None,
     }
@@ -832,7 +833,8 @@ pub(crate) fn status_from_spawn_result(result: &SpawnResult) -> String {
             | simulacra_types::ExitReason::BudgetExhausted => "completed".to_string(),
             simulacra_types::ExitReason::Error(_)
             | simulacra_types::ExitReason::GuardrailTripped(_)
-            | simulacra_types::ExitReason::PolicyKill { .. } => "failed".to_string(),
+            | simulacra_types::ExitReason::PolicyKill { .. }
+            | simulacra_types::ExitReason::Refusal => "failed".to_string(),
             simulacra_types::ExitReason::Cancelled => "cancelled".to_string(),
             simulacra_types::ExitReason::AwaitingApproval => "running".to_string(),
         },

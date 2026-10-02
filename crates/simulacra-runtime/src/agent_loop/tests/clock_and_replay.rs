@@ -1,3 +1,62 @@
+#[test]
+fn replay_llm_response_parses_refusal_and_other_finish_reasons() {
+    let refusal_entry = JournalEntryKind::LlmResponse {
+        model: "test-model".into(),
+        token_usage: TokenUsage::default(),
+        finish_reason: "Refusal".into(),
+        assistant_message: None,
+    };
+    let resp = replay_llm_response(&refusal_entry).expect("Refusal should parse");
+    assert_eq!(resp.finish_reason, simulacra_types::FinishReason::Refusal);
+
+    let other_entry = JournalEntryKind::LlmResponse {
+        model: "test-model".into(),
+        token_usage: TokenUsage::default(),
+        finish_reason: "Other(\"pause_turn\")".into(),
+        assistant_message: None,
+    };
+    let resp = replay_llm_response(&other_entry).expect("Other(..) should parse");
+    assert_eq!(
+        resp.finish_reason,
+        simulacra_types::FinishReason::Other("pause_turn".to_string())
+    );
+
+    // A string neither old nor new code recognizes now falls back to
+    // Other(raw) instead of the historical silent coercion to EndTurn.
+    let unrecognized_entry = JournalEntryKind::LlmResponse {
+        model: "test-model".into(),
+        token_usage: TokenUsage::default(),
+        finish_reason: "SomethingElse".into(),
+        assistant_message: None,
+    };
+    let resp = replay_llm_response(&unrecognized_entry).expect("unrecognized should still parse");
+    assert_eq!(
+        resp.finish_reason,
+        simulacra_types::FinishReason::Other("SomethingElse".to_string())
+    );
+}
+
+#[test]
+fn replay_llm_response_unescapes_an_other_reason_with_quotes_backslashes_and_control_chars() {
+    // Only the Anthropic adapter sanitizes to [A-Za-z0-9_-]; an injected
+    // Provider can construct FinishReason::Other with anything at all. The
+    // journal persists it via Debug (see turn/mod.rs), so this is the exact
+    // string replay must parse back.
+    let raw = "quote\"back\\slash\nnew\ttab café";
+    let finish_reason = simulacra_types::FinishReason::Other(raw.to_string());
+    let debug_repr = format!("{finish_reason:?}");
+
+    let entry = JournalEntryKind::LlmResponse {
+        model: "test-model".into(),
+        token_usage: TokenUsage::default(),
+        finish_reason: debug_repr,
+        assistant_message: None,
+    };
+    let resp = replay_llm_response(&entry).expect("an odd Other(..) should still parse");
+
+    assert_eq!(resp.finish_reason, simulacra_types::FinishReason::Other(raw.to_string()));
+}
+
 #[tokio::test]
 async fn injectable_clock_produces_deterministic_timestamps() {
     let journal = Arc::new(InMemoryJournalStorage::new());

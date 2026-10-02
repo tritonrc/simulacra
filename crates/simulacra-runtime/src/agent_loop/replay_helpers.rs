@@ -22,6 +22,95 @@ pub(super) fn entry_kind_name(kind: &JournalEntryKind) -> &'static str {
     }
 }
 
+/// Reverses the escaping Rust's `Debug` applies to a string's bytes (`\\`,
+/// `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, and `\u{..}`), so a `FinishReason::
+/// Other(raw)` built from any input — including one an injected Provider
+/// constructs directly, not just an Anthropic stop_reason sanitized to
+/// `[A-Za-z0-9_-]` — round-trips through the Debug-based journal format
+/// exactly. Debug never emits a malformed or unrecognized escape, but this
+/// only reads data that was journaled as a string, so it treats one as data
+/// too: an incomplete `\u{...}` (no closing brace), one that isn't valid hex,
+/// one that decodes to a surrogate codepoint `char::from_u32` rejects, or any
+/// other unrecognized `\X` is preserved literally (never dropped, never
+/// guessed at) instead of panicking or losing characters.
+fn unescape_debug_str(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        // Peek at what follows '\' on a throwaway iterator over the
+        // remaining slice, so a malformed escape can be restored
+        // byte-for-byte (by simply not advancing `chars` past it) instead
+        // of losing whatever was speculatively consumed looking for one.
+        let mut lookahead = chars.as_str().chars();
+        match lookahead.next() {
+            Some('\\') => {
+                out.push('\\');
+                chars = lookahead;
+            }
+            Some('"') => {
+                out.push('"');
+                chars = lookahead;
+            }
+            Some('\'') => {
+                out.push('\'');
+                chars = lookahead;
+            }
+            Some('n') => {
+                out.push('\n');
+                chars = lookahead;
+            }
+            Some('r') => {
+                out.push('\r');
+                chars = lookahead;
+            }
+            Some('t') => {
+                out.push('\t');
+                chars = lookahead;
+            }
+            Some('0') => {
+                out.push('\0');
+                chars = lookahead;
+            }
+            Some('u') => {
+                // A complete `\u{XXXX}` requires a closing brace before we
+                // decode anything; `d800`-style surrogates and non-hex
+                // digits parse but aren't a valid Unicode scalar value.
+                // Any failure here falls through to the literal-preserving
+                // path below rather than guessing or dropping input.
+                let after_u = lookahead.as_str();
+                let decoded = after_u.strip_prefix('{').and_then(|rest| {
+                    let close_idx = rest.find('}')?;
+                    let hex = &rest[..close_idx];
+                    let ch = char::from_u32(u32::from_str_radix(hex, 16).ok()?)?;
+                    Some((ch, &rest[close_idx + 1..]))
+                });
+                if let Some((ch, remainder)) = decoded {
+                    out.push(ch);
+                    chars = remainder.chars();
+                } else {
+                    // Malformed or unrepresentable: keep `\u` literal and
+                    // let the main loop push whatever follows (`{`, hex
+                    // digits, a stray char, or nothing) unchanged.
+                    out.push('\\');
+                    out.push('u');
+                    chars = lookahead;
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+                chars = lookahead;
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 pub(super) fn replay_entries_match(expected: &JournalEntryKind, actual: &JournalEntryKind) -> bool {
     match (expected, actual) {
         (JournalEntryKind::TurnStart, JournalEntryKind::TurnStart) => true,
@@ -88,12 +177,27 @@ pub(super) fn replay_llm_response(
         assistant_message,
     } = kind
     {
+        // Persisted as the Debug repr (see turn/mod.rs). `Other(raw)` debugs
+        // as `Other("raw")`; unwrap that back into the raw string rather than
+        // losing it to the EndTurn default the way earlier journals did.
         let fr = match finish_reason.as_str() {
             "EndTurn" => simulacra_types::FinishReason::EndTurn,
             "ToolUse" => simulacra_types::FinishReason::ToolUse,
             "MaxTokens" => simulacra_types::FinishReason::MaxTokens,
             "StopSequence" => simulacra_types::FinishReason::StopSequence,
-            _ => simulacra_types::FinishReason::EndTurn,
+            "Refusal" => simulacra_types::FinishReason::Refusal,
+            other => {
+                // A literal `"` inside the raw string is always escaped by
+                // Debug, so the only bare `"` in the whole repr is the final
+                // closing quote: the prefix/suffix strip is unambiguous even
+                // though the content between them still needs unescaping.
+                let raw = other
+                    .strip_prefix("Other(\"")
+                    .and_then(|s| s.strip_suffix("\")"))
+                    .map(unescape_debug_str)
+                    .unwrap_or_else(|| other.to_string());
+                simulacra_types::FinishReason::Other(raw)
+            }
         };
 
         // Use the stored assistant message (with tool_calls) if available,
@@ -150,5 +254,68 @@ pub(super) fn replay_tool_result(
                 "expected ToolResult during replay, got {kind:?}"
             )),
         ))
+    }
+}
+
+#[cfg(test)]
+mod unescape_tests {
+    use super::unescape_debug_str;
+
+    #[test]
+    fn simple_escapes_round_trip() {
+        assert_eq!(unescape_debug_str(r#"\\"#), "\\");
+        assert_eq!(unescape_debug_str(r#"\""#), "\"");
+        assert_eq!(unescape_debug_str(r"\n"), "\n");
+        assert_eq!(unescape_debug_str(r"\r"), "\r");
+        assert_eq!(unescape_debug_str(r"\t"), "\t");
+        assert_eq!(unescape_debug_str(r"\0"), "\0");
+    }
+
+    #[test]
+    fn valid_unicode_escape_decodes() {
+        assert_eq!(unescape_debug_str(r"\u{41}"), "A");
+        assert_eq!(unescape_debug_str(r"caf\u{e9}"), "café");
+        // A real Debug repr would never emit a bare control char, but a
+        // \u{..} escape for one is still a legitimate decode.
+        assert_eq!(unescape_debug_str(r"\u{7}"), "\u{7}");
+    }
+
+    #[test]
+    fn unterminated_unicode_escape_is_preserved_literally() {
+        // No closing brace at all.
+        assert_eq!(unescape_debug_str(r"\u{41"), r"\u{41");
+        assert_eq!(
+            unescape_debug_str(r"before\u{41 after"),
+            r"before\u{41 after"
+        );
+    }
+
+    #[test]
+    fn invalid_hex_in_unicode_escape_is_preserved_literally() {
+        assert_eq!(unescape_debug_str(r"\u{zz}"), r"\u{zz}");
+    }
+
+    #[test]
+    fn surrogate_codepoint_is_preserved_literally() {
+        // 0xd800 is a valid hex number but not a valid Unicode scalar value.
+        assert_eq!(unescape_debug_str(r"\u{d800}"), r"\u{d800}");
+    }
+
+    #[test]
+    fn u_not_followed_by_a_brace_is_preserved_literally_without_dropping_input() {
+        assert_eq!(unescape_debug_str(r"\uXtail"), r"\uXtail");
+    }
+
+    #[test]
+    fn malformed_escapes_do_not_swallow_surrounding_text() {
+        let raw = r#"lead\u{zzin\"middle\u{41tail"#;
+        // Every malformed `\u{...}` is restored literally; the one valid
+        // simple escape (`\"`) in the middle still decodes.
+        assert_eq!(unescape_debug_str(raw), "lead\\u{zzin\"middle\\u{41tail");
+    }
+
+    #[test]
+    fn trailing_lone_backslash_is_preserved() {
+        assert_eq!(unescape_debug_str(r"abc\"), r"abc\");
     }
 }

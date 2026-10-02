@@ -145,6 +145,62 @@ use simulacra_types::{
     ToolCallMessage, ToolDefinition,
 };
 
+/// Map an Anthropic `stop_reason` to our `FinishReason`. A value we don't
+/// recognize yet — or no `stop_reason` at all — carries its raw string in
+/// `Other` rather than silently becoming `EndTurn`.
+pub(crate) fn map_stop_reason(stop_reason: Option<&str>) -> FinishReason {
+    match stop_reason {
+        Some("tool_use") => FinishReason::ToolUse,
+        Some("end_turn") => FinishReason::EndTurn,
+        Some("max_tokens") => FinishReason::MaxTokens,
+        Some("stop_sequence") => FinishReason::StopSequence,
+        Some("refusal") => FinishReason::Refusal,
+        Some(other) => FinishReason::Other(sanitize_other_reason(other)),
+        None => FinishReason::Other("missing".to_string()),
+    }
+}
+
+/// `Other(raw)` is journaled via `Debug` and reconstructed on replay by
+/// stripping the literal `Other("` / `")` wrapper (see replay_helpers.rs).
+/// A raw stop_reason containing a quote, backslash, or newline would break
+/// that round trip, so restrict it to a safe charset at the source instead
+/// of trying to escape it later.
+fn sanitize_other_reason(raw: &str) -> String {
+    let mut sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    sanitized.truncate(64);
+    sanitized
+}
+
+/// Tool calls are only safe to execute when the turn genuinely ended in
+/// `tool_use`. A refusal, a truncation, or any other/unknown finish reason
+/// means the accumulated tool_use blocks are not a complete, intentional
+/// request, so they must not reach the dispatcher. This is the single choke
+/// point both the streaming and non-streaming response paths call through.
+pub(crate) fn drop_tool_calls_unless_tool_use(
+    finish_reason: &FinishReason,
+    tool_calls: &mut Vec<ToolCallMessage>,
+) {
+    if *finish_reason == FinishReason::ToolUse || tool_calls.is_empty() {
+        return;
+    }
+    let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+    tracing::warn!(
+        finish_reason = ?finish_reason,
+        tool_names = ?tool_names,
+        "dropping tool call(s) collected under a non-tool_use finish reason"
+    );
+    tool_calls.clear();
+}
+
 fn normalize_tool_pairs(messages: &[Message]) -> Vec<Message> {
     let mut normalized = Vec::with_capacity(messages.len());
     for (index, message) in messages.iter().enumerate() {
@@ -355,13 +411,24 @@ pub(crate) fn build_request_parts<'a>(
                         input: tc.arguments.clone(),
                     });
                 }
+                if blocks.is_empty() {
+                    // A response reduced to nothing (no text, no tool_use,
+                    // and no *supported* provider block — unsupported
+                    // provider_content, like a dropped assistant image,
+                    // doesn't count) is journal evidence, not a wire
+                    // message. This must be decided after filtering
+                    // provider_content into wire blocks: a message whose
+                    // only provider_content is unsupported still has
+                    // nothing left to send. Anthropic rejects an empty
+                    // assistant content block, and there is nothing to
+                    // resume from, so omit it instead of encoding
+                    // `{"role":"assistant","content":""}`.
+                    continue;
+                }
                 let content = if msg.provider_content.is_empty()
                     && blocks.len() == 1
                     && msg.tool_calls.is_empty()
                 {
-                    ApiMessageContent::Text(msg.content.clone())
-                } else if blocks.is_empty() {
-                    // Assistant messages must have some content
                     ApiMessageContent::Text(msg.content.clone())
                 } else {
                     ApiMessageContent::Blocks(blocks)
@@ -462,12 +529,8 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
         }
     }
 
-    let finish_reason = match resp.stop_reason.as_deref() {
-        Some("tool_use") => FinishReason::ToolUse,
-        Some("max_tokens") => FinishReason::MaxTokens,
-        Some("stop_sequence") => FinishReason::StopSequence,
-        _ => FinishReason::EndTurn,
-    };
+    let finish_reason = map_stop_reason(resp.stop_reason.as_deref());
+    drop_tool_calls_unless_tool_use(&finish_reason, &mut tool_calls);
 
     ProviderResponse {
         message: Message {
@@ -497,6 +560,26 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn map_stop_reason_sanitizes_odd_characters_and_caps_length() {
+        let raw = "weird\"va\\lue\nhere";
+        let reason = map_stop_reason(Some(raw));
+        assert_eq!(reason, FinishReason::Other("weird_va_lue_here".to_string()));
+
+        // The journal persists FinishReason via Debug and replay_helpers.rs
+        // reconstructs it by stripping a literal `Other("` / `")` wrapper;
+        // a sanitized value can never contain the quote/backslash that
+        // would break that round trip.
+        let debug = format!("{reason:?}");
+        assert_eq!(debug, "Other(\"weird_va_lue_here\")");
+
+        let long_raw = "a".repeat(100);
+        match map_stop_reason(Some(&long_raw)) {
+            FinishReason::Other(s) => assert_eq!(s.len(), 64),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
 
     fn assistant(content: &str, tool_call_ids: &[&str]) -> Message {
         Message {
@@ -1380,6 +1463,55 @@ mod tests {
                     ]
                 }]
             })
+        );
+    }
+
+    /// An assistant turn with every tool call stripped (non-tool_use finish
+    /// reason, an incomplete block, or unparseable input) and no text is
+    /// journal/replay evidence, not a wire message. Anthropic rejects an
+    /// empty assistant `content`, so it must never reach the next request —
+    /// this is the BLOCKER the live incident's follow-up request would have
+    /// hit.
+    #[test]
+    fn build_request_parts_omits_an_emptied_assistant_message() {
+        let emptied = assistant("", &[]);
+        let messages = vec![user("do it"), emptied, user("try again")];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.role != "assistant"),
+            "an emptied assistant turn must not be encoded onto the wire: {request:?}"
+        );
+    }
+
+    /// The emptiness check must run *after* filtering provider_content into
+    /// supported Anthropic wire blocks, not before: a message with no text
+    /// and no tool_calls but a non-empty `provider_content` that is entirely
+    /// unsupported (here, an assistant image, which `anthropic_provider_blocks`
+    /// never forwards) still has nothing left to send and must be omitted —
+    /// not fall through to `{"role":"assistant","content":""}`.
+    #[test]
+    fn build_request_parts_omits_an_emptied_assistant_message_whose_only_provider_content_is_unsupported()
+     {
+        let mut emptied = assistant("", &[]);
+        emptied.provider_content = vec![anthropic_image_block(base64_source("orphaned"))];
+        let messages = vec![user("do it"), emptied, user("try again")];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.role != "assistant"),
+            "an assistant turn with only an unsupported provider block must not be \
+             encoded onto the wire: {request:?}"
         );
     }
 }

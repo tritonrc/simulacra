@@ -1,4 +1,114 @@
 #[tokio::test]
+async fn malformed_tool_input_fails_the_turn_as_a_visible_provider_error() {
+    struct MalformedToolInputProvider;
+
+    impl Provider for MalformedToolInputProvider {
+        fn chat<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [ToolDefinition],
+            _budget: &'a mut ResourceBudget,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+        > {
+            Box::pin(async {
+                Err(ProviderError::MalformedToolInput {
+                    tool_name: "get_weather".into(),
+                    raw_len: 15,
+                })
+            })
+        }
+    }
+
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(MalformedToolInputProvider),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal,
+        default_budget(),
+        None,
+        None,
+    );
+
+    // A malformed tool call must never look like a quiet success: the
+    // turn ends as a visible Err, not an AgentLoopOutput with some
+    // exit_reason the caller has to notice is wrong.
+    let err = agent
+        .run("look up the weather")
+        .await
+        .expect_err("a malformed tool call must fail the turn, not complete silently");
+
+    match err {
+        RuntimeError::Provider(ProviderError::MalformedToolInput { tool_name, raw_len }) => {
+            assert_eq!(tool_name, "get_weather");
+            assert_eq!(raw_len, 15);
+        }
+        other => panic!("expected RuntimeError::Provider(MalformedToolInput), got: {other:?}"),
+    }
+}
+
+/// The Anthropic adapter strips its own tool calls when the finish reason
+/// isn't ToolUse, but that is not the only Provider the runtime ever talks
+/// to: OpenAI, and any embedder's own injected Provider, go through the same
+/// agent loop. This exercises the runtime-level guard directly with a fake
+/// provider that (as some real provider could) hands back a tool call under
+/// MaxTokens — the dispatcher must never see it.
+#[tokio::test]
+async fn injected_provider_tool_call_under_max_tokens_is_dropped_by_the_runtime_not_dispatched() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![tool_call_response_under_max_tokens(
+        "delete_everything",
+        serde_json::json!({"path": "/"}),
+    )]);
+    let mut agent = build_loop(
+        provider,
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal,
+        default_budget(),
+    );
+
+    let output = agent
+        .run("do a big thing")
+        .await
+        .expect("a stripped tool call ends the turn cleanly, not with an error");
+
+    // Complete, not ToolCallsProcessed-in-disguise: the tool was never
+    // dispatched (ToolRegistry::new() has no tools registered at all, so a
+    // dispatch attempt would itself error the run).
+    assert_eq!(output.exit_reason, ExitReason::Complete);
+    assert!(
+        output
+            .messages
+            .iter()
+            .all(|message| message.tool_calls.is_empty()),
+        "the persisted assistant message must not carry the dropped tool call: {:?}",
+        output.messages
+    );
+}
+
+#[tokio::test]
+async fn refusal_finish_reason_exits_with_typed_refusal_outcome() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![refusal_response()]);
+    let mut agent = build_loop(
+        provider,
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("do something unsafe").await.expect("run should succeed");
+
+    // Distinct from ExitReason::Complete so an embedding app can tell a
+    // refusal apart from an ordinary finished turn.
+    assert_eq!(output.exit_reason, ExitReason::Refusal);
+}
+
+#[tokio::test]
 async fn simple_text_response_exits_complete() {
     let journal = Arc::new(InMemoryJournalStorage::new());
     let provider = FakeProvider::new(vec![text_response("Hello, world!")]);

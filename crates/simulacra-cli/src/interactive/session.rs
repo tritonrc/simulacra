@@ -935,7 +935,7 @@ where
             let has_activity = activity_rx.is_some();
 
             match result {
-                Ok(TurnResult::Complete(msg)) => {
+                Ok(TurnResult::Complete { message: msg, .. }) => {
                     self.view.visible_output.push(msg.content.clone());
                     self.io.write_line(&msg.content);
                     self.view.messages.push(msg);

@@ -7,9 +7,8 @@ use std::pin::Pin;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Histogram;
 use simulacra_types::{
-    FinishReason, Message, Provider, ProviderContentBlock, ProviderError, ProviderResponse,
-    ProviderStreamEvent, ProviderStreamSink, ResourceBudget, Role, StreamingProvider, TokenUsage,
-    ToolDefinition,
+    Message, Provider, ProviderContentBlock, ProviderError, ProviderResponse, ProviderStreamEvent,
+    ProviderStreamSink, ResourceBudget, Role, StreamingProvider, TokenUsage, ToolDefinition,
 };
 use tracing::Instrument;
 
@@ -373,7 +372,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
             Some("message_start") => self.process_message_start(&event),
             Some("content_block_start") => self.process_content_block_start(&event),
             Some("content_block_delta") => self.process_content_block_delta(&event),
-            Some("content_block_stop") => self.process_content_block_stop(&event),
+            Some("content_block_stop") => self.process_content_block_stop(&event)?,
             Some("message_delta") => self.process_message_delta(&event),
             Some("message_stop") => {}
             Some("error") => return Err(stream_error::from_event(&event)),
@@ -540,29 +539,49 @@ impl<'a> AnthropicSseAccumulator<'a> {
         }
     }
 
-    fn process_content_block_stop(&mut self, event: &serde_json::Value) {
+    fn process_content_block_stop(
+        &mut self,
+        event: &serde_json::Value,
+    ) -> Result<(), ProviderError> {
         let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
         if self.tool_block_indices.remove(&index)
             && let Some((id, name, args_str)) = self.pending_tool_blocks.remove(&index)
         {
-            let arguments: serde_json::Value = if args_str.trim().is_empty() {
-                serde_json::Value::Object(serde_json::Map::new())
+            if args_str.trim().is_empty() {
+                self.tool_calls.push(simulacra_types::ToolCallMessage {
+                    id,
+                    name,
+                    arguments: serde_json::Value::Object(serde_json::Map::new()),
+                });
             } else {
-                serde_json::from_str(&args_str).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool_name = name.as_str(),
-                        raw_args_len = args_str.len(),
-                        error = %e,
-                        "tool_use input_json failed to parse, falling back to empty object"
-                    );
-                    serde_json::Value::Object(serde_json::Map::new())
-                })
-            };
-            self.tool_calls.push(simulacra_types::ToolCallMessage {
-                id,
-                name,
-                arguments,
-            });
+                match serde_json::from_str(&args_str) {
+                    Ok(arguments) => {
+                        self.tool_calls.push(simulacra_types::ToolCallMessage {
+                            id,
+                            name,
+                            arguments,
+                        });
+                    }
+                    Err(e) => {
+                        // Must not silently drop or execute with fabricated
+                        // empty args: fail the whole turn visibly instead of
+                        // completing as if this call never happened. Length
+                        // only — never the raw (possibly sensitive) argument
+                        // text.
+                        let raw_len = args_str.len();
+                        tracing::warn!(
+                            tool_name = name.as_str(),
+                            raw_args_len = raw_len,
+                            error = %e,
+                            "tool_use input_json failed to parse; failing the turn"
+                        );
+                        return Err(ProviderError::MalformedToolInput {
+                            tool_name: name,
+                            raw_len,
+                        });
+                    }
+                }
+            }
         }
         if self.thinking_indices.remove(&index)
             && let Some((thinking, signature)) = self.pending_thinking_blocks.remove(&index)
@@ -587,6 +606,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 provider_sink.emit(ProviderStreamEvent::ThinkingEnd);
             }
         }
+        Ok(())
     }
 
     fn process_message_delta(&mut self, event: &serde_json::Value) {
@@ -604,13 +624,25 @@ impl<'a> AnthropicSseAccumulator<'a> {
         }
     }
 
-    fn finish(self) -> ProviderResponse {
-        let finish_reason = match self.stop_reason.as_deref() {
-            Some("tool_use") => FinishReason::ToolUse,
-            Some("max_tokens") => FinishReason::MaxTokens,
-            Some("stop_sequence") => FinishReason::StopSequence,
-            _ => FinishReason::EndTurn,
-        };
+    fn finish(mut self) -> ProviderResponse {
+        let finish_reason = api_types::map_stop_reason(self.stop_reason.as_deref());
+
+        // A tool_use block with no content_block_stop (stream cut mid-call)
+        // never became a ToolCallMessage; name it so the drop isn't silent.
+        if !self.pending_tool_blocks.is_empty() {
+            let tool_names: Vec<&str> = self
+                .pending_tool_blocks
+                .values()
+                .map(|(_, name, _)| name.as_str())
+                .collect();
+            tracing::warn!(
+                finish_reason = ?finish_reason,
+                tool_names = ?tool_names,
+                "tool_use block still open when the stream finished; dropping incomplete tool call(s)"
+            );
+        }
+        api_types::drop_tool_calls_unless_tool_use(&finish_reason, &mut self.tool_calls);
+
         let provider_content = self.completed_provider_blocks.into_values().collect();
 
         ProviderResponse {
@@ -835,8 +867,10 @@ impl Provider for AnthropicProvider {
             if let Some(ref id) = provider_resp.provider_response_id {
                 current_span.record("gen_ai.response.id", id.as_str());
             }
-            let finish_reason_str = serde_json::to_string(&provider_resp.finish_reason)
-                .unwrap_or_else(|_| format!("{:?}", provider_resp.finish_reason));
+            // Raw provider value, not the enum's Debug name, so an `Other`
+            // reason surfaces its actual stop_reason (e.g. ["refusal"]).
+            let finish_reason_str =
+                serde_json::to_string(provider_resp.finish_reason.as_raw()).unwrap_or_default();
             let finish_reasons = format!("[{finish_reason_str}]");
             current_span.record("gen_ai.response.finish_reasons", finish_reasons.as_str());
 
@@ -1038,8 +1072,10 @@ impl StreamingProvider for AnthropicProvider {
             if let Some(ref id) = provider_resp.provider_response_id {
                 current_span.record("gen_ai.response.id", id.as_str());
             }
-            let finish_reason_str = serde_json::to_string(&provider_resp.finish_reason)
-                .unwrap_or_else(|_| format!("{:?}", provider_resp.finish_reason));
+            // Raw provider value, not the enum's Debug name, so an `Other`
+            // reason surfaces its actual stop_reason (e.g. ["refusal"]).
+            let finish_reason_str =
+                serde_json::to_string(provider_resp.finish_reason.as_raw()).unwrap_or_default();
             let finish_reasons = format!("[{finish_reason_str}]");
             current_span.record("gen_ai.response.finish_reasons", finish_reasons.as_str());
 
@@ -2660,6 +2696,309 @@ mod tests {
         assert_eq!(response.finish_reason, FinishReason::ToolUse);
     }
 
+    /// Reproduces the live incident: a stream is cut mid tool_use (no
+    /// content_block_stop for the open block) and ends with
+    /// `stop_reason: "refusal"`. The incomplete tool_use must not become an
+    /// executable tool call, and the finish reason must be `Refusal`, not the
+    /// old silent default of `EndTurn`.
+    fn streaming_refusal_mid_tool_use_body() -> Vec<u8> {
+        concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_refusal\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_cutoff\",\"name\":\"workspace_exec\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"bash -c \\\\\\\"node -e 'const a=[];for(;;){a.push(\"}}\n\n",
+            // No content_block_stop: the stream is cut off here.
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"output_tokens\":312}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn refusal_mid_tool_use_drops_the_incomplete_call_and_reports_refusal() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &streaming_refusal_mid_tool_use_body(),
+            headers,
+        );
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "allocate memory until it hurts".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let response = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("a refusal is still a well-formed response, not a transport error");
+
+        assert_eq!(response.finish_reason, FinishReason::Refusal);
+        assert!(
+            response.message.tool_calls.is_empty(),
+            "the cut-off tool_use must never become an executable tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrecognized_stop_reason_maps_to_other_instead_of_end_turn() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": "msg_unknown_stop",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "..."}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "model_context_window_exceeded",
+            "usage": {"input_tokens": 5, "output_tokens": 3}
+        }))
+        .unwrap();
+        let fake = FakeHttpClient::with_response(200, &body);
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(
+            resp.finish_reason,
+            FinishReason::Other("model_context_window_exceeded".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_use_with_invalid_json_input_fails_the_turn_instead_of_completing() {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_bad_json\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_bad\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{not valid json\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":4}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec();
+        let fake = FakeHttpClient::with_response_and_headers(200, &body, headers);
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "weather".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let err = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect_err(
+            "a malformed tool_use input must fail the turn visibly, \
+             not silently complete with the call missing",
+        );
+
+        match err {
+            ProviderError::MalformedToolInput { tool_name, raw_len } => {
+                assert_eq!(tool_name, "get_weather");
+                assert_eq!(raw_len, "{not valid json".len());
+            }
+            other => panic!("expected MalformedToolInput, got: {other:?}"),
+        }
+    }
+
+    /// Buffered (non-streaming) response: a *completed* tool_use is still
+    /// stripped under `max_tokens`, and the resulting empty assistant
+    /// message — what journal/replay would hand back on the next turn —
+    /// must not reach the wire as `{"role":"assistant","content":""}`.
+    #[tokio::test]
+    async fn buffered_completed_tool_call_is_stripped_under_max_tokens_and_omitted_from_next_request()
+     {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": "msg_max_tokens_tool",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_cut",
+                "name": "get_weather",
+                "input": {"location": "SF"}
+            }],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 40, "output_tokens": 80}
+        }))
+        .unwrap();
+        let fake = FakeHttpClient::with_response(200, &body);
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let mut messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "weather".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(resp.finish_reason, FinishReason::MaxTokens);
+        assert!(
+            resp.message.tool_calls.is_empty(),
+            "a completed tool_use must still be stripped under max_tokens"
+        );
+        assert!(resp.message.content.is_empty());
+
+        // What journal/replay hands back as the assistant turn next time.
+        messages.push(resp.message);
+        messages.push(Message {
+            role: simulacra_types::Role::User,
+            content: "try again, shorter".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        });
+
+        let request =
+            api_types::build_request_parts(&messages, &[], "claude-sonnet-4-20250514", 1024);
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request.messages.iter().all(|m| m.role != "assistant"),
+            "the emptied assistant turn must not reach the wire: {request:?}"
+        );
+    }
+
+    fn streaming_refusal_with_completed_tool_use_body() -> Vec<u8> {
+        concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_refusal_complete\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_refused\",\"name\":\"workspace_exec\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"rm -rf /\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"output_tokens\":6}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    /// Streaming counterpart: a *completed* tool_use block (content_block_stop
+    /// fired, valid JSON) is still stripped when the turn ends in `refusal`,
+    /// and the emptied assistant message is omitted from the next request.
+    #[tokio::test]
+    async fn streaming_completed_tool_call_is_stripped_under_refusal_and_omitted_from_next_request()
+    {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &streaming_refusal_with_completed_tool_use_body(),
+            headers,
+        );
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let mut messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "delete everything".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
+        let response = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect("a refusal is a well-formed response, not a transport error");
+
+        assert_eq!(response.finish_reason, FinishReason::Refusal);
+        assert!(
+            response.message.tool_calls.is_empty(),
+            "a completed tool_use must still be stripped under refusal"
+        );
+
+        messages.push(response.message);
+        messages.push(Message {
+            role: simulacra_types::Role::User,
+            content: "understood, let's not".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        });
+
+        let request =
+            api_types::build_request_parts(&messages, &[], "claude-sonnet-4-20250514", 1024);
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request.messages.iter().all(|m| m.role != "assistant"),
+            "the emptied assistant turn must not reach the wire: {request:?}"
+        );
+    }
+
     /// S007: Multiple provider backends can be selected by configuration.
     ///
     /// Verifies that both AnthropicProvider and OpenAiProvider can be
@@ -3326,6 +3665,80 @@ mod tests {
             assert_eq!(
                 tool_use_span.fields.get("gen_ai.response.finish_reasons"),
                 Some(&"[\"tool_use\"]".to_string())
+            );
+        }
+
+        /// The incident this guards against: a refusal must surface its raw
+        /// stop_reason on the span, not an opaque enum label.
+        #[tokio::test]
+        async fn refusal_and_unrecognized_stop_reasons_surface_their_raw_value_on_the_span() {
+            let (subscriber, captured) = setup_span_capture();
+            let refusal_body = serde_json::to_vec(&serde_json::json!({
+                "id": "msg_refusal_span",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "refusal",
+                "usage": {"input_tokens": 9, "output_tokens": 1}
+            }))
+            .unwrap();
+            let unknown_body = serde_json::to_vec(&serde_json::json!({
+                "id": "msg_unknown_span",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "..."}],
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "pause_turn",
+                "usage": {"input_tokens": 6, "output_tokens": 2}
+            }))
+            .unwrap();
+            let refusal_provider = AnthropicProvider::with_http_client(
+                "test-key",
+                "claude-sonnet-4-20250514",
+                Box::new(FakeHttpClient::with_response(200, &refusal_body)),
+            );
+            let unknown_provider = AnthropicProvider::with_http_client(
+                "test-key",
+                "claude-sonnet-4-20250514",
+                Box::new(FakeHttpClient::with_response(200, &unknown_body)),
+            );
+            let messages = vec![Message {
+                role: simulacra_types::Role::User,
+                content: "Hello".into(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                provider_content: vec![],
+            }];
+            let mut budget = fresh_budget();
+
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let _ = refusal_provider
+                .chat(&messages, &[], &mut budget)
+                .await
+                .unwrap();
+            let _ = unknown_provider
+                .chat(&messages, &[], &mut budget)
+                .await
+                .unwrap();
+
+            let spans = captured.lock().unwrap();
+            let refusal_span = spans
+                .iter()
+                .find(|s| s.fields.get("gen_ai.response.id") == Some(&"msg_refusal_span".into()))
+                .expect("expected refusal span");
+            let unknown_span = spans
+                .iter()
+                .find(|s| s.fields.get("gen_ai.response.id") == Some(&"msg_unknown_span".into()))
+                .expect("expected unknown-stop-reason span");
+
+            assert_eq!(
+                refusal_span.fields.get("gen_ai.response.finish_reasons"),
+                Some(&"[\"refusal\"]".to_string())
+            );
+            assert_eq!(
+                unknown_span.fields.get("gen_ai.response.finish_reasons"),
+                Some(&"[\"pause_turn\"]".to_string())
             );
         }
 

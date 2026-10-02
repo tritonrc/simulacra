@@ -42,7 +42,7 @@ impl AgentLoop {
                 return Ok(ProviderCallOutcome::Cancelled);
             }
             Ok(ProviderCallOutcome::Response {
-                response,
+                response: Box::new(response),
                 streamed: true,
             })
         } else {
@@ -57,7 +57,7 @@ impl AgentLoop {
             self.merge_provider_budget_delta(&provider_budget_before, &provider_budget);
             let response = provider_result.map_err(RuntimeError::from)?;
             Ok(ProviderCallOutcome::Response {
-                response,
+                response: Box::new(response),
                 streamed: false,
             })
         }
