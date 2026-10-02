@@ -396,18 +396,6 @@ pub(crate) fn build_request_parts<'a>(
                 });
             }
             Role::Assistant => {
-                // A response reduced to nothing (e.g. every tool call was
-                // stripped under a non-tool_use finish reason) is journal
-                // evidence, not a wire message. Anthropic rejects an empty
-                // assistant content block, and there is nothing to resume
-                // from, so omit it from the request instead of encoding
-                // `{"role":"assistant","content":""}`.
-                if msg.content.is_empty()
-                    && msg.tool_calls.is_empty()
-                    && msg.provider_content.is_empty()
-                {
-                    continue;
-                }
                 // Build content blocks: text + tool_use (required for multi-turn tool conversations)
                 let mut blocks: Vec<ApiRequestContentBlock> =
                     anthropic_provider_blocks(&msg.provider_content);
@@ -423,13 +411,24 @@ pub(crate) fn build_request_parts<'a>(
                         input: tc.arguments.clone(),
                     });
                 }
+                if blocks.is_empty() {
+                    // A response reduced to nothing (no text, no tool_use,
+                    // and no *supported* provider block — unsupported
+                    // provider_content, like a dropped assistant image,
+                    // doesn't count) is journal evidence, not a wire
+                    // message. This must be decided after filtering
+                    // provider_content into wire blocks: a message whose
+                    // only provider_content is unsupported still has
+                    // nothing left to send. Anthropic rejects an empty
+                    // assistant content block, and there is nothing to
+                    // resume from, so omit it instead of encoding
+                    // `{"role":"assistant","content":""}`.
+                    continue;
+                }
                 let content = if msg.provider_content.is_empty()
                     && blocks.len() == 1
                     && msg.tool_calls.is_empty()
                 {
-                    ApiMessageContent::Text(msg.content.clone())
-                } else if blocks.is_empty() {
-                    // Assistant messages must have some content
                     ApiMessageContent::Text(msg.content.clone())
                 } else {
                     ApiMessageContent::Blocks(blocks)
@@ -1487,6 +1486,32 @@ mod tests {
                 .iter()
                 .all(|message| message.role != "assistant"),
             "an emptied assistant turn must not be encoded onto the wire: {request:?}"
+        );
+    }
+
+    /// The emptiness check must run *after* filtering provider_content into
+    /// supported Anthropic wire blocks, not before: a message with no text
+    /// and no tool_calls but a non-empty `provider_content` that is entirely
+    /// unsupported (here, an assistant image, which `anthropic_provider_blocks`
+    /// never forwards) still has nothing left to send and must be omitted —
+    /// not fall through to `{"role":"assistant","content":""}`.
+    #[test]
+    fn build_request_parts_omits_an_emptied_assistant_message_whose_only_provider_content_is_unsupported()
+     {
+        let mut emptied = assistant("", &[]);
+        emptied.provider_content = vec![anthropic_image_block(base64_source("orphaned"))];
+        let messages = vec![user("do it"), emptied, user("try again")];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.role != "assistant"),
+            "an assistant turn with only an unsupported provider block must not be \
+             encoded onto the wire: {request:?}"
         );
     }
 }
