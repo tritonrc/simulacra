@@ -1,4 +1,55 @@
 #[tokio::test]
+async fn malformed_tool_input_fails_the_turn_as_a_visible_provider_error() {
+    struct MalformedToolInputProvider;
+
+    impl Provider for MalformedToolInputProvider {
+        fn chat<'a>(
+            &'a self,
+            _messages: &'a [Message],
+            _tools: &'a [ToolDefinition],
+            _budget: &'a mut ResourceBudget,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
+        > {
+            Box::pin(async {
+                Err(ProviderError::MalformedToolInput {
+                    tool_name: "get_weather".into(),
+                    raw_len: 15,
+                })
+            })
+        }
+    }
+
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let mut agent = AgentLoop::new(
+        default_config(),
+        Box::new(MalformedToolInputProvider),
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal,
+        default_budget(),
+        None,
+        None,
+    );
+
+    // A malformed tool call must never look like a quiet success: the
+    // turn ends as a visible Err, not an AgentLoopOutput with some
+    // exit_reason the caller has to notice is wrong.
+    let err = agent
+        .run("look up the weather")
+        .await
+        .expect_err("a malformed tool call must fail the turn, not complete silently");
+
+    match err {
+        RuntimeError::Provider(ProviderError::MalformedToolInput { tool_name, raw_len }) => {
+            assert_eq!(tool_name, "get_weather");
+            assert_eq!(raw_len, 15);
+        }
+        other => panic!("expected RuntimeError::Provider(MalformedToolInput), got: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn refusal_finish_reason_exits_with_typed_refusal_outcome() {
     let journal = Arc::new(InMemoryJournalStorage::new());
     let provider = FakeProvider::new(vec![refusal_response()]);

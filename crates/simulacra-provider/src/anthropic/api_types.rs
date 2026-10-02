@@ -155,9 +155,29 @@ pub(crate) fn map_stop_reason(stop_reason: Option<&str>) -> FinishReason {
         Some("max_tokens") => FinishReason::MaxTokens,
         Some("stop_sequence") => FinishReason::StopSequence,
         Some("refusal") => FinishReason::Refusal,
-        Some(other) => FinishReason::Other(other.to_string()),
+        Some(other) => FinishReason::Other(sanitize_other_reason(other)),
         None => FinishReason::Other("missing".to_string()),
     }
+}
+
+/// `Other(raw)` is journaled via `Debug` and reconstructed on replay by
+/// stripping the literal `Other("` / `")` wrapper (see replay_helpers.rs).
+/// A raw stop_reason containing a quote, backslash, or newline would break
+/// that round trip, so restrict it to a safe charset at the source instead
+/// of trying to escape it later.
+fn sanitize_other_reason(raw: &str) -> String {
+    let mut sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    sanitized.truncate(64);
+    sanitized
 }
 
 /// Tool calls are only safe to execute when the turn genuinely ended in
@@ -376,6 +396,18 @@ pub(crate) fn build_request_parts<'a>(
                 });
             }
             Role::Assistant => {
+                // A response reduced to nothing (e.g. every tool call was
+                // stripped under a non-tool_use finish reason) is journal
+                // evidence, not a wire message. Anthropic rejects an empty
+                // assistant content block, and there is nothing to resume
+                // from, so omit it from the request instead of encoding
+                // `{"role":"assistant","content":""}`.
+                if msg.content.is_empty()
+                    && msg.tool_calls.is_empty()
+                    && msg.provider_content.is_empty()
+                {
+                    continue;
+                }
                 // Build content blocks: text + tool_use (required for multi-turn tool conversations)
                 let mut blocks: Vec<ApiRequestContentBlock> =
                     anthropic_provider_blocks(&msg.provider_content);
@@ -529,6 +561,26 @@ pub(crate) fn into_provider_response(resp: ApiResponse) -> ProviderResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn map_stop_reason_sanitizes_odd_characters_and_caps_length() {
+        let raw = "weird\"va\\lue\nhere";
+        let reason = map_stop_reason(Some(raw));
+        assert_eq!(reason, FinishReason::Other("weird_va_lue_here".to_string()));
+
+        // The journal persists FinishReason via Debug and replay_helpers.rs
+        // reconstructs it by stripping a literal `Other("` / `")` wrapper;
+        // a sanitized value can never contain the quote/backslash that
+        // would break that round trip.
+        let debug = format!("{reason:?}");
+        assert_eq!(debug, "Other(\"weird_va_lue_here\")");
+
+        let long_raw = "a".repeat(100);
+        match map_stop_reason(Some(&long_raw)) {
+            FinishReason::Other(s) => assert_eq!(s.len(), 64),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
 
     fn assistant(content: &str, tool_call_ids: &[&str]) -> Message {
         Message {
@@ -1412,6 +1464,29 @@ mod tests {
                     ]
                 }]
             })
+        );
+    }
+
+    /// An assistant turn with every tool call stripped (non-tool_use finish
+    /// reason, an incomplete block, or unparseable input) and no text is
+    /// journal/replay evidence, not a wire message. Anthropic rejects an
+    /// empty assistant `content`, so it must never reach the next request —
+    /// this is the BLOCKER the live incident's follow-up request would have
+    /// hit.
+    #[test]
+    fn build_request_parts_omits_an_emptied_assistant_message() {
+        let emptied = assistant("", &[]);
+        let messages = vec![user("do it"), emptied, user("try again")];
+
+        let request = build_request_parts(&messages, &[], "claude-test", 1024);
+
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|message| message.role != "assistant"),
+            "an emptied assistant turn must not be encoded onto the wire: {request:?}"
         );
     }
 }

@@ -372,7 +372,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
             Some("message_start") => self.process_message_start(&event),
             Some("content_block_start") => self.process_content_block_start(&event),
             Some("content_block_delta") => self.process_content_block_delta(&event),
-            Some("content_block_stop") => self.process_content_block_stop(&event),
+            Some("content_block_stop") => self.process_content_block_stop(&event)?,
             Some("message_delta") => self.process_message_delta(&event),
             Some("message_stop") => {}
             Some("error") => return Err(stream_error::from_event(&event)),
@@ -539,7 +539,10 @@ impl<'a> AnthropicSseAccumulator<'a> {
         }
     }
 
-    fn process_content_block_stop(&mut self, event: &serde_json::Value) {
+    fn process_content_block_stop(
+        &mut self,
+        event: &serde_json::Value,
+    ) -> Result<(), ProviderError> {
         let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
         if self.tool_block_indices.remove(&index)
             && let Some((id, name, args_str)) = self.pending_tool_blocks.remove(&index)
@@ -560,15 +563,22 @@ impl<'a> AnthropicSseAccumulator<'a> {
                         });
                     }
                     Err(e) => {
-                        // Must not execute with fabricated empty args: drop the
-                        // call instead of pretending it parsed. Length only —
-                        // never the raw (possibly sensitive) argument text.
+                        // Must not silently drop or execute with fabricated
+                        // empty args: fail the whole turn visibly instead of
+                        // completing as if this call never happened. Length
+                        // only — never the raw (possibly sensitive) argument
+                        // text.
+                        let raw_len = args_str.len();
                         tracing::warn!(
                             tool_name = name.as_str(),
-                            raw_args_len = args_str.len(),
+                            raw_args_len = raw_len,
                             error = %e,
-                            "tool_use input_json failed to parse; dropping the call"
+                            "tool_use input_json failed to parse; failing the turn"
                         );
+                        return Err(ProviderError::MalformedToolInput {
+                            tool_name: name,
+                            raw_len,
+                        });
                     }
                 }
             }
@@ -596,6 +606,7 @@ impl<'a> AnthropicSseAccumulator<'a> {
                 provider_sink.emit(ProviderStreamEvent::ThinkingEnd);
             }
         }
+        Ok(())
     }
 
     fn process_message_delta(&mut self, event: &serde_json::Value) {
@@ -2785,7 +2796,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_use_with_invalid_json_input_is_dropped_not_executed_with_empty_args() {
+    async fn tool_use_with_invalid_json_input_fails_the_turn_instead_of_completing() {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
         let body = concat!(
@@ -2820,6 +2831,140 @@ mod tests {
         let mut budget = fresh_budget();
         let sink = RecordingProviderStreamSink::default();
 
+        let err = simulacra_types::StreamingProvider::chat_stream(
+            &provider,
+            &messages,
+            &[],
+            &mut budget,
+            &sink,
+        )
+        .await
+        .expect_err(
+            "a malformed tool_use input must fail the turn visibly, \
+             not silently complete with the call missing",
+        );
+
+        match err {
+            ProviderError::MalformedToolInput { tool_name, raw_len } => {
+                assert_eq!(tool_name, "get_weather");
+                assert_eq!(raw_len, "{not valid json".len());
+            }
+            other => panic!("expected MalformedToolInput, got: {other:?}"),
+        }
+    }
+
+    /// Buffered (non-streaming) response: a *completed* tool_use is still
+    /// stripped under `max_tokens`, and the resulting empty assistant
+    /// message — what journal/replay would hand back on the next turn —
+    /// must not reach the wire as `{"role":"assistant","content":""}`.
+    #[tokio::test]
+    async fn buffered_completed_tool_call_is_stripped_under_max_tokens_and_omitted_from_next_request()
+     {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": "msg_max_tokens_tool",
+            "type": "message",
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_cut",
+                "name": "get_weather",
+                "input": {"location": "SF"}
+            }],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 40, "output_tokens": 80}
+        }))
+        .unwrap();
+        let fake = FakeHttpClient::with_response(200, &body);
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let mut messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "weather".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+
+        let resp = provider.chat(&messages, &[], &mut budget).await.unwrap();
+
+        assert_eq!(resp.finish_reason, FinishReason::MaxTokens);
+        assert!(
+            resp.message.tool_calls.is_empty(),
+            "a completed tool_use must still be stripped under max_tokens"
+        );
+        assert!(resp.message.content.is_empty());
+
+        // What journal/replay hands back as the assistant turn next time.
+        messages.push(resp.message);
+        messages.push(Message {
+            role: simulacra_types::Role::User,
+            content: "try again, shorter".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        });
+
+        let request =
+            api_types::build_request_parts(&messages, &[], "claude-sonnet-4-20250514", 1024);
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request.messages.iter().all(|m| m.role != "assistant"),
+            "the emptied assistant turn must not reach the wire: {request:?}"
+        );
+    }
+
+    fn streaming_refusal_with_completed_tool_use_body() -> Vec<u8> {
+        concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_refusal_complete\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n\n",
+            "event: content_block_start\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_refused\",\"name\":\"workspace_exec\",\"input\":{}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"rm -rf /\\\"}\"}}\n\n",
+            "event: content_block_stop\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usage\":{\"output_tokens\":6}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    /// Streaming counterpart: a *completed* tool_use block (content_block_stop
+    /// fired, valid JSON) is still stripped when the turn ends in `refusal`,
+    /// and the emptied assistant message is omitted from the next request.
+    #[tokio::test]
+    async fn streaming_completed_tool_call_is_stripped_under_refusal_and_omitted_from_next_request()
+    {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
+        let fake = FakeHttpClient::with_response_and_headers(
+            200,
+            &streaming_refusal_with_completed_tool_use_body(),
+            headers,
+        );
+        let provider = AnthropicProvider::with_http_client(
+            "test-key",
+            "claude-sonnet-4-20250514",
+            Box::new(fake),
+        );
+        let mut messages = vec![Message {
+            role: simulacra_types::Role::User,
+            content: "delete everything".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }];
+        let mut budget = fresh_budget();
+        let sink = RecordingProviderStreamSink::default();
+
         let response = simulacra_types::StreamingProvider::chat_stream(
             &provider,
             &messages,
@@ -2828,15 +2973,29 @@ mod tests {
             &sink,
         )
         .await
-        .expect("malformed tool input is not a transport/parse error for the whole response");
+        .expect("a refusal is a well-formed response, not a transport error");
 
-        // The block completed (content_block_stop) and the turn ended in
-        // tool_use, so this isolates the invalid-JSON path from the
-        // finish-reason stripping path above.
-        assert_eq!(response.finish_reason, FinishReason::ToolUse);
+        assert_eq!(response.finish_reason, FinishReason::Refusal);
         assert!(
             response.message.tool_calls.is_empty(),
-            "a tool_use block with unparseable input must not execute with fabricated {{}} args"
+            "a completed tool_use must still be stripped under refusal"
+        );
+
+        messages.push(response.message);
+        messages.push(Message {
+            role: simulacra_types::Role::User,
+            content: "understood, let's not".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        });
+
+        let request =
+            api_types::build_request_parts(&messages, &[], "claude-sonnet-4-20250514", 1024);
+        assert_eq!(request.messages.len(), 2, "{request:?}");
+        assert!(
+            request.messages.iter().all(|m| m.role != "assistant"),
+            "the emptied assistant turn must not reach the wire: {request:?}"
         );
     }
 

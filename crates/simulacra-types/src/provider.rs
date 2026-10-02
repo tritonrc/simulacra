@@ -89,6 +89,11 @@ pub enum ProviderError {
     Transport(String),
     #[error("budget exhausted: {0}")]
     BudgetExhausted(#[from] crate::BudgetExhausted),
+    /// A streamed tool_use block's accumulated `input_json_delta` text did
+    /// not parse as JSON. Never carries the raw (possibly sensitive)
+    /// argument text, only its length.
+    #[error("tool '{tool_name}' sent unparseable input ({raw_len} bytes)")]
+    MalformedToolInput { tool_name: String, raw_len: usize },
     #[error("other: {0}")]
     Other(String),
 }
