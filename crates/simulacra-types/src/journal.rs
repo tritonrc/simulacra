@@ -127,15 +127,6 @@ pub enum JournalEntryKind {
         operation: String,
         reason: String,
     },
-    /// A provider call failed with a terminal error partway through a turn
-    /// (no LlmResponse followed the LlmRequest). Journaled before the error
-    /// propagates so replay recognizes the turn ended here instead of
-    /// mistaking the missing response for an unfinished live frontier and
-    /// re-calling the provider. Bounded: never carries raw tool arguments or
-    /// a full response body, only the error's own (already-logged) message.
-    TurnFailed {
-        message: String,
-    },
 }
 
 /// Storage backend for journal entries. Object-safe.

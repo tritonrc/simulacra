@@ -20,26 +20,6 @@ pub(super) enum ProviderCallOutcome {
     Cancelled,
 }
 
-/// Caps a provider error's `Display` message before it's journaled, as a
-/// defensive bound against an unusually large upstream error body. Never
-/// adds information beyond what the call site already logs (tracing emits
-/// the same message, unbounded, at warn/error level).
-const MAX_TURN_FAILED_MESSAGE_CHARS: usize = 2000;
-
-fn bounded_provider_error_message(error: &simulacra_types::ProviderError) -> String {
-    let message = error.to_string();
-    if message.chars().count() <= MAX_TURN_FAILED_MESSAGE_CHARS {
-        message
-    } else {
-        let mut truncated: String = message
-            .chars()
-            .take(MAX_TURN_FAILED_MESSAGE_CHARS)
-            .collect();
-        truncated.push_str("... (truncated)");
-        truncated
-    }
-}
-
 pub(super) enum ToolApprovalDecision {
     Approved,
     Denied(String),
@@ -178,48 +158,18 @@ impl AgentLoop {
             }
         }
 
-        let provider_outcome: Result<ProviderCallOutcome, RuntimeError> = if self.has_replay_entry()
-        {
+        let provider_outcome = if self.has_replay_entry() {
             let kind = self.take_replay_entry()?;
-            if let JournalEntryKind::TurnFailed { message } = &kind {
-                // The recorded turn ended in a provider failure, not a
-                // response: re-journal the same terminal entry (matching how
-                // a replayed LlmResponse is re-journaled below) and fail the
-                // same way live did. Never call the provider again for a
-                // turn that is already known to have failed, and never fall
-                // through to treat this as an unfinished frontier.
-                let message = message.clone();
-                self.journal_entry(JournalEntryKind::TurnFailed {
-                    message: message.clone(),
-                })?;
-                Err(RuntimeError::Provider(
-                    simulacra_types::ProviderError::Other(message),
-                ))
-            } else {
-                Ok(ProviderCallOutcome::Response {
-                    response: Box::new(replay_llm_response(&kind)?),
-                    streamed: false,
-                })
-            }
+            Ok(ProviderCallOutcome::Response {
+                response: Box::new(replay_llm_response(&kind)?),
+                streamed: false,
+            })
         } else {
             if self.is_cancelled() {
                 active_turn.mark_cancelled();
                 return Ok(Self::cancelled_execution());
             }
-            match self.call_provider(&step, &active_turn).await {
-                Err(RuntimeError::Provider(provider_error)) => {
-                    // Journal before propagating (ARCHITECTURE.md "Journal
-                    // Before Return"): otherwise the journal ends at
-                    // LlmRequest with no LlmResponse, and replay mistakes
-                    // that for an unfinished live frontier and re-calls the
-                    // provider instead of reproducing the failure.
-                    self.journal_entry(JournalEntryKind::TurnFailed {
-                        message: bounded_provider_error_message(&provider_error),
-                    })?;
-                    Err(RuntimeError::Provider(provider_error))
-                }
-                other => other,
-            }
+            self.call_provider(&step, &active_turn).await
         };
 
         // Check before propagating a provider cancellation/error so an
