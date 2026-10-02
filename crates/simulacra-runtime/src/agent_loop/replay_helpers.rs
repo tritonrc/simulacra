@@ -22,6 +22,49 @@ pub(super) fn entry_kind_name(kind: &JournalEntryKind) -> &'static str {
     }
 }
 
+/// Reverses the escaping Rust's `Debug` applies to a string's bytes (`\\`,
+/// `\"`, `\'`, `\n`, `\r`, `\t`, `\0`, and `\u{..}`), so a `FinishReason::
+/// Other(raw)` built from any input — including one an injected Provider
+/// constructs directly, not just an Anthropic stop_reason sanitized to
+/// `[A-Za-z0-9_-]` — round-trips through the Debug-based journal format
+/// exactly. An unrecognized escape is kept literally rather than panicking;
+/// Debug never emits one, so this only guards malformed input.
+fn unescape_debug_str(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('0') => out.push('\0'),
+            Some('u') => {
+                if chars.next() == Some('{') {
+                    let hex: String = chars.by_ref().take_while(|&h| h != '}').collect();
+                    if let Ok(code) = u32::from_str_radix(&hex, 16)
+                        && let Some(ch) = char::from_u32(code)
+                    {
+                        out.push(ch);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 pub(super) fn replay_entries_match(expected: &JournalEntryKind, actual: &JournalEntryKind) -> bool {
     match (expected, actual) {
         (JournalEntryKind::TurnStart, JournalEntryKind::TurnStart) => true,
@@ -98,11 +141,16 @@ pub(super) fn replay_llm_response(
             "StopSequence" => simulacra_types::FinishReason::StopSequence,
             "Refusal" => simulacra_types::FinishReason::Refusal,
             other => {
+                // A literal `"` inside the raw string is always escaped by
+                // Debug, so the only bare `"` in the whole repr is the final
+                // closing quote: the prefix/suffix strip is unambiguous even
+                // though the content between them still needs unescaping.
                 let raw = other
                     .strip_prefix("Other(\"")
                     .and_then(|s| s.strip_suffix("\")"))
-                    .unwrap_or(other);
-                simulacra_types::FinishReason::Other(raw.to_string())
+                    .map(unescape_debug_str)
+                    .unwrap_or_else(|| other.to_string());
+                simulacra_types::FinishReason::Other(raw)
             }
         };
 
