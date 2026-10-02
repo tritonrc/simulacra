@@ -26,7 +26,7 @@ async fn malformed_tool_input_fails_the_turn_as_a_visible_provider_error() {
         Box::new(MalformedToolInputProvider),
         ToolRegistry::new(),
         Box::new(PassthroughContext),
-        journal,
+        journal.clone(),
         default_budget(),
         None,
         None,
@@ -46,6 +46,26 @@ async fn malformed_tool_input_fails_the_turn_as_a_visible_provider_error() {
             assert_eq!(raw_len, 15);
         }
         other => panic!("expected RuntimeError::Provider(MalformedToolInput), got: {other:?}"),
+    }
+
+    // The failure must be journaled before it propagates: TurnStart,
+    // LlmRequest, then TurnFailed — never silently ending at LlmRequest,
+    // which replay would mistake for an unfinished live frontier.
+    let entries = journal
+        .read_all(&AgentId("test-agent".into()))
+        .expect("read_all should succeed");
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(entries[0].entry, JournalEntryKind::TurnStart));
+    assert!(matches!(
+        entries[1].entry,
+        JournalEntryKind::LlmRequest { .. }
+    ));
+    match &entries[2].entry {
+        JournalEntryKind::TurnFailed { message } => {
+            assert!(message.contains("get_weather"));
+            assert!(message.contains("15"));
+        }
+        other => panic!("expected TurnFailed, got: {other:?}"),
     }
 }
 

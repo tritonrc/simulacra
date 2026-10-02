@@ -19,6 +19,7 @@ pub(super) fn entry_kind_name(kind: &JournalEntryKind) -> &'static str {
         JournalEntryKind::Checkpoint { .. } => "Checkpoint",
         JournalEntryKind::HookDenial { .. } => "HookDenial",
         JournalEntryKind::HookKill { .. } => "HookKill",
+        JournalEntryKind::TurnFailed { .. } => "TurnFailed",
     }
 }
 
