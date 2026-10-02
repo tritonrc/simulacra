@@ -88,12 +88,22 @@ pub(super) fn replay_llm_response(
         assistant_message,
     } = kind
     {
+        // Persisted as the Debug repr (see turn/mod.rs). `Other(raw)` debugs
+        // as `Other("raw")`; unwrap that back into the raw string rather than
+        // losing it to the EndTurn default the way earlier journals did.
         let fr = match finish_reason.as_str() {
             "EndTurn" => simulacra_types::FinishReason::EndTurn,
             "ToolUse" => simulacra_types::FinishReason::ToolUse,
             "MaxTokens" => simulacra_types::FinishReason::MaxTokens,
             "StopSequence" => simulacra_types::FinishReason::StopSequence,
-            _ => simulacra_types::FinishReason::EndTurn,
+            "Refusal" => simulacra_types::FinishReason::Refusal,
+            other => {
+                let raw = other
+                    .strip_prefix("Other(\"")
+                    .and_then(|s| s.strip_suffix("\")"))
+                    .unwrap_or(other);
+                simulacra_types::FinishReason::Other(raw.to_string())
+            }
         };
 
         // Use the stored assistant message (with tool_calls) if available,

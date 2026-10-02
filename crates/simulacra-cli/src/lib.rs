@@ -2650,7 +2650,7 @@ task = "bootstrap"
                 });
                 assert!(matches!(
                     agent_loop.run_single_turn(&mut messages).await,
-                    Ok(TurnResult::Complete(_))
+                    Ok(TurnResult::Complete { .. })
                 ));
             }
 
@@ -2942,7 +2942,7 @@ task = "bootstrap"
             });
             let parent_follow_up = agent_loop.run_single_turn(&mut messages).await;
             assert!(
-                matches!(parent_follow_up, Ok(TurnResult::Complete(_))),
+                matches!(parent_follow_up, Ok(TurnResult::Complete { .. })),
                 "parent model turn should remain available after the child slot is consumed; got: {parent_follow_up:?}"
             );
 

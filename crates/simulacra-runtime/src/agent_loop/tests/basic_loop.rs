@@ -1,4 +1,23 @@
 #[tokio::test]
+async fn refusal_finish_reason_exits_with_typed_refusal_outcome() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![refusal_response()]);
+    let mut agent = build_loop(
+        provider,
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal.clone(),
+        default_budget(),
+    );
+
+    let output = agent.run("do something unsafe").await.expect("run should succeed");
+
+    // Distinct from ExitReason::Complete so an embedding app can tell a
+    // refusal apart from an ordinary finished turn.
+    assert_eq!(output.exit_reason, ExitReason::Refusal);
+}
+
+#[tokio::test]
 async fn simple_text_response_exits_complete() {
     let journal = Arc::new(InMemoryJournalStorage::new());
     let provider = FakeProvider::new(vec![text_response("Hello, world!")]);

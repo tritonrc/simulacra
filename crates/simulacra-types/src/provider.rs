@@ -19,6 +19,28 @@ pub enum FinishReason {
     ToolUse,
     MaxTokens,
     StopSequence,
+    /// The provider's safety classifier refused to continue
+    /// (Anthropic `stop_reason: "refusal"`).
+    Refusal,
+    /// An unrecognized or missing stop reason. Carries the raw provider
+    /// value (or `"missing"`) instead of silently coercing to `EndTurn`.
+    Other(String),
+}
+
+impl FinishReason {
+    /// The provider-facing string this reason corresponds to. Used for OTel
+    /// GenAI span attributes so an `Other` reason surfaces its raw value
+    /// rather than a generic label.
+    pub fn as_raw(&self) -> &str {
+        match self {
+            FinishReason::EndTurn => "end_turn",
+            FinishReason::ToolUse => "tool_use",
+            FinishReason::MaxTokens => "max_tokens",
+            FinishReason::StopSequence => "stop_sequence",
+            FinishReason::Refusal => "refusal",
+            FinishReason::Other(raw) => raw,
+        }
+    }
 }
 
 /// Incremental provider events emitted while a streaming response is assembled.
@@ -116,6 +138,10 @@ pub enum ExitReason {
     Cancelled,
     /// Governance hook killed execution (S026).
     PolicyKill { hook: String, reason: String },
+    /// The model refused to continue (`FinishReason::Refusal`). The loop
+    /// ended cleanly; this is distinct from `Complete` so an embedding app
+    /// can show a refusal differently from an ordinary finished turn.
+    Refusal,
     /// Unrecoverable error.
     Error(String),
 }

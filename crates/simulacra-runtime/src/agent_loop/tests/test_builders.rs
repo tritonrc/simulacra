@@ -19,6 +19,27 @@ fn text_response(content: &str) -> ProviderResponse {
     }
 }
 
+fn refusal_response() -> ProviderResponse {
+    simulacra_types::ProviderResponse {
+        message: Message {
+            role: Role::Assistant,
+            content: String::new(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        },
+        token_usage: simulacra_types::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+        },
+        finish_reason: simulacra_types::FinishReason::Refusal,
+        provider_response_id: Some("resp-refusal".into()),
+        model: "test-model".into(),
+    }
+}
+
 fn tool_call_response(tool_name: &str, args: serde_json::Value) -> ProviderResponse {
     simulacra_types::ProviderResponse {
         message: Message {

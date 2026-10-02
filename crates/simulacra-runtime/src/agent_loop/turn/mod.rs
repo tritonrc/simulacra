@@ -11,7 +11,10 @@ pub(super) struct TurnExecution {
 
 pub(super) enum ProviderCallOutcome {
     Response {
-        response: simulacra_types::ProviderResponse,
+        // Boxed: FinishReason::Other(String) (added alongside Refusal) grew
+        // ProviderResponse past clippy's large_enum_variant threshold next to
+        // the unit `Cancelled` variant.
+        response: Box<simulacra_types::ProviderResponse>,
         streamed: bool,
     },
     Cancelled,
@@ -158,7 +161,7 @@ impl AgentLoop {
         let provider_outcome = if self.has_replay_entry() {
             let kind = self.take_replay_entry()?;
             Ok(ProviderCallOutcome::Response {
-                response: replay_llm_response(&kind)?,
+                response: Box::new(replay_llm_response(&kind)?),
                 streamed: false,
             })
         } else {
@@ -264,7 +267,10 @@ impl AgentLoop {
                 self.sink.emit(ActivityEvent::TurnComplete);
             }
             return Ok(TurnExecution {
-                result: TurnResult::Complete(response.message),
+                result: TurnResult::Complete {
+                    message: response.message,
+                    finish_reason: response.finish_reason,
+                },
                 token_usage: response.token_usage,
                 budget_exhausted: None,
             });

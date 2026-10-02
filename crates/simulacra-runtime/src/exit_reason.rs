@@ -10,6 +10,7 @@ pub(crate) fn exit_reason_to_snake_case(reason: &ExitReason) -> String {
         ExitReason::AwaitingApproval => "awaiting_approval".into(),
         ExitReason::Cancelled => "cancelled".into(),
         ExitReason::PolicyKill { .. } => "policy_kill".into(),
+        ExitReason::Refusal => "refusal".into(),
         // Keep the machine-readable terminal category stable. The detailed
         // error remains available in the typed output/message and must not be
         // folded into a status-like wire value.

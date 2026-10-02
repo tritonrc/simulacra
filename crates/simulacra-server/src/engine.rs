@@ -166,6 +166,9 @@ pub fn map_exit_reason(exit_reason: &simulacra_types::ExitReason) -> (TaskState,
         }
         ExitReason::Error(msg) => (TaskState::Failed, Some(msg.clone())),
         ExitReason::AwaitingApproval => (TaskState::WaitingApproval, None),
+        // Clean stop, not a crash or a kill, so treat it like MaxTurns: the
+        // task finished with a reason tag the caller can show the user.
+        ExitReason::Refusal => (TaskState::Completed, Some("refusal".into())),
     }
 }
 

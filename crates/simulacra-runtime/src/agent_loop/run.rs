@@ -126,9 +126,16 @@ impl AgentLoop {
                 .saturating_add(turn.token_usage.cache_write_input_tokens);
 
             match turn.result {
-                TurnResult::Complete(_) => {
+                TurnResult::Complete { finish_reason, .. } => {
                     self.emit_replay_ratio(total_replay_entries);
-                    let exit_reason = ExitReason::Complete;
+                    // A refusal ended the turn loop cleanly, same as any other
+                    // no-tool-calls stop, but the embedding app needs to tell
+                    // it apart from an ordinary finish.
+                    let exit_reason = if finish_reason == simulacra_types::FinishReason::Refusal {
+                        ExitReason::Refusal
+                    } else {
+                        ExitReason::Complete
+                    };
                     // S009: Log agent completion at INFO with exit reason and token total
                     tracing::info!(
                         "gen_ai.agent.name" = self.config.agent_id.0.as_str(),
