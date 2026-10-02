@@ -25,6 +25,32 @@ pub(super) enum ToolApprovalDecision {
     Denied(String),
 }
 
+/// Tool calls are only safe to dispatch when the turn genuinely ended in
+/// `ToolUse`. Any provider can hand back tool_calls alongside a different
+/// finish reason (truncation, a refusal, an unknown reason); executing them
+/// would run an unintended or incomplete call and leave an orphan tool_use
+/// with no tool_result in the next request. Never logs the dropped calls'
+/// arguments, only their names.
+fn enforce_tool_calls_require_tool_use_finish(response: &mut simulacra_types::ProviderResponse) {
+    if response.finish_reason == simulacra_types::FinishReason::ToolUse
+        || response.message.tool_calls.is_empty()
+    {
+        return;
+    }
+    let tool_names: Vec<&str> = response
+        .message
+        .tool_calls
+        .iter()
+        .map(|tc| tc.name.as_str())
+        .collect();
+    tracing::warn!(
+        finish_reason = ?response.finish_reason,
+        tool_names = ?tool_names,
+        "dropping tool call(s) collected under a non-tool_use finish reason"
+    );
+    response.message.tool_calls.clear();
+}
+
 impl AgentLoop {
     /// Run exactly one LLM turn: call provider, process response, dispatch tool calls, return.
     ///
@@ -177,10 +203,17 @@ impl AgentLoop {
         // hidden by the provider's concurrent terminal outcome.
         self.check_pending_spawn_hook_kill()?;
         let provider_outcome = provider_outcome?;
-        let (response, streamed) = match provider_outcome {
+        let (mut response, streamed) = match provider_outcome {
             ProviderCallOutcome::Response { response, streamed } => (response, streamed),
             ProviderCallOutcome::Cancelled => return Ok(Self::cancelled_execution()),
         };
+        // Runtime-wide guard: any provider (Anthropic, OpenAI, or an
+        // embedder's own injected Provider) can return tool_calls alongside
+        // a finish reason other than ToolUse (e.g. truncated mid-call under
+        // MaxTokens). This is the single choke point before the hook,
+        // journal, or dispatcher sees the response, so the persisted message
+        // and the next request stay consistent — no orphan tool_use.
+        enforce_tool_calls_require_tool_use_finish(&mut response);
 
         if let Some(ref pipeline) = self.pipeline {
             let after_ctx = serde_json::json!({

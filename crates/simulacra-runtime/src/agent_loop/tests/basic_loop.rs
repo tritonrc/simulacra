@@ -49,6 +49,46 @@ async fn malformed_tool_input_fails_the_turn_as_a_visible_provider_error() {
     }
 }
 
+/// The Anthropic adapter strips its own tool calls when the finish reason
+/// isn't ToolUse, but that is not the only Provider the runtime ever talks
+/// to: OpenAI, and any embedder's own injected Provider, go through the same
+/// agent loop. This exercises the runtime-level guard directly with a fake
+/// provider that (as some real provider could) hands back a tool call under
+/// MaxTokens — the dispatcher must never see it.
+#[tokio::test]
+async fn injected_provider_tool_call_under_max_tokens_is_dropped_by_the_runtime_not_dispatched() {
+    let journal = Arc::new(InMemoryJournalStorage::new());
+    let provider = FakeProvider::new(vec![tool_call_response_under_max_tokens(
+        "delete_everything",
+        serde_json::json!({"path": "/"}),
+    )]);
+    let mut agent = build_loop(
+        provider,
+        ToolRegistry::new(),
+        Box::new(PassthroughContext),
+        journal,
+        default_budget(),
+    );
+
+    let output = agent
+        .run("do a big thing")
+        .await
+        .expect("a stripped tool call ends the turn cleanly, not with an error");
+
+    // Complete, not ToolCallsProcessed-in-disguise: the tool was never
+    // dispatched (ToolRegistry::new() has no tools registered at all, so a
+    // dispatch attempt would itself error the run).
+    assert_eq!(output.exit_reason, ExitReason::Complete);
+    assert!(
+        output
+            .messages
+            .iter()
+            .all(|message| message.tool_calls.is_empty()),
+        "the persisted assistant message must not carry the dropped tool call: {:?}",
+        output.messages
+    );
+}
+
 #[tokio::test]
 async fn refusal_finish_reason_exits_with_typed_refusal_outcome() {
     let journal = Arc::new(InMemoryJournalStorage::new());
