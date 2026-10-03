@@ -90,26 +90,20 @@ fn debug_of_a_config_hides_credentials_in_the_base_url() {
     }
     assert!(rendered.contains("gw.example/v1"), "{rendered}");
 }
-
 #[tokio::test(flavor = "current_thread")]
-async fn an_upstream_error_that_echoes_the_url_does_not_carry_its_credentials_on() {
-    let gateway = FakeHttpClient::new(CannedResponse::json(
-        400,
-        json!({ "error": { "message": "bad request to /v1?token=tok-echoed (user pw-echoed)" } }),
-    ));
+async fn a_base_url_carrying_credentials_is_refused_before_anything_is_sent() {
+    let gateway = FakeHttpClient::new(CannedResponse::json(200, success_response_json("stop")));
     let base = gateway
         .base_url()
-        .replace("http://", "http://user:pw-echoed@")
-        + "/v1?token=tok-echoed";
+        .replace("http://", "http://user:pw-in-url@")
+        + "/v1";
     let provider = OpenAiProvider::with_config(OpenAiConfig::new(base, "k", "m"));
 
     let err = provider
         .chat(&[user_message("hi")], &[], &mut fresh_budget())
         .await
-        .expect_err("400 is an error");
+        .expect_err("credentials in the URL are refused");
 
-    let rendered = format!("{err:?}");
-    for secret in ["tok-echoed", "pw-echoed"] {
-        assert!(!rendered.contains(secret), "{rendered}");
-    }
+    assert!(!format!("{err:?}").contains("pw-in-url"));
+    assert!(gateway.requests.lock().unwrap().is_empty());
 }

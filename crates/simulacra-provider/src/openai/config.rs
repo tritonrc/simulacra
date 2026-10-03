@@ -99,10 +99,8 @@ impl OpenAiConfig {
     /// is bounded before it travels on in a `ProviderError`.
     pub(super) fn scrub_upstream_text(&self, text: &str) -> String {
         let mut scrubbed = text.to_owned();
-        let url_secrets = base_url_secrets(&self.base_url);
         let secrets = std::iter::once(self.api_key.as_str())
             .chain(self.extra_headers.iter().map(|(_, value)| value.as_str()))
-            .chain(url_secrets.iter().map(String::as_str))
             .filter(|secret| !secret.is_empty());
         // Longest first, so a secret containing another is masked whole.
         let mut secrets: Vec<&str> = secrets.collect();
@@ -115,24 +113,6 @@ impl OpenAiConfig {
             None => scrubbed,
         }
     }
-}
-
-/// Userinfo and query values in the base URL, which an upstream error that
-/// echoes the request URL would otherwise carry on.
-fn base_url_secrets(base_url: &str) -> Vec<String> {
-    let Ok(url) = url::Url::parse(base_url) else {
-        return Vec::new();
-    };
-    let mut secrets: Vec<String> = url
-        .query_pairs()
-        .map(|(_, value)| value.into_owned())
-        .collect();
-    secrets.extend(url.password().map(str::to_owned));
-    secrets.push(url.username().to_owned());
-    if let Some(query) = url.query() {
-        secrets.push(query.to_owned());
-    }
-    secrets
 }
 
 /// The base URL without userinfo or query, which can carry credentials.

@@ -17,6 +17,14 @@ pub(super) fn build_chat_completions_url(base_url: &str) -> Result<String, Provi
     let mut url = Url::parse(base_url)
         .map_err(|e| ProviderError::Other(format!("invalid OpenAI base URL: {e}")))?;
 
+    // Credentials travel only in headers, which are what error text is
+    // scrubbed of; a base URL carrying one could leak it through an echo.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ProviderError::Other(
+            "the OpenAI base URL must not carry credentials; use the api key or extra headers"
+                .to_owned(),
+        ));
+    }
     let existing_path = url.path();
     let suffix = if existing_path.is_empty() || existing_path == "/" {
         "/v1/chat/completions"
