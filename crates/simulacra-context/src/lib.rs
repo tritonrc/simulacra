@@ -64,10 +64,11 @@ pub(crate) fn message_tokens(message: &Message) -> u64 {
 /// What one image costs a request, whatever its source carries. A provider
 /// counts an image by its pixels, not its encoding, so tokenizing a base64
 /// source as text overcounts by orders of magnitude and a file id undercounts.
-/// The bound covers Claude (about 1,600 after resizing), GPT-4o at high
-/// detail, and the patch-capped GPT-4.1/5 mini family (about 2,490). GPT-4o
-/// mini's inflated image count (about 25k for 1024x1024) is outside it.
-pub(crate) const IMAGE_BLOCK_TOKENS: u64 = 2_500;
+/// This is the ceiling: Claude 4.7 and later downscale any image to at most
+/// 4,784 visual tokens, which also covers GPT-4o and the patch-capped
+/// GPT-4.1/5 mini family. GPT-4o mini's inflated image count (about 25k for
+/// 1024x1024) is outside it.
+pub(crate) const IMAGE_BLOCK_TOKENS: u64 = 4_800;
 
 /// The share of a message's cost that compaction cannot reclaim: tool-call
 /// ids/names/arguments, `tool_call_id`, and provider-native blocks all must

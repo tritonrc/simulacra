@@ -69,11 +69,12 @@ fn a_large_inline_image_survives_compaction_after_another_tool_step() {
     let kept = SlidingWindowStrategy::new().compact(&messages, 200_000);
 
     assert_eq!(kept.len(), messages.len(), "nothing needed dropping");
-    assert!(total_tokens(&kept) < 5_000);
+    assert!(total_tokens(&kept) < 10_000);
 }
 
-/// Six screenshots in a turn reserve at least what Claude bills for six
-/// full-size images (about 1,600 each), so the window does not overflow.
+/// Six screenshots in a turn reserve at least what a high-resolution Claude
+/// model bills for six full-size images (4,784 each), so the window does not
+/// overflow.
 #[test]
 fn several_images_reserve_at_least_a_claude_full_size_image_each() {
     let mut messages = vec![msg(Role::User, "compare these")];
@@ -82,5 +83,5 @@ fn several_images_reserve_at_least_a_claude_full_size_image_each() {
         messages.push(call(&id));
         messages.push(image_result(&id, big_base64()));
     }
-    assert!(total_tokens(&messages) >= 6 * 1_600);
+    assert!(total_tokens(&messages) >= 6 * 4_784);
 }
