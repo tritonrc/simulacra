@@ -1,7 +1,6 @@
 //! Serde models for the Anthropic Messages API.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 
 // ── Request types ──────────────────────────────────────────────────
 
@@ -146,6 +145,7 @@ use simulacra_types::{
 };
 
 use crate::finish_reason::sanitize_other_reason;
+use crate::tool_pairs::normalize_tool_pairs;
 
 /// Map an Anthropic `stop_reason` to our `FinishReason`. A value we don't
 /// recognize yet — or no `stop_reason` at all — carries its raw string in
@@ -181,65 +181,6 @@ pub(crate) fn drop_tool_calls_unless_tool_use(
         "dropping tool call(s) collected under a non-tool_use finish reason"
     );
     tool_calls.clear();
-}
-
-fn normalize_tool_pairs(messages: &[Message]) -> Vec<Message> {
-    let mut normalized = Vec::with_capacity(messages.len());
-    for (index, message) in messages.iter().enumerate() {
-        match message.role {
-            Role::Tool => {
-                // Tool results are injected immediately after their assistant
-                // tool_use anchor below. Unknown and malformed ids are dropped
-                // as orphans.
-            }
-            _ => {
-                normalized.push(message.clone());
-
-                if message.role != Role::Assistant || message.tool_calls.is_empty() {
-                    continue;
-                }
-
-                let expected_tool_use_ids: HashSet<&str> = message
-                    .tool_calls
-                    .iter()
-                    .map(|tool_call| tool_call.id.as_str())
-                    .collect();
-                let mut latest_tool_results: HashMap<&str, Message> = HashMap::new();
-
-                for candidate in messages
-                    .iter()
-                    .skip(index + 1)
-                    .take_while(|candidate| candidate.role != Role::Assistant)
-                {
-                    if candidate.role != Role::Tool {
-                        continue;
-                    }
-
-                    let Some(tool_call_id) = candidate.tool_call_id.as_deref() else {
-                        continue;
-                    };
-
-                    if expected_tool_use_ids.contains(tool_call_id) {
-                        latest_tool_results.insert(tool_call_id, candidate.clone());
-                    }
-                }
-
-                for tool_call in &message.tool_calls {
-                    if let Some(tool_result) = latest_tool_results.remove(tool_call.id.as_str()) {
-                        normalized.push(tool_result);
-                    } else {
-                        tracing::warn!(
-                            tool_use_id = %tool_call.id,
-                            content_preview = %message.content.chars().take(120).collect::<String>(),
-                            "assistant tool_use has no matching tool_result before the next assistant message; Anthropic will likely reject the request"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    normalized
 }
 
 fn message_sequence_changed(original: &[Message], normalized: &[Message]) -> bool {
@@ -1022,7 +963,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].contains("tool_use_id=missing"));
         assert!(events[0].contains("content_preview=need the missing value"));
-        assert!(events[0].contains("Anthropic will likely reject"));
+        assert!(events[0].contains("the provider will likely reject"));
     }
 
     #[test]
