@@ -250,6 +250,7 @@ pub struct AnthropicProvider {
     model: String,
     http: Box<dyn HttpClient>,
     max_output_tokens: u32,
+    prompt_caching: bool,
 }
 
 impl AnthropicProvider {
@@ -260,6 +261,7 @@ impl AnthropicProvider {
             model: model.into(),
             http: Box::new(ReqwestClient::new()),
             max_output_tokens: output_cap::DEFAULT_MAX_OUTPUT_TOKENS,
+            prompt_caching: false,
         }
     }
 
@@ -267,6 +269,28 @@ impl AnthropicProvider {
     pub fn with_max_output_tokens(mut self, max_output_tokens: u32) -> Self {
         self.max_output_tokens = max_output_tokens.max(1);
         self
+    }
+
+    /// Ask Anthropic to cache the request prefix. An agent loop resends its
+    /// whole history every call, so a later call can read that prefix at the
+    /// model's cache-read rate instead of the input rate. S065 lists when a
+    /// read happens and what a miss costs.
+    pub fn with_prompt_caching(mut self) -> Self {
+        self.prompt_caching = true;
+        self
+    }
+
+    fn request<'a>(
+        &'a self,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        max_tokens: u32,
+    ) -> api_types::ApiRequest<'a> {
+        let mut request = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
+        if self.prompt_caching {
+            request.cache_control = Some(api_types::CacheControl::EPHEMERAL);
+        }
+        request
     }
 
     /// Create a provider with a custom HTTP client (for testing).
@@ -281,6 +305,7 @@ impl AnthropicProvider {
             model: model.into(),
             http,
             max_output_tokens: output_cap::DEFAULT_MAX_OUTPUT_TOKENS,
+            prompt_caching: false,
         }
     }
 
@@ -749,7 +774,7 @@ impl Provider for AnthropicProvider {
 
         // Build and serialize the request body synchronously.
         let max_tokens = output_cap::request_max_tokens(budget, self.max_output_tokens);
-        let api_req = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
+        let api_req = self.request(messages, tools, max_tokens);
         let body = match serde_json::to_vec(&api_req) {
             Ok(b) => b,
             Err(e) => {
@@ -965,7 +990,7 @@ impl StreamingProvider for AnthropicProvider {
         }
 
         let max_tokens = output_cap::request_max_tokens(budget, self.max_output_tokens);
-        let api_req = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
+        let api_req = self.request(messages, tools, max_tokens);
         let body = match serde_json::to_vec(&api_req) {
             Ok(b) => b,
             Err(e) => {
@@ -4152,5 +4177,52 @@ mod tests {
                 "expected an ERROR provider error event on the chat span with the non-retryable error details"
             );
         }
+    }
+
+    // ── Prompt caching ─────────────────────────────────────────────
+
+    fn hello() -> Vec<Message> {
+        vec![Message {
+            role: simulacra_types::Role::User,
+            content: "Hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }]
+    }
+
+    async fn sent_cache_control(caching: bool, stream: bool) -> Option<serde_json::Value> {
+        let (capturing, captured) = CapturingHttpClient::new(200, &success_response_json());
+        let mut provider =
+            AnthropicProvider::with_http_client("k", "claude-sonnet-5-5", Box::new(capturing));
+        if caching {
+            provider = provider.with_prompt_caching();
+        }
+        let mut budget = fresh_budget();
+        if stream {
+            let sink = RecordingProviderStreamSink::default();
+            provider
+                .chat_stream(&hello(), &[], &mut budget, &sink)
+                .await
+                .unwrap();
+        } else {
+            provider.chat(&hello(), &[], &mut budget).await.unwrap();
+        }
+        let body = captured.lock().await.pop().expect("one request was sent");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        body.get("cache_control").cloned()
+    }
+
+    #[tokio::test]
+    async fn prompt_caching_asks_for_automatic_caching_on_both_paths() {
+        let ephemeral = Some(serde_json::json!({ "type": "ephemeral" }));
+        assert_eq!(sent_cache_control(true, false).await, ephemeral);
+        assert_eq!(sent_cache_control(true, true).await, ephemeral);
+    }
+
+    #[tokio::test]
+    async fn without_prompt_caching_the_request_carries_no_cache_control() {
+        assert_eq!(sent_cache_control(false, false).await, None);
+        assert_eq!(sent_cache_control(false, true).await, None);
     }
 }

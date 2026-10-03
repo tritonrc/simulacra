@@ -35,3 +35,4 @@
 | [S061](S061-path-shaped-child-ids.md) | Path-Shaped Child Ids from `task_name` | Active | `simulacra-runtime` |
 | [S063](S063-tool-result-provider-content.md) | Provider Content Blocks on Tool Results | Active | `simulacra-types`, `simulacra-tool`, `simulacra-runtime`, `simulacra-provider` |
 | [S064](S064-cell-fetch-hardening.md) | Cell fetch hardening: per-hop redirect authorization, https-only, prefetch walk deadline | Active — implemented on `js-cell-fetch-hardening` | `simulacra-http`, `simulacra-sandbox`, `simulacra-quickjs` |
+| [S065](S065-anthropic-prompt-caching.md) | Anthropic Automatic Prompt Caching | Active — implemented | `simulacra-provider` |
