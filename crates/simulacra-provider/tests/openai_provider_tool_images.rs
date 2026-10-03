@@ -144,3 +144,50 @@ async fn images_join_a_user_message_that_follows_instead_of_doubling_it() {
         ])
     );
 }
+
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The unsendable-image warning fires and names neither the file id nor
+/// any image data.
+#[tokio::test(flavor = "current_thread")]
+async fn the_unsendable_image_warning_carries_no_id_or_data() {
+    let logs = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let file = serde_json::json!({"type":"file","file_id":"file_SECRET123"});
+    sent_messages(&history(Some(file))).await;
+    // Base64 with no media type is unsendable while still carrying data.
+    let headless = serde_json::json!({"type":"base64","data":"SECRETIMAGEDATA"});
+    sent_messages(&history(Some(headless))).await;
+
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        text.matches("cannot send").count(),
+        2,
+        "one warning per unsendable image: {text}"
+    );
+    assert!(!text.contains("file_SECRET123"), "{text}");
+    assert!(!text.contains("SECRETIMAGEDATA"), "{text}");
+}
