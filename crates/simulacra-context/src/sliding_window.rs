@@ -2,7 +2,7 @@
 //! it, and as much of the recent tail as the token budget allows.
 
 use crate::budget::{enforce_token_budget, exchange_edge, kept_window_start};
-use crate::{ContextStrategy, Message, Role, message_tokens};
+use crate::{ContextStrategy, IMAGE_BLOCK_TOKENS, Message, Role, message_tokens};
 
 /// Sliding-window context strategy.
 ///
@@ -12,6 +12,7 @@ use crate::{ContextStrategy, Message, Role, message_tokens};
 /// (cl100k_base).
 pub struct SlidingWindowStrategy {
     pinned_prefix: usize,
+    image_tokens: u64,
 }
 
 impl SlidingWindowStrategy {
@@ -36,7 +37,17 @@ impl SlidingWindowStrategy {
     /// assistant turn immediately following it is dropped whichever budget
     /// applies; the pin protects its own range, not what abuts it.
     pub fn with_pinned_prefix(n: usize) -> Self {
-        Self { pinned_prefix: n }
+        Self {
+            pinned_prefix: n,
+            image_tokens: IMAGE_BLOCK_TOKENS,
+        }
+    }
+
+    /// Tokens one image block costs on the host's model; the default is
+    /// [`IMAGE_BLOCK_TOKENS`].
+    pub fn with_image_tokens(mut self, tokens: u64) -> Self {
+        self.image_tokens = tokens;
+        self
     }
 }
 
@@ -72,14 +83,14 @@ impl ContextStrategy for SlidingWindowStrategy {
         // kept-window fallback below still restores the most recent user turn.
         let mut remaining = token_limit;
         for message in head {
-            remaining = remaining.saturating_sub(message_tokens(message));
+            remaining = remaining.saturating_sub(message_tokens(message, self.image_tokens));
         }
         let mut result = head.to_vec();
 
         // Walk from the end to find the start index that fits within budget.
         let mut start = rest.len();
         for (i, message) in rest.iter().enumerate().rev() {
-            let cost = message_tokens(message);
+            let cost = message_tokens(message, self.image_tokens);
             if cost > remaining {
                 break;
             }
@@ -95,7 +106,7 @@ impl ContextStrategy for SlidingWindowStrategy {
 
         // The kept window is valid but not yet bounded — see
         // `enforce_token_budget`.
-        enforce_token_budget(&mut result, token_limit, head_end);
+        enforce_token_budget(&mut result, token_limit, head_end, self.image_tokens);
 
         result
     }

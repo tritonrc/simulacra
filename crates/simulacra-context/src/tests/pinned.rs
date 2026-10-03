@@ -74,8 +74,14 @@ fn the_block_drop_pass_drops_middle_blocks_and_stops_once_the_budget_is_met() {
     // BLOCK_0 (the last user turn) and BLOCK_4 (the final block) are protected,
     // so the pass drops BLOCK_1 and BLOCK_2 — and is then inside budget, so it
     // must stop and leave BLOCK_3 standing.
-    let head_cost: u64 = messages[..3].iter().map(crate::message_tokens).sum();
-    let costs: Vec<u64> = messages[3..].iter().map(crate::message_tokens).collect();
+    let head_cost: u64 = messages[..3]
+        .iter()
+        .map(|m| crate::message_tokens(m, crate::IMAGE_BLOCK_TOKENS))
+        .sum();
+    let costs: Vec<u64> = messages[3..]
+        .iter()
+        .map(|m| crate::message_tokens(m, crate::IMAGE_BLOCK_TOKENS))
+        .collect();
     let k = costs[0];
     assert!(
         costs.iter().all(|&c| c == k) && k < crate::budget::MIN_KEPT_CONTENT_TOKENS,

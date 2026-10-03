@@ -200,7 +200,7 @@ fn message_tokens_is_cl100k_not_bytes_over_four() {
     assert_eq!(sentence.len(), 72, "test premise: byte length changed");
     // bytes/4 would be 18; cl100k is 15. Pin the real tokenizer's count.
     assert_eq!(
-        message_tokens(&msg(Role::User, sentence)),
+        message_tokens(&msg(Role::User, sentence), crate::IMAGE_BLOCK_TOKENS),
         15,
         "message_tokens must be the cl100k count (15), not bytes/4 (18)"
     );

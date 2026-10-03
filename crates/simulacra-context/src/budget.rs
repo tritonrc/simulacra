@@ -64,8 +64,11 @@ pub(crate) fn exchange_edge(msgs: &[Message], head_end: usize) -> usize {
 /// `total_tokens` helper, so it is compiled only under `cfg(test)` — otherwise
 /// `-D warnings` fails the plain build on dead code.
 #[cfg(test)]
-pub(crate) fn window_tokens(messages: &[Message]) -> u64 {
-    messages.iter().map(message_tokens).sum()
+pub(crate) fn window_tokens(messages: &[Message], image_tokens: u64) -> u64 {
+    messages
+        .iter()
+        .map(|m| message_tokens(m, image_tokens))
+        .sum()
 }
 
 /// Content at or below this token cost is left alone by the budget pass:
@@ -153,10 +156,14 @@ pub(crate) fn enforce_token_budget(
     messages: &mut Vec<Message>,
     token_limit: u64,
     fixed_head: usize,
+    image_tokens: u64,
 ) {
     normalize_leading(messages, fixed_head);
 
-    let mut costs: Vec<u64> = messages.iter().map(message_tokens).collect();
+    let mut costs: Vec<u64> = messages
+        .iter()
+        .map(|m| message_tokens(m, image_tokens))
+        .collect();
     let mut total: u64 = costs.iter().sum();
     if total <= token_limit {
         return;
@@ -179,7 +186,7 @@ pub(crate) fn enforce_token_budget(
         let marker = elided_marker(messages[i].content.len());
         if marker.len() < messages[i].content.len() {
             messages[i].content = marker;
-            let new_cost = message_tokens(&messages[i]);
+            let new_cost = message_tokens(&messages[i], image_tokens);
             total = total - costs[i] + new_cost;
             costs[i] = new_cost;
         }
@@ -204,12 +211,12 @@ pub(crate) fn enforce_token_budget(
         // provider blocks) cannot be reclaimed and must be budgeted around,
         // not granted to the content and then re-added on top.
         let others = total.saturating_sub(costs[i]);
-        let allowance =
-            token_limit.saturating_sub(others.saturating_add(immutable_tokens(&messages[i])));
+        let allowance = token_limit
+            .saturating_sub(others.saturating_add(immutable_tokens(&messages[i], image_tokens)));
         let shrunk = truncate_to_tokens(&messages[i].content, allowance);
         if !shrunk.is_empty() && shrunk.len() < messages[i].content.len() {
             messages[i].content = shrunk;
-            let new_cost = message_tokens(&messages[i]);
+            let new_cost = message_tokens(&messages[i], image_tokens);
             total = total - costs[i] + new_cost;
             costs[i] = new_cost;
         }

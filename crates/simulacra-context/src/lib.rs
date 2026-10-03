@@ -37,7 +37,7 @@ pub(crate) fn count_tokens(text: &str) -> u64 {
 /// must round-trip unchanged, so `enforce_token_budget` counts it but can only
 /// reclaim space from `content`; the `MIN_KEPT_CONTENT_TOKENS` floor keeps that
 /// pressure from gutting short turns.
-pub(crate) fn message_tokens(message: &Message) -> u64 {
+pub(crate) fn message_tokens(message: &Message, image_tokens: u64) -> u64 {
     let mut tokens = count_tokens(&message.content);
     // Tool-call arguments and provider-native blocks (`thinking` etc.) are
     // sent to the provider too; leaving them uncounted is how an "in budget"
@@ -53,7 +53,7 @@ pub(crate) fn message_tokens(message: &Message) -> u64 {
     for block in &message.provider_content {
         tokens += count_tokens(&block.provider);
         tokens += if block.value.get("type").and_then(|t| t.as_str()) == Some("image") {
-            IMAGE_BLOCK_TOKENS
+            image_tokens
         } else {
             count_tokens(&block.value.to_string())
         };
@@ -66,13 +66,15 @@ pub(crate) fn message_tokens(message: &Message) -> u64 {
 /// source as text overcounts by orders of magnitude and a file id undercounts.
 /// This is the ceiling: Claude 4.7 and later downscale any image to at most
 /// 4,784 visual tokens, which also covers GPT-4o and the patch-capped
-/// GPT-4.1/5 mini family. GPT-4o mini's inflated image count (about 25k for
-/// 1024x1024) is outside it.
-pub(crate) const IMAGE_BLOCK_TOKENS: u64 = 4_800;
+/// GPT-4.1/5 mini family. Models outside it (GPT-4.1 mini at high detail
+/// reaches about 6.6k, GPT-4o mini about 25k for 1024x1024) need the host to
+/// declare their cost with `with_image_tokens` on the strategy; this is only
+/// the default.
+pub const IMAGE_BLOCK_TOKENS: u64 = 4_800;
 
 /// The share of a message's cost that compaction cannot reclaim: tool-call
 /// ids/names/arguments, `tool_call_id`, and provider-native blocks all must
 /// reach the provider verbatim. Only `content` is shrinkable.
-pub(crate) fn immutable_tokens(message: &Message) -> u64 {
-    message_tokens(message).saturating_sub(count_tokens(&message.content))
+pub(crate) fn immutable_tokens(message: &Message, image_tokens: u64) -> u64 {
+    message_tokens(message, image_tokens).saturating_sub(count_tokens(&message.content))
 }

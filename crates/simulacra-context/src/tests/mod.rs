@@ -1,7 +1,7 @@
 //! Shared fixtures for the context-strategy tests.
 
 use crate::budget::window_tokens;
-use crate::{Message, Role};
+use crate::{IMAGE_BLOCK_TOKENS, Message, Role};
 
 mod budget;
 mod images;
@@ -34,7 +34,7 @@ fn tool_msg(content: &str) -> Message {
 }
 
 fn total_tokens(msgs: &[Message]) -> u64 {
-    window_tokens(msgs)
+    window_tokens(msgs, IMAGE_BLOCK_TOKENS)
 }
 
 /// The shape every hydrated turn arrives in: the system prompt, then the two

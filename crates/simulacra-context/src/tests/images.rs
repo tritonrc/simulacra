@@ -5,8 +5,10 @@ use serde_json::json;
 use simulacra_types::{ProviderContentBlock, ToolCallMessage};
 
 use super::{msg, total_tokens};
+use crate::budget::window_tokens;
 use crate::{
-    ContextStrategy, IMAGE_BLOCK_TOKENS, Message, Role, SlidingWindowStrategy, message_tokens,
+    ContextStrategy, IMAGE_BLOCK_TOKENS, Message, ObservationMaskingStrategy, Role,
+    SlidingWindowStrategy, message_tokens,
 };
 
 fn image_result(id: &str, source: serde_json::Value) -> Message {
@@ -38,11 +40,11 @@ fn big_base64() -> serde_json::Value {
 
 #[test]
 fn an_image_costs_the_same_whatever_its_source_carries() {
-    let inline = message_tokens(&image_result("c1", big_base64()));
-    let by_id = message_tokens(&image_result(
-        "c1",
-        json!({"type": "file", "file_id": "file_011abc"}),
-    ));
+    let inline = message_tokens(&image_result("c1", big_base64()), IMAGE_BLOCK_TOKENS);
+    let by_id = message_tokens(
+        &image_result("c1", json!({"type": "file", "file_id": "file_011abc"})),
+        IMAGE_BLOCK_TOKENS,
+    );
     assert_eq!(inline, by_id);
     assert!(
         (IMAGE_BLOCK_TOKENS..IMAGE_BLOCK_TOKENS + 20).contains(&inline),
@@ -84,4 +86,55 @@ fn several_images_reserve_at_least_a_claude_full_size_image_each() {
         messages.push(image_result(&id, big_base64()));
     }
     assert!(total_tokens(&messages) >= 6 * 4_784);
+}
+
+/// A user turn followed by three image exchanges.
+fn image_history() -> Vec<Message> {
+    let mut messages = vec![msg(Role::User, "compare these")];
+    for i in 0..3 {
+        let id = format!("c{i}");
+        messages.push(call(&id));
+        messages.push(image_result(&id, big_base64()));
+    }
+    messages
+}
+
+/// Three images fit 20k at the default 4,800 each but not at 7,000 each, so a
+/// host declaring a costlier model gets the older exchanges compacted away.
+#[test]
+fn a_host_declared_image_cost_compacts_earlier_than_the_default() {
+    let messages = image_history();
+    let limit = 20_000;
+
+    let default = SlidingWindowStrategy::new().compact(&messages, limit);
+    assert_eq!(
+        default.len(),
+        messages.len(),
+        "default keeps every exchange"
+    );
+
+    let costly = SlidingWindowStrategy::new()
+        .with_image_tokens(7_000)
+        .compact(&messages, limit);
+    assert!(costly.len() < messages.len(), "{} kept", costly.len());
+    assert!(window_tokens(&costly, 7_000) <= limit);
+}
+
+#[test]
+fn masking_honours_a_host_declared_image_cost() {
+    let messages = image_history();
+    let limit = 20_000;
+
+    let default = ObservationMaskingStrategy::new(10).compact(&messages, limit);
+    assert_eq!(
+        default.len(),
+        messages.len(),
+        "default keeps every exchange"
+    );
+
+    let costly = ObservationMaskingStrategy::new(10)
+        .with_image_tokens(7_000)
+        .compact(&messages, limit);
+    assert!(costly.len() < messages.len(), "{} kept", costly.len());
+    assert!(window_tokens(&costly, 7_000) <= limit);
 }
