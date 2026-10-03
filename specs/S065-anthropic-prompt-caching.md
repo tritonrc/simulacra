@@ -37,8 +37,9 @@ across two calls of one turn, with nothing cached.
   `cache_control` on the last cacheable block of the API message before it
   (thinking blocks and empty text cannot carry it), so the next wake can read
   the transcript back. At most three marked prefixes are honoured, the last
-  three; automatic caching takes the fourth breakpoint. With caching off the
-  marker adds nothing, and other providers ignore it.
+  three; automatic caching takes the fourth breakpoint. A marked system
+  message is ignored, since system content leads every request. With caching
+  off the marker adds nothing, and other providers ignore it.
 
 ## Assertions
 
@@ -50,6 +51,7 @@ across two calls of one turn, with nothing cached.
   message before it; a string content becomes one text block; thinking and
   empty text are skipped; only the last three marks apply.
 - [x] With caching off, a marked message adds no `cache_control`.
+- [x] A marked system message adds no breakpoint.
 
 ## Out of Scope
 

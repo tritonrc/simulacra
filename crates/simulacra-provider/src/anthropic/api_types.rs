@@ -333,7 +333,11 @@ pub(crate) fn build_request_parts<'a>(
     let mut cache_breakpoints = Vec::new();
 
     for msg in &normalized {
-        if super::cache_breakpoints::is_marked(msg) && !api_messages.is_empty() {
+        // System content leads every request, so it can never end a prefix.
+        if msg.role != Role::System
+            && super::cache_breakpoints::is_marked(msg)
+            && !api_messages.is_empty()
+        {
             cache_breakpoints.push(api_messages.len() - 1);
         }
         match msg.role {

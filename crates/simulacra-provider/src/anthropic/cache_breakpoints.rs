@@ -13,7 +13,8 @@ const MARKER: &str = "cache_breakpoint_before";
 const MAX_EXPLICIT: usize = 3;
 
 /// Marks a message: with prompt caching on, the request caches the prefix that
-/// ends just before it. Other providers ignore it.
+/// ends just before it. A marked system message is ignored: system content
+/// leads every request. Other providers ignore it.
 pub fn cache_breakpoint_before() -> ProviderContentBlock {
     ProviderContentBlock {
         provider: "anthropic".into(),

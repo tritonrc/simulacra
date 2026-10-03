@@ -4313,6 +4313,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_marked_system_message_adds_no_breakpoint() {
+        use simulacra_types::Role;
+        let mut system = text_message(Role::System, "changes");
+        system.provider_content = vec![super::super::cache_breakpoint_before()];
+        let messages = vec![
+            text_message(Role::User, "q"),
+            text_message(Role::Assistant, "a"),
+            system,
+            text_message(Role::User, "next"),
+        ];
+        let body = sent_body(true, &messages).await;
+        assert_eq!(body["messages"][1]["content"], serde_json::json!("a"));
+        assert_eq!(body.to_string().matches("\"cache_control\"").count(), 1);
+    }
+
+    #[tokio::test]
     async fn a_marked_prefix_is_cached_on_the_streaming_path_too() {
         let bytes = sent_bytes(true, true, &transcript_then_marked_context()).await;
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
