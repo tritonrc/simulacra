@@ -17,6 +17,21 @@ pub(crate) struct ApiRequest<'a> {
     /// cacheable block. A later call may read that prefix back (see S065).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+    /// Indexes into `messages` that end a host-marked cacheable prefix.
+    #[serde(skip)]
+    pub cache_breakpoints: Vec<usize>,
+}
+
+impl ApiRequest<'_> {
+    /// The wire body, with `cache_control` on each marked prefix's last block.
+    pub(crate) fn body(&self) -> serde_json::Result<Vec<u8>> {
+        if self.cache_breakpoints.is_empty() {
+            return serde_json::to_vec(self);
+        }
+        let mut body = serde_json::to_value(self)?;
+        super::cache_breakpoints::apply(&mut body, &self.cache_breakpoints);
+        serde_json::to_vec(&body)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -315,8 +330,16 @@ pub(crate) fn build_request_parts<'a>(
 
     let mut system_text: Option<String> = None;
     let mut api_messages: Vec<ApiMessage> = Vec::new();
+    let mut cache_breakpoints = Vec::new();
 
     for msg in &normalized {
+        // System content leads every request, so it can never end a prefix.
+        if msg.role != Role::System
+            && super::cache_breakpoints::is_marked(msg)
+            && !api_messages.is_empty()
+        {
+            cache_breakpoints.push(api_messages.len() - 1);
+        }
         match msg.role {
             Role::System => {
                 // Anthropic takes system as a top-level field, not in messages.
@@ -362,7 +385,7 @@ pub(crate) fn build_request_parts<'a>(
                     // `{"role":"assistant","content":""}`.
                     continue;
                 }
-                let content = if msg.provider_content.is_empty()
+                let content = if super::cache_breakpoints::only_markers(&msg.provider_content)
                     && blocks.len() == 1
                     && msg.tool_calls.is_empty()
                 {
@@ -421,6 +444,7 @@ pub(crate) fn build_request_parts<'a>(
         system: system_text,
         tools: api_tools,
         cache_control: None,
+        cache_breakpoints,
     }
 }
 

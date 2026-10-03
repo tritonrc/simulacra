@@ -30,8 +30,16 @@ across two calls of one turn, with nothing cached.
   Otherwise the prefix is written again at the cache-write rate (1.25x input);
   below the minimum length nothing is cached and nothing extra is billed.
 - Both the synchronous and the streaming paths send it.
-- The default five-minute TTL applies. No explicit block-level breakpoints are
-  added.
+- The default five-minute TTL applies.
+- A host that places content changing every wake after a stable transcript
+  marks that content's message with `cache_breakpoint_before()`, an
+  `anthropic` provider-content block. With caching on, the request also puts
+  `cache_control` on the last cacheable block of the API message before it
+  (thinking blocks and empty text cannot carry it), so the next wake can read
+  the transcript back. At most three marked prefixes are honoured, the last
+  three; automatic caching takes the fourth breakpoint. A marked system
+  message is ignored, since system content leads every request. With caching
+  off the marker adds nothing, and other providers ignore it.
 
 ## Assertions
 
@@ -39,9 +47,14 @@ across two calls of one turn, with nothing cached.
   carries `cache_control: {"type": "ephemeral"}`.
 - [x] With caching off, neither request body carries `cache_control`.
 - [x] `prompt_caching()` is false by default and true after opting in.
+- [x] A marked message puts `cache_control` on the last cacheable block of the
+  message before it; a string content becomes one text block; thinking and
+  empty text are skipped; only the last three marks apply.
+- [x] With caching off, a marked message adds no `cache_control`.
+- [x] A marked system message adds no breakpoint.
 
 ## Out of Scope
 
-- Block-level breakpoints, the one-hour TTL, and prefix reordering.
+- The one-hour TTL, and reordering a host's messages.
 - Caching on the OpenAI-compatible provider, where caching is the gateway's
   own behavior.

@@ -294,6 +294,8 @@ impl AnthropicProvider {
         let mut request = api_types::build_request_parts(messages, tools, &self.model, max_tokens);
         if self.prompt_caching {
             request.cache_control = Some(api_types::CacheControl::EPHEMERAL);
+        } else {
+            request.cache_breakpoints.clear();
         }
         request
     }
@@ -780,7 +782,7 @@ impl Provider for AnthropicProvider {
         // Build and serialize the request body synchronously.
         let max_tokens = output_cap::request_max_tokens(budget, self.max_output_tokens);
         let api_req = self.request(messages, tools, max_tokens);
-        let body = match serde_json::to_vec(&api_req) {
+        let body = match api_req.body() {
             Ok(b) => b,
             Err(e) => {
                 return Box::pin(async move {
@@ -996,7 +998,7 @@ impl StreamingProvider for AnthropicProvider {
 
         let max_tokens = output_cap::request_max_tokens(budget, self.max_output_tokens);
         let api_req = self.request(messages, tools, max_tokens);
-        let body = match serde_json::to_vec(&api_req) {
+        let body = match api_req.body() {
             Ok(b) => b,
             Err(e) => {
                 return Box::pin(async move {
@@ -4239,5 +4241,137 @@ mod tests {
     async fn without_prompt_caching_the_request_carries_no_cache_control() {
         assert_eq!(sent_cache_control(false, false).await, None);
         assert_eq!(sent_cache_control(false, true).await, None);
+    }
+
+    fn text_message(role: simulacra_types::Role, content: &str) -> Message {
+        Message {
+            role,
+            content: content.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            provider_content: vec![],
+        }
+    }
+
+    async fn sent_bytes(caching: bool, stream: bool, messages: &[Message]) -> Vec<u8> {
+        let (capturing, captured) = CapturingHttpClient::new(200, &success_response_json());
+        let mut provider =
+            AnthropicProvider::with_http_client("k", "claude-sonnet-5-5", Box::new(capturing));
+        if caching {
+            provider = provider.with_prompt_caching();
+        }
+        let mut budget = fresh_budget();
+        if stream {
+            let sink = RecordingProviderStreamSink::default();
+            provider
+                .chat_stream(messages, &[], &mut budget, &sink)
+                .await
+                .unwrap();
+        } else {
+            provider.chat(messages, &[], &mut budget).await.unwrap();
+        }
+        captured.lock().await.pop().expect("one request was sent")
+    }
+
+    async fn sent_body(caching: bool, messages: &[Message]) -> serde_json::Value {
+        serde_json::from_slice(&sent_bytes(caching, false, messages).await).unwrap()
+    }
+
+    fn transcript_then_marked_context() -> Vec<Message> {
+        use simulacra_types::Role;
+        let mut context = text_message(Role::User, "<state>changes every wake</state>");
+        context.provider_content = vec![super::super::cache_breakpoint_before()];
+        vec![
+            text_message(Role::System, "prompt"),
+            text_message(Role::User, "first question"),
+            text_message(Role::Assistant, "first answer"),
+            context,
+            text_message(Role::User, "next question"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_marked_message_caches_the_prefix_that_ends_before_it() {
+        let body = sent_body(true, &transcript_then_marked_context()).await;
+        assert_eq!(
+            body["messages"][1]["content"],
+            serde_json::json!([{
+                "type": "text",
+                "text": "first answer",
+                "cache_control": { "type": "ephemeral" }
+            }])
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!("first question")
+        );
+        let marked = body.to_string().matches("\"cache_control\"").count();
+        assert_eq!(
+            marked, 2,
+            "the marked prefix plus the automatic breakpoint: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_marked_system_message_adds_no_breakpoint() {
+        use simulacra_types::Role;
+        let mut system = text_message(Role::System, "changes");
+        system.provider_content = vec![super::super::cache_breakpoint_before()];
+        let messages = vec![
+            text_message(Role::User, "q"),
+            text_message(Role::Assistant, "a"),
+            system,
+            text_message(Role::User, "next"),
+        ];
+        let body = sent_body(true, &messages).await;
+        assert_eq!(body["messages"][1]["content"], serde_json::json!("a"));
+        assert_eq!(body.to_string().matches("\"cache_control\"").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_marked_prefix_is_cached_on_the_streaming_path_too() {
+        let bytes = sent_bytes(true, true, &transcript_then_marked_context()).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+    }
+
+    /// Every message marked, the assistant included: with caching off the
+    /// bytes are exactly those of the unmarked transcript.
+    #[tokio::test]
+    async fn without_prompt_caching_marks_leave_the_request_byte_identical() {
+        let plain = transcript_then_marked_context()
+            .into_iter()
+            .map(|mut message| {
+                message.provider_content.clear();
+                message
+            })
+            .collect::<Vec<_>>();
+        let marked = plain
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message.provider_content = vec![super::super::cache_breakpoint_before()];
+                message
+            })
+            .collect::<Vec<_>>();
+        for stream in [false, true] {
+            assert_eq!(
+                sent_bytes(false, stream, &marked).await,
+                sent_bytes(false, stream, &plain).await
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_prompt_caching_a_marked_message_adds_nothing() {
+        let body = sent_body(false, &transcript_then_marked_context()).await;
+        assert!(!body.to_string().contains("cache_control"), "{body}");
+        assert_eq!(
+            body["messages"][1]["content"],
+            serde_json::json!("first answer")
+        );
     }
 }
