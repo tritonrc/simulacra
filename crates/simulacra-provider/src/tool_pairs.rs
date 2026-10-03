@@ -1,8 +1,11 @@
 //! Putting each tool result straight after the assistant message that called
-//! it, keeping the latest result per call and dropping orphans. Persisted
-//! histories can hold late or repeated results (a paused call answered
-//! later, then again on approval), and both Anthropic and OpenAI-compatible
-//! APIs reject a request whose tool messages are out of place.
+//! it. Only results recorded before the next assistant message count: the
+//! last of those is kept, and any result after that boundary, or for no
+//! known call, is dropped. Persisted histories can hold a late or repeated
+//! result (a call paused for approval, then answered again once approved),
+//! and both Anthropic and OpenAI-compatible APIs reject a request whose tool
+//! messages are out of place. A caller that needs a late result to reach the
+//! model has to carry it another way.
 
 use std::collections::{HashMap, HashSet};
 
