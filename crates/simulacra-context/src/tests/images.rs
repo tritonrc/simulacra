@@ -1,0 +1,73 @@
+//! An image block costs what a provider bills for an image, not the length
+//! of its encoded source.
+
+use serde_json::json;
+use simulacra_types::{ProviderContentBlock, ToolCallMessage};
+
+use super::{msg, total_tokens};
+use crate::{
+    ContextStrategy, IMAGE_BLOCK_TOKENS, Message, Role, SlidingWindowStrategy, message_tokens,
+};
+
+fn image_result(id: &str, source: serde_json::Value) -> Message {
+    Message {
+        tool_call_id: Some(id.into()),
+        provider_content: vec![ProviderContentBlock {
+            provider: "anthropic".into(),
+            value: json!({"type": "image", "source": source}),
+        }],
+        ..msg(Role::Tool, "shown")
+    }
+}
+
+fn call(id: &str) -> Message {
+    Message {
+        tool_calls: vec![ToolCallMessage {
+            id: id.into(),
+            name: "artifact_get".into(),
+            arguments: json!({}),
+        }],
+        ..msg(Role::Assistant, "")
+    }
+}
+
+/// A 1 MiB screenshot, base64-encoded the way an inline source carries it.
+fn big_base64() -> serde_json::Value {
+    json!({"type": "base64", "media_type": "image/png", "data": "iVBORw0K".repeat(180_000)})
+}
+
+#[test]
+fn an_image_costs_the_same_whatever_its_source_carries() {
+    let inline = message_tokens(&image_result("c1", big_base64()));
+    let by_id = message_tokens(&image_result(
+        "c1",
+        json!({"type": "file", "file_id": "file_011abc"}),
+    ));
+    assert_eq!(inline, by_id);
+    assert!(
+        inline >= IMAGE_BLOCK_TOKENS && inline < IMAGE_BLOCK_TOKENS + 20,
+        "{inline}"
+    );
+}
+
+/// A later tool step must not compact away the exchange that showed the
+/// image: counted as text, its base64 would dwarf a 200k window.
+#[test]
+fn a_large_inline_image_survives_compaction_after_another_tool_step() {
+    let messages = vec![
+        msg(Role::System, "sys"),
+        msg(Role::User, "look at the screenshot, then check the build"),
+        call("c1"),
+        image_result("c1", big_base64()),
+        call("c2"),
+        Message {
+            tool_call_id: Some("c2".into()),
+            ..msg(Role::Tool, "build ok")
+        },
+    ];
+
+    let kept = SlidingWindowStrategy::new().compact(&messages, 200_000);
+
+    assert_eq!(kept.len(), messages.len(), "nothing needed dropping");
+    assert!(total_tokens(&kept) < 5_000);
+}

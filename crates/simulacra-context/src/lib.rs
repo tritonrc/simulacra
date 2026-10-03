@@ -52,10 +52,20 @@ pub(crate) fn message_tokens(message: &Message) -> u64 {
     }
     for block in &message.provider_content {
         tokens += count_tokens(&block.provider);
-        tokens += count_tokens(&block.value.to_string());
+        tokens += if block.value.get("type").and_then(|t| t.as_str()) == Some("image") {
+            IMAGE_BLOCK_TOKENS
+        } else {
+            count_tokens(&block.value.to_string())
+        };
     }
     tokens
 }
+
+/// What one image costs a request, whatever its source carries. A provider
+/// bills an image by its pixels, not by its encoding: Anthropic caps an image
+/// at about 1,600 tokens after resizing, so tokenizing a base64 source as text
+/// overcounts by orders of magnitude, and a file id undercounts.
+pub(crate) const IMAGE_BLOCK_TOKENS: u64 = 1_600;
 
 /// The share of a message's cost that compaction cannot reclaim: tool-call
 /// ids/names/arguments, `tool_call_id`, and provider-native blocks all must

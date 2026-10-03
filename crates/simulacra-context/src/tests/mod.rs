@@ -4,6 +4,7 @@ use crate::budget::window_tokens;
 use crate::{Message, Role};
 
 mod budget;
+mod images;
 mod masking;
 mod pinned;
 mod pinned_budget;
