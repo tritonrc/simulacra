@@ -272,9 +272,10 @@ impl AnthropicProvider {
     }
 
     /// Ask Anthropic to cache the request prefix. An agent loop resends its
-    /// whole history every call; a call within the cache's five-minute life
-    /// reads the prefix the previous call wrote at a tenth of the input price.
-    /// One after it expires writes the prefix again, at 1.25x.
+    /// whole history every call, so a call can read the prefix the previous
+    /// one wrote at a tenth of the input price, when it is unchanged, long
+    /// enough to cache, and still alive. Otherwise it is written, at 1.25x.
+    /// S065 lists the conditions.
     pub fn with_prompt_caching(mut self) -> Self {
         self.prompt_caching = true;
         self

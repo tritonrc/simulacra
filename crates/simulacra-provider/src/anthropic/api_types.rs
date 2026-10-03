@@ -14,7 +14,7 @@ pub(crate) struct ApiRequest<'a> {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ApiTool<'a>>,
     /// Automatic prompt caching: Anthropic places the breakpoint on the last
-    /// cacheable block, so each call reads the prefix the previous one wrote.
+    /// cacheable block. A later call may read that prefix back (see S065).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }

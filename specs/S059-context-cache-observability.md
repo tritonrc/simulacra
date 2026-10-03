@@ -105,5 +105,5 @@ Existing GenAI token-usage telemetry remains unchanged.
 ## Out of Scope
 
 - Provider request cache controls (S065) or prefix reordering.
-- Context-window estimation or limits (S060).
-- Observation masking, overflow recovery, or compaction (S062–S066).
+- Context-window estimation or limits.
+- Observation masking, overflow recovery, or compaction.
