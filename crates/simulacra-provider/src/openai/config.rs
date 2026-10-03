@@ -108,10 +108,14 @@ impl OpenAiConfig {
         for secret in secrets {
             scrubbed = scrubbed.replace(secret, "<redacted>");
         }
-        match scrubbed.char_indices().nth(MAX_UPSTREAM_TEXT_CHARS) {
-            Some((cut, _)) => format!("{}...", &scrubbed[..cut]),
-            None => scrubbed,
+        if scrubbed.chars().count() <= MAX_UPSTREAM_TEXT_CHARS {
+            return scrubbed;
         }
+        let cut = scrubbed
+            .char_indices()
+            .nth(MAX_UPSTREAM_TEXT_CHARS - 3)
+            .map_or(scrubbed.len(), |(index, _)| index);
+        format!("{}...", &scrubbed[..cut])
     }
 }
 
@@ -148,6 +152,16 @@ impl std::fmt::Debug for OpenAiConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn scrubbed_upstream_text_is_capped_at_512_chars_including_the_ellipsis() {
+        let config = OpenAiConfig::new("https://gw.example/v1", "key", "m");
+        let scrubbed = config.scrub_upstream_text(&"é".repeat(2_000));
+        assert_eq!(scrubbed.chars().count(), 512);
+        assert!(scrubbed.ends_with("..."));
+        assert_eq!(config.scrub_upstream_text("short"), "short");
+    }
+
     use super::*;
 
     #[test]

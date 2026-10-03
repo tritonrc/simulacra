@@ -19,7 +19,7 @@ pub(super) fn map_finish_reason(finish_reason: Option<&str>, refusal_seen: bool)
     }
     match finish_reason {
         Some("stop") => FinishReason::EndTurn,
-        Some("tool_calls") | Some("function_call") => FinishReason::ToolUse,
+        Some("tool_calls") => FinishReason::ToolUse,
         Some("length") => FinishReason::MaxTokens,
         Some("content_filter") => FinishReason::Refusal,
         Some(other) => FinishReason::Other(sanitize_other_reason(other)),
@@ -70,7 +70,8 @@ mod tests {
         );
         assert_eq!(
             map_finish_reason(Some("function_call"), false),
-            FinishReason::ToolUse
+            FinishReason::Other("function_call".to_string()),
+            "the legacy function_call payload is not parsed, so it must not read as ToolUse"
         );
         assert_eq!(
             map_finish_reason(Some("length"), false),

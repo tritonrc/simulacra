@@ -34,7 +34,7 @@ pub(crate) fn read_error(part: &'static str) -> impl Fn(reqwest::Error) -> Provi
                 "the provider stopped sending the {part}; retry."
             ));
         }
-        ProviderError::Other(format!("failed to read {part}: {err}"))
+        ProviderError::Other(format!("failed to read {part}: {}", err.without_url()))
     }
 }
 

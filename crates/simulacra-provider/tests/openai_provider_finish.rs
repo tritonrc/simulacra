@@ -99,7 +99,7 @@ async fn content_filter_finish_reason_surfaces_as_refusal() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn legacy_function_call_finish_reason_maps_to_tool_use() {
+async fn legacy_function_call_finish_reason_is_other_because_its_payload_is_not_parsed() {
     let fake = FakeHttpClient::new(CannedResponse::json(
         200,
         success_response_json("function_call"),
@@ -112,7 +112,10 @@ async fn legacy_function_call_finish_reason_maps_to_tool_use() {
         .await
         .expect("legacy function_call is not a transport error");
 
-    assert_eq!(resp.finish_reason, FinishReason::ToolUse);
+    assert_eq!(
+        resp.finish_reason,
+        FinishReason::Other("function_call".to_string())
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
