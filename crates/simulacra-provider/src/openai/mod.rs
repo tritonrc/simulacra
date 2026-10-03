@@ -17,6 +17,7 @@ mod endpoint;
 mod finish;
 mod http;
 mod meters;
+mod tool_images;
 
 pub use config::{AuthStyle, OpenAiConfig, OutputCapField};
 
@@ -70,11 +71,8 @@ impl OpenAiProvider {
         stream: bool,
         output_cap: Option<u64>,
     ) -> serde_json::Value {
-        let api_messages: Vec<serde_json::Value> =
-            crate::tool_pairs::normalize_tool_pairs(messages)
-                .iter()
-                .map(encode::message)
-                .collect();
+        let api_messages =
+            tool_images::encode_messages(&crate::tool_pairs::normalize_tool_pairs(messages));
 
         let mut body = serde_json::json!({
             "model": self.config.model,
