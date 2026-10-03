@@ -85,7 +85,7 @@ async fn a_base64_image_follows_all_tool_messages_as_a_data_uri() {
         messages[4]["content"],
         serde_json::json!([
             {"type":"text","text":"Image(s) returned by tool call call_a:"},
-            {"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD"}},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,QUJD","detail":"high"}},
         ])
     );
 }
@@ -139,7 +139,7 @@ async fn images_join_a_user_message_that_follows_instead_of_doubling_it() {
         messages[4]["content"],
         serde_json::json!([
             {"type": "text", "text": "Image(s) returned by tool call call_a:"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD", "detail": "high"}},
             {"type": "text", "text": "what do you see?"},
         ])
     );

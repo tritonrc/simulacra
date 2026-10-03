@@ -193,6 +193,9 @@ wire has its own image form:
 - `base64` with `media_type` and `data` → `image_url` with a
   `data:<media_type>;base64,<data>` URL;
 - `url` → `image_url` with that URL;
+- every `image_url` part carries `"detail": "high"`, which caps an image at
+  2,500 patches on every model; `auto`, the default, resolves to the
+  unbounded `original` on some, which no context estimate can reserve for;
 - anything else (an Anthropic Files API `file` source, a `base64` source
   missing a field) cannot be sent. It becomes a `text` part saying the image
   is unavailable on this provider, and one warning is logged that names
