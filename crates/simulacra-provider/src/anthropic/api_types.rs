@@ -381,7 +381,7 @@ pub(crate) fn build_request_parts<'a>(
                     // `{"role":"assistant","content":""}`.
                     continue;
                 }
-                let content = if msg.provider_content.is_empty()
+                let content = if super::cache_breakpoints::only_markers(&msg.provider_content)
                     && blocks.len() == 1
                     && msg.tool_calls.is_empty()
                 {

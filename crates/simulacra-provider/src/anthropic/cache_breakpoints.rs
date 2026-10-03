@@ -22,10 +22,17 @@ pub fn cache_breakpoint_before() -> ProviderContentBlock {
 }
 
 pub(crate) fn is_marked(message: &Message) -> bool {
-    message.provider_content.iter().any(|block| {
-        block.provider == "anthropic"
-            && block.value.get("type").and_then(|t| t.as_str()) == Some(MARKER)
-    })
+    message.provider_content.iter().any(is_marker)
+}
+
+/// True when `blocks` carries nothing but markers, which never reach the wire.
+pub(crate) fn only_markers(blocks: &[ProviderContentBlock]) -> bool {
+    blocks.iter().all(is_marker)
+}
+
+fn is_marker(block: &ProviderContentBlock) -> bool {
+    block.provider == "anthropic"
+        && block.value.get("type").and_then(|t| t.as_str()) == Some(MARKER)
 }
 
 /// Puts `cache_control` on the last cacheable block of each listed message in

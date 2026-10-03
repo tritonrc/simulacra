@@ -4253,19 +4253,28 @@ mod tests {
         }
     }
 
-    async fn sent_body(caching: bool, messages: &[Message]) -> serde_json::Value {
+    async fn sent_bytes(caching: bool, stream: bool, messages: &[Message]) -> Vec<u8> {
         let (capturing, captured) = CapturingHttpClient::new(200, &success_response_json());
         let mut provider =
             AnthropicProvider::with_http_client("k", "claude-sonnet-5-5", Box::new(capturing));
         if caching {
             provider = provider.with_prompt_caching();
         }
-        provider
-            .chat(messages, &[], &mut fresh_budget())
-            .await
-            .unwrap();
-        let body = captured.lock().await.pop().expect("one request was sent");
-        serde_json::from_slice(&body).unwrap()
+        let mut budget = fresh_budget();
+        if stream {
+            let sink = RecordingProviderStreamSink::default();
+            provider
+                .chat_stream(messages, &[], &mut budget, &sink)
+                .await
+                .unwrap();
+        } else {
+            provider.chat(messages, &[], &mut budget).await.unwrap();
+        }
+        captured.lock().await.pop().expect("one request was sent")
+    }
+
+    async fn sent_body(caching: bool, messages: &[Message]) -> serde_json::Value {
+        serde_json::from_slice(&sent_bytes(caching, false, messages).await).unwrap()
     }
 
     fn transcript_then_marked_context() -> Vec<Message> {
@@ -4301,6 +4310,43 @@ mod tests {
             marked, 2,
             "the marked prefix plus the automatic breakpoint: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_marked_prefix_is_cached_on_the_streaming_path_too() {
+        let bytes = sent_bytes(true, true, &transcript_then_marked_context()).await;
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            serde_json::json!({ "type": "ephemeral" })
+        );
+    }
+
+    /// Every message marked, the assistant included: with caching off the
+    /// bytes are exactly those of the unmarked transcript.
+    #[tokio::test]
+    async fn without_prompt_caching_marks_leave_the_request_byte_identical() {
+        let plain = transcript_then_marked_context()
+            .into_iter()
+            .map(|mut message| {
+                message.provider_content.clear();
+                message
+            })
+            .collect::<Vec<_>>();
+        let marked = plain
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message.provider_content = vec![super::super::cache_breakpoint_before()];
+                message
+            })
+            .collect::<Vec<_>>();
+        for stream in [false, true] {
+            assert_eq!(
+                sent_bytes(false, stream, &marked).await,
+                sent_bytes(false, stream, &plain).await
+            );
+        }
     }
 
     #[tokio::test]
