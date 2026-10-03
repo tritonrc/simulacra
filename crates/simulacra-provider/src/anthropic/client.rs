@@ -280,6 +280,11 @@ impl AnthropicProvider {
         self
     }
 
+    /// Whether requests ask for prompt caching.
+    pub fn prompt_caching(&self) -> bool {
+        self.prompt_caching
+    }
+
     fn request<'a>(
         &'a self,
         messages: &'a [Message],
@@ -4218,6 +4223,16 @@ mod tests {
         let ephemeral = Some(serde_json::json!({ "type": "ephemeral" }));
         assert_eq!(sent_cache_control(true, false).await, ephemeral);
         assert_eq!(sent_cache_control(true, true).await, ephemeral);
+    }
+
+    #[test]
+    fn prompt_caching_reports_whether_it_is_on() {
+        assert!(!AnthropicProvider::new("k", "m").prompt_caching());
+        assert!(
+            AnthropicProvider::new("k", "m")
+                .with_prompt_caching()
+                .prompt_caching()
+        );
     }
 
     #[tokio::test]

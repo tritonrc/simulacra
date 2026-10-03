@@ -18,6 +18,7 @@ across two calls of one turn, with nothing cached.
 
 - `AnthropicProvider::with_prompt_caching()` opts a provider in. It is off by
   default, so existing hosts send byte-identical requests.
+  `prompt_caching()` reports the setting, so a host can test its own wiring.
 - When on, every request carries the top-level field
   `"cache_control": {"type": "ephemeral"}`. Anthropic places the breakpoint on
   the last cacheable block. A later call reads that prefix from cache only
@@ -37,6 +38,7 @@ across two calls of one turn, with nothing cached.
 - [x] With caching on, the request body of both `chat` and `chat_stream`
   carries `cache_control: {"type": "ephemeral"}`.
 - [x] With caching off, neither request body carries `cache_control`.
+- [x] `prompt_caching()` is false by default and true after opting in.
 
 ## Out of Scope
 
