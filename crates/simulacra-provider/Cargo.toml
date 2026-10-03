@@ -18,6 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 opentelemetry.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 rust_decimal.workspace = true

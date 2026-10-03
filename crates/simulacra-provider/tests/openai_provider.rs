@@ -1266,7 +1266,7 @@ async fn malformed_json_in_sse_data_returns_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unexpected_finish_reason_defaults_to_end_turn() {
+async fn unrecognized_finish_reason_carries_its_raw_value_instead_of_defaulting() {
     let _test_guard = test_guard();
     let body = json!({
         "id": "chatcmpl_unknown_fr",
@@ -1301,8 +1301,8 @@ async fn unexpected_finish_reason_defaults_to_end_turn() {
 
     assert_eq!(
         resp.finish_reason,
-        FinishReason::EndTurn,
-        "unrecognized finish_reason values must default to EndTurn"
+        FinishReason::Other("some_future_reason".to_string()),
+        "unrecognized finish_reason values must carry their raw string, not silently become EndTurn"
     );
 }
 

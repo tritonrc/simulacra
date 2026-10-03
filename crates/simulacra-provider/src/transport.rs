@@ -5,7 +5,38 @@
 //! Local request construction and redirect-policy failures are deterministic
 //! configuration errors and remain non-retryable.
 
+use std::time::Duration;
+
 use simulacra_types::ProviderError;
+
+/// No total timeout, so a long stream can run to the end; a stream that goes
+/// this long without a byte is dead.
+pub(crate) const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The client every provider sends through. Redirects are refused: reqwest
+/// strips only `Authorization` on a cross-host redirect, so a key carried in
+/// any other header (`x-api-key`, `api-key`) would follow it to the new host.
+/// A 3xx comes back as an ordinary error response instead.
+pub(crate) fn provider_http_client(read_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .read_timeout(read_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("the HTTP client builds, as reqwest::Client::new() assumes")
+}
+
+/// A response that stops sending past the idle timeout is a transient
+/// failure worth a retry. `part` names what was being read.
+pub(crate) fn read_error(part: &'static str) -> impl Fn(reqwest::Error) -> ProviderError {
+    move |err| {
+        if err.is_timeout() {
+            return ProviderError::Transport(format!(
+                "the provider stopped sending the {part}; retry."
+            ));
+        }
+        ProviderError::Other(format!("failed to read {part}: {}", err.without_url()))
+    }
+}
 
 /// Stage of the HTTP exchange that failed. Used to tell the caller how far the
 /// request got before the connection gave out.
