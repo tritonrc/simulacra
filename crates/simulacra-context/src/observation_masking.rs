@@ -2,7 +2,7 @@
 //! back to the sliding window.
 
 use crate::budget::{enforce_token_budget, kept_window_start};
-use crate::{ContextStrategy, Message, Role, message_tokens};
+use crate::{ContextStrategy, IMAGE_BLOCK_TOKENS, Message, Role, message_tokens};
 
 /// Observation-masking context strategy.
 ///
@@ -21,17 +21,26 @@ use crate::{ContextStrategy, Message, Role, message_tokens};
 pub struct ObservationMaskingStrategy {
     /// Number of most-recent tool result messages to keep verbatim.
     keep_recent_tool_results: usize,
+    image_tokens: u64,
 }
 
 impl ObservationMaskingStrategy {
     pub fn new(keep_recent_tool_results: usize) -> Self {
         Self {
             keep_recent_tool_results,
+            image_tokens: IMAGE_BLOCK_TOKENS,
         }
     }
 
-    fn estimate_tokens(message: &Message) -> u64 {
-        message_tokens(message)
+    /// Tokens one image block costs on the host's model; the default is
+    /// [`IMAGE_BLOCK_TOKENS`].
+    pub fn with_image_tokens(mut self, tokens: u64) -> Self {
+        self.image_tokens = tokens;
+        self
+    }
+
+    fn estimate_tokens(&self, message: &Message) -> u64 {
+        message_tokens(message, self.image_tokens)
     }
 }
 
@@ -77,7 +86,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
             .collect();
 
         // 3. Check if we fit within token_limit after masking.
-        let total: u64 = masked.iter().map(Self::estimate_tokens).sum();
+        let total: u64 = masked.iter().map(|m| self.estimate_tokens(m)).sum();
         if total <= token_limit {
             return masked;
         }
@@ -87,7 +96,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
         let mut remaining = token_limit;
 
         let (system, rest) = if masked[0].role == Role::System {
-            let cost = Self::estimate_tokens(&masked[0]);
+            let cost = self.estimate_tokens(&masked[0]);
             // Always keep system; saturate; do not early-return system-only — the
             // kept-window fallback below keeps the most recent user turn.
             remaining = remaining.saturating_sub(cost);
@@ -99,7 +108,7 @@ impl ContextStrategy for ObservationMaskingStrategy {
 
         let mut start_idx = rest.len();
         for (i, msg) in rest.iter().enumerate().rev() {
-            let cost = Self::estimate_tokens(msg);
+            let cost = self.estimate_tokens(msg);
             if cost > remaining {
                 break;
             }
@@ -112,7 +121,12 @@ impl ContextStrategy for ObservationMaskingStrategy {
 
         // The kept window is valid but not yet bounded — see
         // `enforce_token_budget`.
-        enforce_token_budget(&mut result, token_limit, usize::from(system));
+        enforce_token_budget(
+            &mut result,
+            token_limit,
+            usize::from(system),
+            self.image_tokens,
+        );
 
         result
     }

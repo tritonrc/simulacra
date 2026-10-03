@@ -76,7 +76,12 @@ fn image_part(source: Option<&serde_json::Value>) -> serde_json::Value {
         _ => None,
     };
     match url {
-        Some(url) => serde_json::json!({"type": "image_url", "image_url": {"url": url}}),
+        // `high` bounds an image's cost on every model (at most 2,500
+        // patches); `auto` means unbounded `original` on some.
+        Some(url) => serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": url, "detail": "high"},
+        }),
         None => {
             tracing::warn!("tool-result image has a source this provider cannot send");
             serde_json::json!({

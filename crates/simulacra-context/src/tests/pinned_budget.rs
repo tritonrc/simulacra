@@ -54,7 +54,7 @@ fn a_pinned_window_is_bounded_by_the_budget_plus_the_protected_set() {
     let residual: u64 = messages[..4]
         .iter()
         .chain(std::iter::once(messages.last().unwrap()))
-        .map(message_tokens)
+        .map(|m| message_tokens(m, crate::IMAGE_BLOCK_TOKENS))
         .sum();
     let limit = 40;
 
