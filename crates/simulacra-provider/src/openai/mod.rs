@@ -5,240 +5,22 @@ use std::future::Future;
 use std::pin::Pin;
 
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::Histogram;
 use simulacra_types::{
-    FinishReason, Message, Provider, ProviderError, ProviderResponse, ProviderStreamEvent,
-    ProviderStreamSink, ResourceBudget, Role, StreamingProvider, TokenUsage, ToolCallMessage,
-    ToolDefinition,
+    Message, Provider, ProviderError, ProviderResponse, ProviderStreamEvent, ProviderStreamSink,
+    ResourceBudget, Role, StreamingProvider, TokenUsage, ToolCallMessage, ToolDefinition,
 };
 use tracing::Instrument;
 
-use crate::transport::{TransportStage, transport_error};
+mod config;
+mod endpoint;
+mod finish;
+mod http;
+mod meters;
 
-// ── OTel meters ──────────────────────────────────────────────────
+pub use config::{AuthStyle, OpenAiConfig, OutputCapField};
 
-/// Lazily-initialized OTel meter instruments for the OpenAI provider.
-/// Created on first use so they pick up the global MeterProvider
-/// (which may not be set at construction time).
-struct OpenAiMeters {
-    duration_histogram: Histogram<f64>,
-    token_usage_histogram: Histogram<u64>,
-    cache_read_histogram: Histogram<u64>,
-    cache_write_histogram: Histogram<u64>,
-    cache_hit_ratio_histogram: Histogram<f64>,
-}
-
-impl OpenAiMeters {
-    fn get() -> &'static Self {
-        use std::sync::OnceLock;
-        static METERS: OnceLock<OpenAiMeters> = OnceLock::new();
-        METERS.get_or_init(|| {
-            let meter = opentelemetry::global::meter("simulacra-provider");
-            OpenAiMeters {
-                duration_histogram: meter
-                    .f64_histogram("gen_ai.client.operation.duration")
-                    .with_unit("ms")
-                    .with_description("LLM provider call duration")
-                    .build(),
-                token_usage_histogram: meter
-                    .u64_histogram("gen_ai.client.token.usage")
-                    .with_unit("{token}")
-                    .with_description("Token usage per LLM call")
-                    .build(),
-                cache_read_histogram: meter
-                    .u64_histogram("simulacra.context.cache.read_tokens")
-                    .with_unit("{token}")
-                    .with_description("Input tokens served from the provider cache")
-                    .build(),
-                cache_write_histogram: meter
-                    .u64_histogram("simulacra.context.cache.write_tokens")
-                    .with_unit("{token}")
-                    .with_description("Input tokens written to the provider cache")
-                    .build(),
-                cache_hit_ratio_histogram: meter
-                    .f64_histogram("simulacra.context.cache.hit_ratio")
-                    .with_unit("1")
-                    .with_description("Provider cache-read tokens divided by logical input tokens")
-                    .build(),
-            }
-        })
-    }
-
-    fn record_cache_usage(&self, usage: &TokenUsage, model: &str) {
-        let attrs = &[
-            KeyValue::new("gen_ai.provider.name", "openai"),
-            KeyValue::new("gen_ai.request.model", model.to_owned()),
-        ];
-        self.cache_read_histogram
-            .record(usage.cache_read_input_tokens, attrs);
-        self.cache_write_histogram
-            .record(usage.cache_write_input_tokens, attrs);
-        let hit_ratio = if usage.input_tokens == 0 {
-            0.0
-        } else {
-            usage.cache_read_input_tokens as f64 / usage.input_tokens as f64
-        };
-        self.cache_hit_ratio_histogram.record(hit_ratio, attrs);
-    }
-}
-
-// ── HTTP abstraction ───────────────────────────────────────────────
-
-/// Minimal HTTP client trait so tests can substitute a fake.
-trait HttpClient: Send + Sync {
-    fn post(
-        &self,
-        url: &str,
-        headers: &[(String, String)],
-        body: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + '_>>;
-
-    fn post_stream<'a>(
-        &'a self,
-        url: &'a str,
-        headers: &'a [(String, String)],
-        body: &'a [u8],
-        sink: &'a mut dyn HttpStreamSink,
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + 'a>> {
-        Box::pin(async move {
-            let response = self.post(url, headers, body).await?;
-            sink.begin(response.status, &response.headers)?;
-            sink.chunk(&response.body)?;
-            Ok(response)
-        })
-    }
-}
-
-trait HttpStreamSink: Send {
-    fn begin(
-        &mut self,
-        _status: u16,
-        _headers: &HashMap<String, String>,
-    ) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
-    fn chunk(&mut self, _chunk: &[u8]) -> Result<(), ProviderError> {
-        Ok(())
-    }
-}
-
-/// Raw HTTP response.
-struct HttpResponse {
-    pub status: u16,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
-}
-
-// ── Reqwest-backed client ──────────────────────────────────────────
-
-struct ReqwestClient {
-    client: reqwest::Client,
-}
-
-impl ReqwestClient {
-    fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
-    }
-}
-
-impl HttpClient for ReqwestClient {
-    fn post(
-        &self,
-        url: &str,
-        headers: &[(String, String)],
-        body: &[u8],
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + '_>> {
-        let url = url.to_owned();
-        let headers = headers.to_vec();
-        let body = body.to_vec();
-        Box::pin(async move {
-            let mut builder = self.client.post(&url);
-            for (key, value) in &headers {
-                builder = builder.header(key.as_str(), value.as_str());
-            }
-            let resp = builder
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| transport_error(TransportStage::SendRequest, &e))?;
-
-            let status = resp.status().as_u16();
-            let resp_headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .filter_map(|(k, v)| {
-                    v.to_str()
-                        .ok()
-                        .map(|val| (k.as_str().to_lowercase(), val.to_owned()))
-                })
-                .collect();
-            let resp_body = resp
-                .bytes()
-                .await
-                .map_err(|e| ProviderError::Other(format!("failed to read response body: {e}")))?;
-
-            Ok(HttpResponse {
-                status,
-                headers: resp_headers,
-                body: resp_body.to_vec(),
-            })
-        })
-    }
-
-    fn post_stream<'a>(
-        &'a self,
-        url: &'a str,
-        headers: &'a [(String, String)],
-        body: &'a [u8],
-        sink: &'a mut dyn HttpStreamSink,
-    ) -> Pin<Box<dyn Future<Output = Result<HttpResponse, ProviderError>> + Send + 'a>> {
-        let url = url.to_owned();
-        let headers = headers.to_vec();
-        let body = body.to_vec();
-        Box::pin(async move {
-            let mut builder = self.client.post(&url);
-            for (key, value) in &headers {
-                builder = builder.header(key.as_str(), value.as_str());
-            }
-            let mut resp = builder
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| transport_error(TransportStage::SendRequest, &e))?;
-
-            let status = resp.status().as_u16();
-            let resp_headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .filter_map(|(k, v)| {
-                    v.to_str()
-                        .ok()
-                        .map(|val| (k.as_str().to_lowercase(), val.to_owned()))
-                })
-                .collect();
-            sink.begin(status, &resp_headers)?;
-
-            let mut resp_body = Vec::new();
-            while let Some(chunk) = resp
-                .chunk()
-                .await
-                .map_err(|e| ProviderError::Other(format!("failed to read response chunk: {e}")))?
-            {
-                resp_body.extend_from_slice(&chunk);
-                sink.chunk(&chunk)?;
-            }
-
-            Ok(HttpResponse {
-                status,
-                headers: resp_headers,
-                body: resp_body,
-            })
-        })
-    }
-}
+use http::{HttpClient, HttpStreamSink, ReqwestClient};
+use meters::OpenAiMeters;
 
 // ── OpenAiProvider ───────────────────────────────────────────────
 
@@ -246,9 +28,7 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
 /// OpenAI API provider.
 pub struct OpenAiProvider {
-    api_key: String,
-    model: String,
-    base_url: String,
+    config: OpenAiConfig,
     http: Box<dyn HttpClient>,
 }
 
@@ -257,29 +37,37 @@ impl OpenAiProvider {
     ///
     /// The base URL is resolved from `OPENAI_BASE_URL` or `OPENAI_API_BASE`
     /// environment variables at construction time, falling back to
-    /// `https://api.openai.com`.
+    /// `https://api.openai.com`. For a gateway that needs a different auth
+    /// style, extra headers, or output-cap field, build an `OpenAiConfig`
+    /// and use `with_config` instead — it reads no environment variables.
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let base_url = std::env::var("OPENAI_BASE_URL")
             .or_else(|_| std::env::var("OPENAI_API_BASE"))
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned());
+        Self::with_config(OpenAiConfig::new(base_url, api_key, model))
+    }
+
+    /// Create a provider from an explicit configuration. Reads no
+    /// environment variables, so it is safe to point at any
+    /// OpenAI-compatible gateway (OpenRouter, LiteLLM, vLLM, Azure-style).
+    pub fn with_config(config: OpenAiConfig) -> Self {
         Self {
-            api_key: api_key.into().trim().to_owned(),
-            model: model.into(),
-            base_url,
+            config,
             http: Box::new(ReqwestClient::new()),
         }
     }
 
     /// Build the request body JSON.
     ///
-    /// `max_completion_tokens`: if `Some`, cap the generation length.
-    /// Derived from the remaining token budget by the caller.
+    /// `output_cap`: if `Some`, cap the generation length, sent under
+    /// whichever field name `config.output_cap_field` selects. Derived from
+    /// the remaining token budget by the caller.
     fn build_request_body(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         stream: bool,
-        max_completion_tokens: Option<u64>,
+        output_cap: Option<u64>,
     ) -> serde_json::Value {
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
@@ -318,7 +106,7 @@ impl OpenAiProvider {
             .collect();
 
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": self.config.model,
             "messages": api_messages,
             "stream": stream,
         });
@@ -329,8 +117,8 @@ impl OpenAiProvider {
         }
 
         // Cap generation length to remaining budget (0 = unlimited).
-        if let Some(cap) = max_completion_tokens {
-            body["max_completion_tokens"] = serde_json::json!(cap);
+        if let Some(cap) = output_cap {
+            body[self.config.output_cap_field.wire_name()] = serde_json::json!(cap);
         }
 
         if !tools.is_empty() {
@@ -410,48 +198,14 @@ impl OpenAiProvider {
             .unwrap_or("")
             .to_string();
 
-        let tool_calls = message_obj
-            .get("tool_calls")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|tc| {
-                        let id = tc.get("id")?.as_str()?.to_string();
-                        let func = tc.get("function")?;
-                        let name = func.get("name")?.as_str()?.to_string();
-                        let args_str = func.get("arguments")?.as_str()?;
-                        let arguments: serde_json::Value =
-                            serde_json::from_str(args_str).unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    tool_name = name.as_str(),
-                                    raw_args_len = args_str.len(),
-                                    error = %e,
-                                    "tool call arguments failed to parse as JSON, falling back to empty object"
-                                );
-                                serde_json::Value::Object(serde_json::Map::new())
-                            });
-                        Some(ToolCallMessage {
-                            id,
-                            name,
-                            arguments,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let tool_calls = Self::parse_tool_calls(message_obj)?;
 
-        let finish_reason_str = choice
-            .get("finish_reason")
+        let finish_reason_str = choice.get("finish_reason").and_then(|v| v.as_str());
+        let refusal_seen = message_obj
+            .get("refusal")
             .and_then(|v| v.as_str())
-            .unwrap_or("stop");
-
-        let finish_reason = match finish_reason_str {
-            "stop" => FinishReason::EndTurn,
-            "tool_calls" => FinishReason::ToolUse,
-            "length" => FinishReason::MaxTokens,
-            "content_filter" => FinishReason::StopSequence,
-            _ => FinishReason::EndTurn,
-        };
+            .is_some_and(|s| !s.is_empty());
+        let finish_reason = finish::map_finish_reason(finish_reason_str, refusal_seen);
 
         let usage = json.get("usage");
         let input_tokens = usage
@@ -500,7 +254,39 @@ impl OpenAiProvider {
         for line in text.lines() {
             accumulator.process_line(line.trim())?;
         }
-        Ok(accumulator.finish())
+        accumulator.finish()
+    }
+
+    /// Walk a `message.tool_calls` array into `ToolCallMessage`s. A tool
+    /// call missing its id/name/arguments shape is skipped as before; one
+    /// whose arguments fail to parse as JSON fails the whole response.
+    fn parse_tool_calls(
+        message_obj: &serde_json::Value,
+    ) -> Result<Vec<ToolCallMessage>, ProviderError> {
+        let Some(arr) = message_obj.get("tool_calls").and_then(|v| v.as_array()) else {
+            return Ok(Vec::new());
+        };
+        let mut tool_calls = Vec::with_capacity(arr.len());
+        for tc in arr {
+            let (Some(id), Some(func)) =
+                (tc.get("id").and_then(|v| v.as_str()), tc.get("function"))
+            else {
+                continue;
+            };
+            let (Some(name), Some(args_str)) = (
+                func.get("name").and_then(|v| v.as_str()),
+                func.get("arguments").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let arguments = finish::parse_tool_call_arguments(name, args_str)?;
+            tool_calls.push(ToolCallMessage {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments,
+            });
+        }
+        Ok(tool_calls)
     }
 }
 
@@ -513,6 +299,7 @@ struct OpenAiSseAccumulator<'a> {
     cache_read_input_tokens: u64,
     content: String,
     finish_reason: Option<String>,
+    refusal_seen: bool,
     resp_model: Option<String>,
     pending_tool_calls: std::collections::BTreeMap<u64, (String, String, String)>,
     done: bool,
@@ -529,6 +316,7 @@ impl<'a> OpenAiSseAccumulator<'a> {
             cache_read_input_tokens: 0,
             content: String::new(),
             finish_reason: None,
+            refusal_seen: false,
             resp_model: None,
             pending_tool_calls: std::collections::BTreeMap::new(),
             done: false,
@@ -606,6 +394,14 @@ impl<'a> OpenAiSseAccumulator<'a> {
                             }
                         }
                     }
+
+                    if delta
+                        .get("refusal")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty())
+                    {
+                        self.refusal_seen = true;
+                    }
                 }
 
                 if let Some(fr) = choice.get("finish_reason").and_then(|v| v.as_str()) {
@@ -634,37 +430,21 @@ impl<'a> OpenAiSseAccumulator<'a> {
         Ok(())
     }
 
-    fn finish(self) -> ProviderResponse {
-        let tool_calls: Vec<ToolCallMessage> = self
-            .pending_tool_calls
-            .into_values()
-            .map(|(id, name, args_str)| {
-                let arguments: serde_json::Value =
-                    serde_json::from_str(&args_str).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            tool_name = name.as_str(),
-                            raw_args_len = args_str.len(),
-                            error = %e,
-                            "tool call arguments failed to parse as JSON, falling back to empty object"
-                        );
-                        serde_json::Value::Object(serde_json::Map::new())
-                    });
-                ToolCallMessage {
-                    id,
-                    name,
-                    arguments,
-                }
-            })
-            .collect();
+    fn finish(self) -> Result<ProviderResponse, ProviderError> {
+        let mut tool_calls = Vec::with_capacity(self.pending_tool_calls.len());
+        for (id, name, args_str) in self.pending_tool_calls.into_values() {
+            let arguments = finish::parse_tool_call_arguments(&name, &args_str)?;
+            tool_calls.push(ToolCallMessage {
+                id,
+                name,
+                arguments,
+            });
+        }
 
-        let finish_reason = match self.finish_reason.as_deref() {
-            Some("stop") | None => FinishReason::EndTurn,
-            Some("tool_calls") => FinishReason::ToolUse,
-            Some("length") => FinishReason::MaxTokens,
-            _ => FinishReason::EndTurn,
-        };
+        let finish_reason =
+            finish::map_finish_reason(self.finish_reason.as_deref(), self.refusal_seen);
 
-        ProviderResponse {
+        Ok(ProviderResponse {
             message: Message {
                 role: Role::Assistant,
                 content: self.content,
@@ -682,7 +462,7 @@ impl<'a> OpenAiSseAccumulator<'a> {
             finish_reason,
             provider_response_id: self.response_id,
             model: self.resp_model.unwrap_or(self.default_model),
-        }
+        })
     }
 }
 
@@ -706,7 +486,7 @@ impl<'a> OpenAiStreamEmitter<'a> {
             let line = std::mem::take(&mut self.pending);
             self.process_line_bytes(line)?;
         }
-        Ok(self.accumulator.finish())
+        self.accumulator.finish()
     }
 
     fn push_bytes(&mut self, chunk: &[u8]) -> Result<(), ProviderError> {
@@ -760,7 +540,7 @@ impl Provider for OpenAiProvider {
         tools: &'a [ToolDefinition],
         budget: &'a mut ResourceBudget,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>> {
-        let model = self.model.clone();
+        let model = self.config.model.clone();
         let otel_name = format!("chat {model}");
         let span = tracing::info_span!(
             "chat",
@@ -780,29 +560,23 @@ impl Provider for OpenAiProvider {
             // Check budget before making any HTTP call.
             budget.check_budget()?;
 
-            // Calculate remaining token budget for max_completion_tokens.
+            // Calculate remaining token budget for the output cap.
             // A budget max_tokens of 0 means unlimited — don't cap.
-            let max_completion_tokens = if budget.max_tokens == 0 {
+            let output_cap = if budget.max_tokens == 0 {
                 None
             } else {
                 let remaining = budget.max_tokens.saturating_sub(budget.used_tokens);
                 Some(remaining.max(1))
             };
 
-            let url = format!("{}/v1/chat/completions", self.base_url);
+            let url = endpoint::build_chat_completions_url(&self.config.base_url)?;
 
-            let request_body =
-                self.build_request_body(messages, tools, true, max_completion_tokens);
+            let request_body = self.build_request_body(messages, tools, true, output_cap);
             let body_bytes = serde_json::to_vec(&request_body)
                 .map_err(|e| ProviderError::Other(format!("failed to serialize request: {e}")))?;
 
-            let headers = vec![
-                ("content-type".to_owned(), "application/json".to_owned()),
-                (
-                    "authorization".to_owned(),
-                    format!("Bearer {}", self.api_key),
-                ),
-            ];
+            let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+            headers.extend(self.config.auth_headers());
 
             let response = self.http.post(&url, &headers, &body_bytes).await?;
 
@@ -832,7 +606,7 @@ impl Provider for OpenAiProvider {
                 .unwrap_or("");
 
             let provider_resp = if content_type.contains("text/event-stream") {
-                Self::parse_sse_response(&response.body, &self.model)?
+                Self::parse_sse_response(&response.body, &self.config.model)?
             } else {
                 Self::parse_json_response(&response.body)?
             };
@@ -933,7 +707,7 @@ impl StreamingProvider for OpenAiProvider {
         budget: &'a mut ResourceBudget,
         stream_sink: &'a dyn ProviderStreamSink,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>> {
-        let model = self.model.clone();
+        let model = self.config.model.clone();
         let otel_name = format!("chat {model}");
         let span = tracing::info_span!(
             "chat",
@@ -951,27 +725,21 @@ impl StreamingProvider for OpenAiProvider {
             let call_start = std::time::Instant::now();
             budget.check_budget()?;
 
-            let max_completion_tokens = if budget.max_tokens == 0 {
+            let output_cap = if budget.max_tokens == 0 {
                 None
             } else {
                 let remaining = budget.max_tokens.saturating_sub(budget.used_tokens);
                 Some(remaining.max(1))
             };
 
-            let url = format!("{}/v1/chat/completions", self.base_url);
-            let request_body =
-                self.build_request_body(messages, tools, true, max_completion_tokens);
+            let url = endpoint::build_chat_completions_url(&self.config.base_url)?;
+            let request_body = self.build_request_body(messages, tools, true, output_cap);
             let body_bytes = serde_json::to_vec(&request_body)
                 .map_err(|e| ProviderError::Other(format!("failed to serialize request: {e}")))?;
-            let headers = vec![
-                ("content-type".to_owned(), "application/json".to_owned()),
-                (
-                    "authorization".to_owned(),
-                    format!("Bearer {}", self.api_key),
-                ),
-            ];
+            let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+            headers.extend(self.config.auth_headers());
 
-            let mut emitter = OpenAiStreamEmitter::new(&self.model, stream_sink);
+            let mut emitter = OpenAiStreamEmitter::new(&self.config.model, stream_sink);
             let response = self
                 .http
                 .post_stream(&url, &headers, &body_bytes, &mut emitter)
@@ -1085,8 +853,10 @@ impl StreamingProvider for OpenAiProvider {
 
 #[cfg(test)]
 mod tests {
+    use super::http::HttpResponse;
     use super::*;
     use rust_decimal::Decimal;
+    use simulacra_types::FinishReason;
     use std::io::Read;
     use std::net::{Shutdown, SocketAddr, TcpListener};
     use std::sync::{Arc, Mutex, mpsc};
@@ -1365,9 +1135,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
         let provider = OpenAiProvider {
-            api_key: "test-key".into(),
-            model: "gpt-4o-mini".into(),
-            base_url: "https://example.invalid".into(),
+            config: OpenAiConfig::new("https://example.invalid", "test-key", "gpt-4o-mini"),
             http: Box::new(FakeHttpClient::with_response_and_headers(
                 200,
                 &streaming_response_body(),
@@ -1423,9 +1191,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_owned(), "text/event-stream".to_owned());
         let provider = OpenAiProvider {
-            api_key: "test-key".into(),
-            model: "gpt-4o-mini".into(),
-            base_url: "https://example.invalid".into(),
+            config: OpenAiConfig::new("https://example.invalid", "test-key", "gpt-4o-mini"),
             http: Box::new(FakeHttpClient::with_response_and_headers(
                 200,
                 &streaming_tool_call_response_body(),

@@ -11,6 +11,9 @@ pub use simulacra_types::{
 #[cfg(any(feature = "anthropic", feature = "openai"))]
 mod transport;
 
+#[cfg(any(feature = "anthropic", feature = "openai"))]
+mod finish_reason;
+
 #[cfg(feature = "anthropic")]
 mod anthropic;
 
@@ -21,4 +24,4 @@ pub use anthropic::AnthropicProvider;
 mod openai;
 
 #[cfg(feature = "openai")]
-pub use openai::OpenAiProvider;
+pub use openai::{AuthStyle, OpenAiConfig, OpenAiProvider, OutputCapField};

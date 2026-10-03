@@ -145,6 +145,8 @@ use simulacra_types::{
     ToolCallMessage, ToolDefinition,
 };
 
+use crate::finish_reason::sanitize_other_reason;
+
 /// Map an Anthropic `stop_reason` to our `FinishReason`. A value we don't
 /// recognize yet — or no `stop_reason` at all — carries its raw string in
 /// `Other` rather than silently becoming `EndTurn`.
@@ -158,26 +160,6 @@ pub(crate) fn map_stop_reason(stop_reason: Option<&str>) -> FinishReason {
         Some(other) => FinishReason::Other(sanitize_other_reason(other)),
         None => FinishReason::Other("missing".to_string()),
     }
-}
-
-/// `Other(raw)` is journaled via `Debug` and reconstructed on replay by
-/// stripping the literal `Other("` / `")` wrapper (see replay_helpers.rs).
-/// A raw stop_reason containing a quote, backslash, or newline would break
-/// that round trip, so restrict it to a safe charset at the source instead
-/// of trying to escape it later.
-fn sanitize_other_reason(raw: &str) -> String {
-    let mut sanitized: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    sanitized.truncate(64);
-    sanitized
 }
 
 /// Tool calls are only safe to execute when the turn genuinely ended in
