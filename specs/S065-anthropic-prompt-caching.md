@@ -23,7 +23,9 @@ across two calls of one turn, with nothing cached.
   the last cacheable block. A later call reads that prefix from cache only
   when all of these hold: the prefix is unchanged, it meets the model's
   minimum cacheable length, the entry is younger than its five-minute TTL,
-  and it lies within Anthropic's 20-block lookback of the new breakpoint.
+  and it lies within Anthropic's 20-block lookback of the new breakpoint. A
+  read is billed at the model's cache-read rate, a fraction of its input rate
+  that varies by model (0.1x for most).
   Otherwise the prefix is written again at the cache-write rate (1.25x input);
   below the minimum length nothing is cached and nothing extra is billed.
 - Both the synchronous and the streaming paths send it.
