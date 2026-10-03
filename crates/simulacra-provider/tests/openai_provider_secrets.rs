@@ -90,3 +90,26 @@ fn debug_of_a_config_hides_credentials_in_the_base_url() {
     }
     assert!(rendered.contains("gw.example/v1"), "{rendered}");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_upstream_error_that_echoes_the_url_does_not_carry_its_credentials_on() {
+    let gateway = FakeHttpClient::new(CannedResponse::json(
+        400,
+        json!({ "error": { "message": "bad request to /v1?token=tok-echoed (user pw-echoed)" } }),
+    ));
+    let base = gateway
+        .base_url()
+        .replace("http://", "http://user:pw-echoed@")
+        + "/v1?token=tok-echoed";
+    let provider = OpenAiProvider::with_config(OpenAiConfig::new(base, "k", "m"));
+
+    let err = provider
+        .chat(&[user_message("hi")], &[], &mut fresh_budget())
+        .await
+        .expect_err("400 is an error");
+
+    let rendered = format!("{err:?}");
+    for secret in ["tok-echoed", "pw-echoed"] {
+        assert!(!rendered.contains(secret), "{rendered}");
+    }
+}

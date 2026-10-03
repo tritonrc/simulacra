@@ -100,7 +100,7 @@ impl HttpClient for ReqwestClient {
             let resp_body = resp
                 .bytes()
                 .await
-                .map_err(|e| ProviderError::Other(format!("failed to read response body: {e}")))?;
+                .map_err(crate::transport::read_error("response body"))?;
 
             Ok(HttpResponse {
                 status,
@@ -147,7 +147,7 @@ impl HttpClient for ReqwestClient {
             while let Some(chunk) = resp
                 .chunk()
                 .await
-                .map_err(|e| ProviderError::Other(format!("failed to read response chunk: {e}")))?
+                .map_err(crate::transport::read_error("response chunk"))?
             {
                 resp_body.extend_from_slice(&chunk);
                 sink.chunk(&chunk)?;

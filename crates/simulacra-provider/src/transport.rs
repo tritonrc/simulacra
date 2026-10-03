@@ -25,6 +25,19 @@ pub(crate) fn provider_http_client(read_timeout: Duration) -> reqwest::Client {
         .expect("the HTTP client builds, as reqwest::Client::new() assumes")
 }
 
+/// A response that stops sending past the idle timeout is a transient
+/// failure worth a retry. `part` names what was being read.
+pub(crate) fn read_error(part: &'static str) -> impl Fn(reqwest::Error) -> ProviderError {
+    move |err| {
+        if err.is_timeout() {
+            return ProviderError::Transport(format!(
+                "the provider stopped sending the {part}; retry."
+            ));
+        }
+        ProviderError::Other(format!("failed to read {part}: {err}"))
+    }
+}
+
 /// Stage of the HTTP exchange that failed. Used to tell the caller how far the
 /// request got before the connection gave out.
 #[derive(Debug, Clone, Copy)]

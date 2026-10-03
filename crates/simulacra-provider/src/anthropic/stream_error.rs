@@ -34,18 +34,7 @@ pub(super) fn from_event(event: &serde_json::Value) -> ProviderError {
     }
 }
 
-/// A response that stops sending past the idle timeout is a transient
-/// failure worth a retry. `part` names what was being read.
-pub(super) fn read_error(part: &'static str) -> impl Fn(reqwest::Error) -> ProviderError {
-    move |err| {
-        if err.is_timeout() {
-            return ProviderError::Transport(format!(
-                "the provider stopped sending the {part}; retry."
-            ));
-        }
-        ProviderError::Other(format!("failed to read {part}: {err}"))
-    }
-}
+pub(super) use crate::transport::read_error;
 
 #[cfg(test)]
 mod tests {
