@@ -119,7 +119,7 @@ impl OpenAiConfig {
     }
 }
 
-/// The base URL without userinfo or query, which can carry credentials.
+/// The base URL for Debug output, without userinfo or query.
 pub(super) fn redacted_base_url(base_url: &str) -> String {
     match url::Url::parse(base_url) {
         Ok(mut url) => {
