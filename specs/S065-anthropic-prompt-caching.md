@@ -20,8 +20,9 @@ across two calls of one turn, with nothing cached.
   default, so existing hosts send byte-identical requests.
 - When on, every request carries the top-level field
   `"cache_control": {"type": "ephemeral"}`. Anthropic places the breakpoint on
-  the last cacheable block, so each call reads the prefix the previous call
-  wrote and pays full price only for what is new.
+  the last cacheable block. A call within five minutes of the previous one, and
+  within Anthropic's 20-block lookback of its breakpoint, reads that prefix
+  from cache; otherwise the prefix is written again at the cache-write rate.
 - Both the synchronous and the streaming paths send it.
 - The default five-minute TTL applies. No explicit block-level breakpoints are
   added.
