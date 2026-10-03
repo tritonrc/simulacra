@@ -21,7 +21,7 @@ mod tool_pairs;
 mod anthropic;
 
 #[cfg(feature = "anthropic")]
-pub use anthropic::AnthropicProvider;
+pub use anthropic::{AnthropicProvider, cache_breakpoint_before};
 
 #[cfg(feature = "openai")]
 mod openai;
