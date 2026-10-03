@@ -12,6 +12,7 @@ use simulacra_types::{
 use tracing::Instrument;
 
 mod config;
+mod encode;
 mod endpoint;
 mod finish;
 mod http;
@@ -69,41 +70,11 @@ impl OpenAiProvider {
         stream: bool,
         output_cap: Option<u64>,
     ) -> serde_json::Value {
-        let api_messages: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|msg| {
-                let mut m = serde_json::json!({
-                    "role": match msg.role {
-                        Role::System => "system",
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                        Role::Tool => "tool",
-                    },
-                    "content": msg.content,
-                });
-                if !msg.tool_calls.is_empty() {
-                    let tool_calls: Vec<serde_json::Value> = msg
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            serde_json::json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments.to_string(),
-                                }
-                            })
-                        })
-                        .collect();
-                    m["tool_calls"] = serde_json::Value::Array(tool_calls);
-                }
-                if let Some(ref tool_call_id) = msg.tool_call_id {
-                    m["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
-                }
-                m
-            })
-            .collect();
+        let api_messages: Vec<serde_json::Value> =
+            crate::tool_pairs::normalize_tool_pairs(messages)
+                .iter()
+                .map(encode::message)
+                .collect();
 
         let mut body = serde_json::json!({
             "model": self.config.model,

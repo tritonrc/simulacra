@@ -14,6 +14,9 @@ mod transport;
 #[cfg(any(feature = "anthropic", feature = "openai"))]
 mod finish_reason;
 
+#[cfg(any(feature = "anthropic", feature = "openai"))]
+mod tool_pairs;
+
 #[cfg(feature = "anthropic")]
 mod anthropic;
 
