@@ -62,10 +62,12 @@ pub(crate) fn message_tokens(message: &Message) -> u64 {
 }
 
 /// What one image costs a request, whatever its source carries. A provider
-/// bills an image by its pixels, not by its encoding: Anthropic caps an image
-/// at about 1,600 tokens after resizing, so tokenizing a base64 source as text
-/// overcounts by orders of magnitude, and a file id undercounts.
-pub(crate) const IMAGE_BLOCK_TOKENS: u64 = 1_600;
+/// counts an image by its pixels, not its encoding, so tokenizing a base64
+/// source as text overcounts by orders of magnitude and a file id undercounts.
+/// The bound covers Claude (about 1,600 after resizing), GPT-4o at high
+/// detail, and the patch-capped GPT-4.1/5 mini family (about 2,490). GPT-4o
+/// mini's inflated image count (about 25k for 1024x1024) is outside it.
+pub(crate) const IMAGE_BLOCK_TOKENS: u64 = 2_500;
 
 /// The share of a message's cost that compaction cannot reclaim: tool-call
 /// ids/names/arguments, `tool_call_id`, and provider-native blocks all must
