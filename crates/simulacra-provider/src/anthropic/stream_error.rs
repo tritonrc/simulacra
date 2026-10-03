@@ -5,15 +5,10 @@ use std::time::Duration;
 
 use simulacra_types::ProviderError;
 
-/// No total timeout, so a long stream can run to the end; a stream that goes
-/// this long without a byte (Anthropic sends pings) is dead.
-pub(super) const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+pub(super) use crate::transport::READ_IDLE_TIMEOUT;
 
 pub(super) fn idle_timeout_client(read_timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .read_timeout(read_timeout)
-        .build()
-        .expect("the HTTP client builds, as reqwest::Client::new() assumes")
+    crate::transport::provider_http_client(read_timeout)
 }
 
 /// An `error` event ends the stream without a `message_stop`. Accepting it as

@@ -61,7 +61,7 @@ pub(super) struct ReqwestClient {
 impl ReqwestClient {
     pub(super) fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::transport::provider_http_client(crate::transport::READ_IDLE_TIMEOUT),
         }
     }
 }

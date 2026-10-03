@@ -143,6 +143,7 @@ impl OpenAiProvider {
 
     /// Classify an HTTP error response, extracting retry-after for 429s.
     fn classify_error(
+        config: &OpenAiConfig,
         status: u16,
         headers: &HashMap<String, String>,
         body: &[u8],
@@ -156,6 +157,7 @@ impl OpenAiProvider {
                     .map(String::from)
             })
             .unwrap_or_else(|| String::from_utf8_lossy(body).to_string());
+        let message = config.scrub_upstream_text(&message);
 
         match status {
             429 => {
@@ -581,7 +583,12 @@ impl Provider for OpenAiProvider {
             let response = self.http.post(&url, &headers, &body_bytes).await?;
 
             if response.status != 200 {
-                let err = Self::classify_error(response.status, &response.headers, &response.body);
+                let err = Self::classify_error(
+                    &self.config,
+                    response.status,
+                    &response.headers,
+                    &response.body,
+                );
                 if err.is_retryable() {
                     tracing::warn!(
                         error_type = "server_error",
@@ -746,7 +753,12 @@ impl StreamingProvider for OpenAiProvider {
                 .await?;
 
             if response.status != 200 {
-                let err = Self::classify_error(response.status, &response.headers, &response.body);
+                let err = Self::classify_error(
+                    &self.config,
+                    response.status,
+                    &response.headers,
+                    &response.body,
+                );
                 if err.is_retryable() {
                     tracing::warn!(
                         error_type = "server_error",

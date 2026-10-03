@@ -15,7 +15,7 @@ use url::Url;
 
 pub(super) fn build_chat_completions_url(base_url: &str) -> Result<String, ProviderError> {
     let mut url = Url::parse(base_url)
-        .map_err(|e| ProviderError::Other(format!("invalid OpenAI base URL '{base_url}': {e}")))?;
+        .map_err(|e| ProviderError::Other(format!("invalid OpenAI base URL: {e}")))?;
 
     let existing_path = url.path();
     let suffix = if existing_path.is_empty() || existing_path == "/" {

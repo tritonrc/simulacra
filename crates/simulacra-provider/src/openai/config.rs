@@ -91,12 +91,46 @@ impl OpenAiConfig {
     }
 }
 
+const MAX_UPSTREAM_TEXT_CHARS: usize = 512;
+
+impl OpenAiConfig {
+    /// An upstream error body can echo what it was sent (a gateway's "invalid
+    /// key: ..." message), so every configured secret is masked and the text
+    /// is bounded before it travels on in a `ProviderError`.
+    pub(super) fn scrub_upstream_text(&self, text: &str) -> String {
+        let mut scrubbed = text.to_owned();
+        let secrets = std::iter::once(self.api_key.as_str())
+            .chain(self.extra_headers.iter().map(|(_, value)| value.as_str()))
+            .filter(|secret| !secret.is_empty());
+        for secret in secrets {
+            scrubbed = scrubbed.replace(secret, "<redacted>");
+        }
+        match scrubbed.char_indices().nth(MAX_UPSTREAM_TEXT_CHARS) {
+            Some((cut, _)) => format!("{}...", &scrubbed[..cut]),
+            None => scrubbed,
+        }
+    }
+}
+
+/// The base URL without userinfo or query, which can carry credentials.
+pub(super) fn redacted_base_url(base_url: &str) -> String {
+    match url::Url::parse(base_url) {
+        Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.to_string()
+        }
+        Err(_) => "<unparseable base URL>".to_owned(),
+    }
+}
+
 /// Redacts the credential and extra header values; only shapes/counts are
 /// shown so a stray `{:?}` of the config can't leak a secret into logs.
 impl std::fmt::Debug for OpenAiConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenAiConfig")
-            .field("base_url", &self.base_url)
+            .field("base_url", &redacted_base_url(&self.base_url))
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("auth_style", &self.auth_style)
