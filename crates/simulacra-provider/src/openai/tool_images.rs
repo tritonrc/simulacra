@@ -18,7 +18,9 @@ pub(super) fn encode_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         if msg.role == Role::User && !parts.is_empty() {
             // Folded into the user message that follows: some chat templates
             // reject two user messages in a row.
-            parts.push(serde_json::json!({"type": "text", "text": msg.content}));
+            if !msg.content.is_empty() {
+                parts.push(serde_json::json!({"type": "text", "text": msg.content}));
+            }
             flush(&mut out, &mut parts);
             continue;
         }
