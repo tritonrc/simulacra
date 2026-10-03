@@ -2,8 +2,8 @@
 //!
 //! A `tool` message carries text only, so images a tool returned travel in
 //! one `user` message placed after the whole run of tool messages that
-//! answers an assistant turn. Placing it inside the run would break the
-//! call/result pairing.
+//! answers an assistant turn (or joins the user message that follows it).
+//! Placing it inside the run would break the call/result pairing.
 
 use simulacra_types::{Message, ProviderContentBlock, Role};
 
@@ -15,6 +15,13 @@ pub(super) fn encode_messages(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(messages.len());
     let mut parts: Vec<serde_json::Value> = Vec::new();
     for msg in messages {
+        if msg.role == Role::User && !parts.is_empty() {
+            // Folded into the user message that follows: some chat templates
+            // reject two user messages in a row.
+            parts.push(serde_json::json!({"type": "text", "text": msg.content}));
+            flush(&mut out, &mut parts);
+            continue;
+        }
         if msg.role != Role::Tool {
             flush(&mut out, &mut parts);
         }

@@ -120,3 +120,27 @@ async fn no_images_adds_no_message() {
     let (messages, _) = sent_messages(&history(None)).await;
     assert_eq!(roles(&messages), ["user", "assistant", "tool", "tool"]);
 }
+
+#[tokio::test]
+async fn images_join_a_user_message_that_follows_instead_of_doubling_it() {
+    let mut turns = history(Some(serde_json::json!({
+        "type": "base64", "media_type": "image/png", "data": "QUJD"
+    })));
+    turns.push(message(Role::User, "what do you see?"));
+
+    let (messages, _) = sent_messages(&turns).await;
+
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "tool", "tool", "user"]);
+    assert_eq!(
+        messages[4]["content"],
+        serde_json::json!([
+            {"type": "text", "text": "Image(s) returned by tool call call_a:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+            {"type": "text", "text": "what do you see?"},
+        ])
+    );
+}
