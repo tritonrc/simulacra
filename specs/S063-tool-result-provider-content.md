@@ -174,6 +174,33 @@ when empty), then the image blocks in order. Non-`anthropic` blocks and
 serves the assistant branch; an assistant message has no caller producing
 image blocks, and widening it would let one through silently.
 
+### The OpenAI-compatible adapter emits them too
+
+A chat-completions `tool` message carries text only, so the OpenAI adapter
+moves the images to a `user` message. After each run of `tool` messages
+answering one assistant turn (as ordered by `normalize_tool_pairs`), the
+images those results carried travel as `content` parts: for each such
+result, a `text` part `Image(s) returned by tool call <id>:`, then one part
+per `anthropic` `image` block. When a `user` message already follows the
+run, the parts lead that message's content (its text, when non-empty, is
+the last part), because some chat templates reject two `user` messages in
+a row. Otherwise the parts form a `user` message of their own. Never
+inside the run: a message there breaks the call/result pairing.
+
+Unlike the Anthropic adapter, this one reads `source`, because the OpenAI
+wire has its own image form:
+
+- `base64` with `media_type` and `data` → `image_url` with a
+  `data:<media_type>;base64,<data>` URL;
+- `url` → `image_url` with that URL;
+- anything else (an Anthropic Files API `file` source, a `base64` source
+  missing a field) cannot be sent. It becomes a `text` part saying the image
+  is unavailable on this provider, and one warning is logged that names
+  neither the source's id nor its data.
+
+A tool message's own `content` is unchanged, and with no image blocks the
+request is byte-identical to the request built before this change.
+
 ### The blocks live as long as the message does
 
 A `Role::Tool` message stays in the conversation, and the adapter rebuilds
@@ -200,7 +227,8 @@ journals passes a reference, not the bytes.
 
 - **No `document`, `base64`, or other block types by name.** The adapter
   passes `source` through; which sources work is Anthropic's rule.
-- **No user-role blocks.** `Role::User` stays coerced to text.
+- **No user-role blocks.** `Role::User` stays coerced to text; the only
+  user-role content parts are the OpenAI adapter's carried tool images.
 - **No change to `is_error` on the wire.** The `Role::Tool` branch hardcodes
   `is_error: false` today and signals errors through an `ERROR: ` text
   prefix. That is a pre-existing gap, noted, not fixed here.
@@ -243,3 +271,13 @@ journals passes a reference, not the bytes.
   `image`, on a tool message do not appear in the request.
 - [ ] An `image` block on an *assistant* message does not appear in the
   request.
+- [ ] The OpenAI request for a turn whose first of two tool results carries
+  a `base64` image places, after both `tool` messages, one `user` message
+  of a `text` label part and an `image_url` part with the data URL.
+- [ ] A `url` source passes through as the `image_url` URL.
+- [ ] A `file` source becomes an "unavailable" `text` part; the request
+  succeeds and contains neither the file id nor an `image_url` part, and
+  the warning names neither the id nor the data.
+- [ ] When a `user` message follows the run, the image parts lead it and
+  no second `user` message is added.
+- [ ] The OpenAI request with no image blocks has no added message.
