@@ -74,4 +74,13 @@ async fn a_paused_call_answered_again_on_approval_is_sent_once_and_in_place() {
         expected.map(|(r, c)| (r.to_owned(), c.to_owned())),
         "the second result for call_x must not be sent as an orphan tool message"
     );
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["tool_calls"][0]["id"], "call_x");
+    assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "publish");
+    assert_eq!(messages[2]["tool_call_id"], "call_x");
+    assert_eq!(
+        messages.iter().filter(|m| m["role"] == "tool").count(),
+        1,
+        "exactly one result answers call_x"
+    );
 }
