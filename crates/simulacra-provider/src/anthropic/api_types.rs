@@ -13,6 +13,20 @@ pub(crate) struct ApiRequest<'a> {
     pub system: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ApiTool<'a>>,
+    /// Automatic prompt caching: Anthropic places the breakpoint on the last
+    /// cacheable block, so each call reads the prefix the previous one wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CacheControl {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+impl CacheControl {
+    pub(crate) const EPHEMERAL: Self = Self { kind: "ephemeral" };
 }
 
 #[derive(Debug, Serialize)]
@@ -406,6 +420,7 @@ pub(crate) fn build_request_parts<'a>(
         messages: api_messages,
         system: system_text,
         tools: api_tools,
+        cache_control: None,
     }
 }
 
