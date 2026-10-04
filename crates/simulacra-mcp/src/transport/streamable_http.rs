@@ -15,7 +15,7 @@ impl McpManager {
     /// Returns `(tools, session_id)` on success.
     /// Returns `McpError::TransportError` with "404" or "405" when the server
     /// responds with those status codes (caller should fall back to SSE).
-    /// Returns `McpError::ConnectionFailed` for auth errors (401, 403) or
+    /// Returns `McpError::AuthFailed` for auth errors (401, 403) and `McpError::ConnectionFailed` for
     /// server errors (5xx) — these are not fallback-eligible.
     pub(crate) async fn perform_streamable_http_handshake(
         &self,
@@ -67,7 +67,7 @@ impl McpManager {
                 ));
             }
             401 | 403 => {
-                return Err(McpError::ConnectionFailed(format!(
+                return Err(McpError::AuthFailed(format!(
                     "server returned {status} (auth/permission error)"
                 )));
             }

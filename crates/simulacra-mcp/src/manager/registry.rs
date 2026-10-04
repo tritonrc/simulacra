@@ -187,9 +187,7 @@ impl McpManager {
             McpError::ConnectionFailed(format!("no connection configured for server {server}"))
         })?;
         if !connection.handshake_done {
-            return Err(McpError::ConnectionFailed(format!(
-                "MCP handshake or tools/list failed for server {server}"
-            )));
+            return Err(self.handshake_error(server));
         }
         Ok(connection.tools.iter().map(bridge_tool_schema).collect())
     }

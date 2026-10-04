@@ -40,6 +40,8 @@ pub(crate) struct McpConnection {
     /// Configured transport preference from simulacra.toml.
     /// None = auto-detect, Some("sse") = legacy SSE, Some("http") = streamable HTTP.
     pub(crate) configured_transport: Option<String>,
+    /// The last handshake failed because the server refused the credential.
+    pub(crate) handshake_auth_failed: bool,
 }
 
 impl McpConnection {
@@ -58,6 +60,7 @@ impl McpConnection {
             was_connected: false,
             transport_mode: None,
             configured_transport,
+            handshake_auth_failed: false,
         }
     }
 }

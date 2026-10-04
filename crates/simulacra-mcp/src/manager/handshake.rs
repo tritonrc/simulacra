@@ -70,7 +70,7 @@ impl McpManager {
                     conn.transport_mode = Some(TransportMode::StreamableHttp { session_id });
                 }
             }
-            Err(_error) => {
+            Err(error) => {
                 let server_name = self
                     .connections
                     .get(key)
@@ -81,6 +81,9 @@ impl McpManager {
                     error = "transport failure (details redacted)",
                     "MCP streamable HTTP handshake failure"
                 );
+                if let Some(conn) = self.connections.get_mut(key) {
+                    conn.handshake_auth_failed = matches!(error, McpError::AuthFailed(_));
+                }
                 // Forced "http" failure is final — do NOT set handshake_done
                 // so the connection remains unusable but retryable.
                 if let Some(conn) = self.connections.get_mut(key) {
@@ -138,7 +141,10 @@ impl McpManager {
                 span.record("simulacra.mcp.transport_mode", "legacy_sse");
                 span.record("simulacra.mcp.protocol_version", "2024-11-05");
             }
-            Err(_error) => {
+            Err(error) => {
+                if let Some(conn) = self.connections.get_mut(key) {
+                    conn.handshake_auth_failed = matches!(error, McpError::AuthFailed(_));
+                }
                 // Non-fallback error (auth, 5xx, network) — do not try SSE.
                 let server_name = self
                     .connections
@@ -344,5 +350,48 @@ impl McpManager {
             conn.handshake_done = true;
             conn.was_connected = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::McpManager;
+    use crate::error::McpError;
+
+    async fn list_against(status_line: &'static str) -> Result<(), McpError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let reply = format!("HTTP/1.1 {status_line}\r\ncontent-length: 0\r\n\r\n");
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        let mut manager = McpManager::new();
+        manager
+            .connect_named_with_headers("s", &url, Some("http"), vec![])
+            .await?;
+        manager.list_tools_for_server("s").await.map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn a_refused_credential_on_the_handshake_is_auth_failed() {
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            assert!(
+                matches!(list_against(status).await, Err(McpError::AuthFailed(_))),
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_error_on_the_handshake_is_not_auth_failed() {
+        assert!(matches!(
+            list_against("500 Internal Server Error").await,
+            Err(McpError::ConnectionFailed(_))
+        ));
     }
 }
