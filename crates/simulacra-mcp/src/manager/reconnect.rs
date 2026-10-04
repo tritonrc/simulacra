@@ -161,6 +161,22 @@ impl McpManager {
             .unwrap_or(false)
     }
 
+    /// The error for a server whose handshake is not done: a refused
+    /// credential stays distinguishable from an unreachable server.
+    pub(crate) fn handshake_error(&self, server: &str) -> McpError {
+        if self
+            .connections
+            .get(server)
+            .is_some_and(|c| c.handshake_auth_failed)
+        {
+            McpError::AuthFailed(format!(
+                "MCP handshake rejected the credential for server {server}"
+            ))
+        } else {
+            Self::handshake_failed_error(server)
+        }
+    }
+
     pub(crate) fn handshake_failed_error(server: &str) -> McpError {
         McpError::ConnectionFailed(format!("MCP handshake failed for server {server}"))
     }

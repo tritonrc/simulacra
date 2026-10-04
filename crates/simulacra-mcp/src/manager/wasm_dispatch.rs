@@ -40,6 +40,7 @@ impl McpManager {
                     module_id: module_id.to_string(),
                 }),
                 configured_transport: Some("wasm".to_string()),
+                handshake_auth_failed: false,
             },
         );
 
@@ -98,6 +99,7 @@ impl McpManager {
                         module_id: name.to_string(),
                     }),
                     configured_transport: Some("wasm".to_string()),
+                    handshake_auth_failed: false,
                 },
             );
 

@@ -304,7 +304,7 @@ async fn tools_call_threads_connection_headers() {
     );
 }
 
-/// S043-A2 Assertion: `redact_headers_for_log` masks secret values while keeping header names.
+/// S043-A2 Assertion: `redact_headers_for_log` prints header names and no values.
 ///
 /// This is a compile-time RED: `redact_headers_for_log` does not yet exist in
 /// `simulacra_mcp`. The test will fail to compile until the function is added.
@@ -333,11 +333,12 @@ fn redact_headers_for_log_masks_secrets() {
     // names still visible
     assert!(redacted.contains("Authorization"), "{redacted}");
     assert!(redacted.contains("Cookie"), "{redacted}");
-    // non-secret value preserved
+    // names only: no value is printed, secret-looking or not
     assert!(
-        redacted.contains("application/json"),
-        "Content-Type value should NOT be masked: {redacted}"
+        !redacted.contains("application/json"),
+        "Content-Type value should not be logged: {redacted}"
     );
+    assert!(redacted.contains("Content-Type"), "{redacted}");
 }
 
 /// S043-A2 Regression guard: headers do not leak across independent connections.
