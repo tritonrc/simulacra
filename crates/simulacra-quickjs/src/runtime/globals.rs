@@ -199,10 +199,20 @@ impl JsRuntime {
             let proxy = Arc::clone(proxy);
             Function::new(
                 ctx.clone(),
-                move |path: String| -> rquickjs::Result<Vec<String>> {
-                    proxy
-                        .list_dir(&path)
-                        .map_err(|e| rquickjs::Error::new_from_js_message("string", "string", &e))
+                move |ctx: rquickjs::Ctx<'js>,
+                      path: String|
+                      -> rquickjs::Result<rquickjs::Array<'js>> {
+                    let (entries, truncated) = proxy.list_dir_bounded(&path).map_err(|e| {
+                        rquickjs::Error::new_from_js_message("string", "string", &e)
+                    })?;
+                    let array = rquickjs::Array::new(ctx)?;
+                    for (index, entry) in entries.into_iter().enumerate() {
+                        array.set(index, entry)?;
+                    }
+                    if truncated {
+                        array.as_object().set("truncated", true)?;
+                    }
+                    Ok(array)
                 },
             )
             .map_err(|e| JsError::Runtime(e.to_string()))?

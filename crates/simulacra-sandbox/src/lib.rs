@@ -10,6 +10,8 @@ mod fetch_proxy;
 mod file_io;
 mod fs_proxy;
 mod fs_proxy_append;
+mod fs_proxy_rename;
+mod fs_proxy_vfs;
 mod guards;
 mod http;
 mod js;
