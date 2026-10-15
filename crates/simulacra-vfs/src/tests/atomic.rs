@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 
 use simulacra_types::{FsMutation, Precondition, VfsError, VirtualFs};
 
@@ -216,37 +216,54 @@ fn restore_gives_files_fresh_revisions_above_any_seen_before() {
 #[test]
 fn readers_never_see_half_a_batch() {
     const ROUNDS: usize = 3_000;
+    const FILES: usize = 4;
+    const PAYLOAD: usize = 16 * 1024;
+    const READERS: usize = 2;
+    let paths: Vec<String> = (0..FILES).map(|i| format!("/f{i}")).collect();
+    // Orientation 0: the payload sits in the first two files; orientation 1:
+    // in the last two. Every batch swaps all four, so a torn batch has many
+    // intermediate states for a reader to catch.
+    let layout = |orientation: usize| -> Vec<Vec<u8>> {
+        (0..FILES)
+            .map(|i| {
+                if (i < FILES / 2) == (orientation == 0) {
+                    vec![b'A' + i as u8; PAYLOAD]
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect()
+    };
     let fs = Arc::new(MemoryFs::new());
-    fs.write("/a", b"AAAA").unwrap();
-    fs.write("/b", b"").unwrap();
+    for (path, data) in paths.iter().zip(layout(0)) {
+        fs.write(path, &data).unwrap();
+    }
     let done = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(READERS + 1));
 
     let writer = {
-        let (fs, done) = (Arc::clone(&fs), Arc::clone(&done));
+        let (fs, done, barrier) = (Arc::clone(&fs), Arc::clone(&done), Arc::clone(&barrier));
+        let paths = paths.clone();
+        let layouts = [layout(0), layout(1)];
         std::thread::spawn(move || {
+            barrier.wait();
             let mut outcome = Ok(());
             for round in 0..ROUNDS {
-                let (a, b): (&[u8], &[u8]) = if round % 2 == 0 {
-                    (b"", b"AAAA")
-                } else {
-                    (b"AAAA", b"")
-                };
-                let batch = [
-                    FsMutation::Write {
-                        path: "/a".into(),
-                        data: a.to_vec(),
+                let target = &layouts[(round + 1) % 2];
+                let batch: Vec<FsMutation> = paths
+                    .iter()
+                    .zip(target)
+                    .map(|(path, data)| FsMutation::Write {
+                        path: path.clone(),
+                        data: data.clone(),
                         precondition: Precondition::Unconditional,
-                    },
-                    FsMutation::Write {
-                        path: "/b".into(),
-                        data: b.to_vec(),
-                        precondition: Precondition::Unconditional,
-                    },
-                ];
+                    })
+                    .collect();
                 if let Err(err) = fs.apply_batch(&batch) {
                     outcome = Err(err);
                     break;
                 }
+                std::thread::yield_now();
             }
             done.store(true, Ordering::SeqCst);
             outcome
@@ -254,34 +271,57 @@ fn readers_never_see_half_a_batch() {
     };
 
     // A snapshot is taken under one read lock, so it is the only way for a
-    // reader to observe both files at a single instant.
-    let mut observed = 0usize;
-    while !done.load(Ordering::SeqCst) {
-        let snapshot = fs.snapshot().unwrap();
-        let items: Vec<(String, bool, Vec<u8>)> = serde_json::from_slice(&snapshot.data).unwrap();
-        let content = |name: &str| {
-            items
-                .iter()
-                .find(|(p, ..)| p == name)
-                .unwrap_or_else(|| panic!("{name} missing from snapshot"))
-                .2
-                .clone()
-        };
-        let pair = (content("/a"), content("/b"));
-        let valid =
-            pair == (b"AAAA".to_vec(), Vec::new()) || pair == (Vec::new(), b"AAAA".to_vec());
-        assert!(valid, "a reader saw half a batch: {pair:?}");
-        observed += 1;
-    }
+    // reader to observe all files at a single instant.
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let (fs, done, barrier) = (Arc::clone(&fs), Arc::clone(&done), Arc::clone(&barrier));
+            let (paths, layouts) = (paths.clone(), [layout(0), layout(1)]);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut seen = [0usize; 2];
+                while !done.load(Ordering::SeqCst) {
+                    let snapshot = fs.snapshot().unwrap();
+                    let items: Vec<(String, bool, Vec<u8>)> =
+                        serde_json::from_slice(&snapshot.data).unwrap();
+                    let state: Vec<Vec<u8>> = paths
+                        .iter()
+                        .map(|name| {
+                            items
+                                .iter()
+                                .find(|(p, ..)| p == name)
+                                .unwrap_or_else(|| panic!("{name} missing from snapshot"))
+                                .2
+                                .clone()
+                        })
+                        .collect();
+                    match layouts.iter().position(|l| *l == state) {
+                        Some(orientation) => seen[orientation] += 1,
+                        None => {
+                            let lens: Vec<usize> = state.iter().map(Vec::len).collect();
+                            panic!("a reader saw half a batch: file lengths {lens:?}");
+                        }
+                    }
+                }
+                seen
+            })
+        })
+        .collect();
 
     writer
         .join()
         .expect("writer thread panicked")
         .expect("every batch applies");
-    assert!(
-        observed > 0,
-        "the reader must have observed the writer at work"
-    );
+    for reader in readers {
+        let seen = match reader.join() {
+            Ok(seen) => seen,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        assert!(
+            seen[0] > 0 && seen[1] > 0,
+            "each reader must have interleaved with the writer and seen both \
+             orientations, saw {seen:?}"
+        );
+    }
 }
 
 #[test]
