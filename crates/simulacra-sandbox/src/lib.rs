@@ -444,3 +444,6 @@ mod fs_proxy_vfs_tests;
 
 #[cfg(test)]
 mod fs_proxy_vfs_budget_tests;
+
+#[cfg(test)]
+mod fs_proxy_vfs_unknown_tests;

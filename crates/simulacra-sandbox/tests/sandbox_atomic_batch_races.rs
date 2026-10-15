@@ -17,11 +17,12 @@ enum Mode {
     /// competing writer replaces them with `theirs` before the read returns, so
     /// the revision changes after the bytes were read.
     ReadThenReplace(&'static str, &'static str),
-    /// The 2nd `metadata` call for this path fails with `Io`; every other call
-    /// succeeds. Assumption: in a batch over one `Matches` write, call 1 is the
-    /// byte validation and call 2 is the revision pin (or, if the fix reads the
-    /// revision first, the validation); either way an error must surface.
-    SecondMetadataFails(&'static str),
+    /// The 1st `metadata` call for this path fails with `Io`; every other call
+    /// succeeds. In a batch over one `Matches` write the revision pin is read
+    /// before the bytes are validated, so call 1 is the revision lookup and the
+    /// validation's own metadata calls (2 and later) succeed: only a revision
+    /// lookup that swallows its error lets the batch through.
+    FirstMetadataFails(&'static str),
     /// `apply_batch` reports `OutcomeUnknown` without applying anything.
     BatchOutcomeUnknown,
 }
@@ -90,9 +91,9 @@ impl VirtualFs for Probe {
         self.inner.remove(path)
     }
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
-        if let Mode::SecondMetadataFails(target) = self.mode
+        if let Mode::FirstMetadataFails(target) = self.mode
             && path == target
-            && self.metadata_of_target.fetch_add(1, SeqCst) == 1
+            && self.metadata_of_target.fetch_add(1, SeqCst) == 0
         {
             return Err(VfsError::Io(format!("injected metadata failure on {path}")));
         }
@@ -212,7 +213,7 @@ fn a_move_whose_source_changes_between_the_byte_check_and_the_revision_read_conf
 
 #[test]
 fn an_unreadable_revision_is_an_error_and_never_an_unconditional_commit() {
-    let fs = Probe::new(Mode::SecondMetadataFails("/a"));
+    let fs = Probe::new(Mode::FirstMetadataFails("/a"));
     let budget = budget_with_overrides(0, 0, 1000, 0);
     let cell = cell_over(
         fs.clone(),
@@ -233,8 +234,8 @@ fn an_unreadable_revision_is_an_error_and_never_an_unconditional_commit() {
     assert_eq!(text(&*fs, "/a"), "old");
     assert_eq!(budget_counter(&budget, "used_vfs_bytes"), 0, "released");
     assert!(
-        fs.metadata_of_target.load(SeqCst) >= 2,
-        "positive control: the injected failure point was reached"
+        fs.metadata_of_target.load(SeqCst) >= 1,
+        "positive control: the injected failure point (the revision lookup) was reached"
     );
 }
 
