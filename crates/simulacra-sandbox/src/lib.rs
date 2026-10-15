@@ -427,3 +427,6 @@ mod http_fetch_side_paths_tests;
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(test)]
+mod fs_proxy_vfs_tests;
