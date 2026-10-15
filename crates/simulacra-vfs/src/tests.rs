@@ -1,3 +1,4 @@
+mod atomic;
 mod common;
 mod core;
 mod mount;
