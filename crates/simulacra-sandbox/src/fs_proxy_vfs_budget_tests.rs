@@ -279,3 +279,64 @@ fn a_failed_rename_journals_the_error() {
         JournalEntryKind::ToolResult { tool_name, is_error: true, .. } if tool_name == "rename"
     )));
 }
+
+// ── journaling of batches without writes ─────────────────────────────
+
+fn tool_results(f: &Fixture) -> Vec<(String, bool)> {
+    f.journal
+        .entries()
+        .into_iter()
+        .filter_map(|e| match e.entry {
+            JournalEntryKind::ToolResult {
+                tool_name,
+                is_error,
+                ..
+            } => Some((tool_name, is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_batch_of_only_removes_renames_and_mkdirs_leaves_a_journal_entry() {
+    let (fs, f) = memory_fixture(0, 0);
+    fs.write("/ok/a", b"1").unwrap();
+    fs.write("/ok/gone", b"2").unwrap();
+    let batch = [
+        FsMutation::Remove {
+            path: "/ok/gone".into(),
+            precondition: Precondition::Unconditional,
+        },
+        FsMutation::Rename {
+            from: "/ok/a".into(),
+            to: "/ok/b".into(),
+            precondition: Precondition::Unconditional,
+        },
+        FsMutation::Mkdir {
+            path: "/ok/d".into(),
+        },
+    ];
+    VirtualFs::apply_batch(&f.proxy, &batch).unwrap();
+    assert!(fs.exists("/ok/b") && fs.exists("/ok/d") && !fs.exists("/ok/gone"));
+    let results = tool_results(&f);
+    assert!(
+        !results.is_empty() && results.iter().all(|(_, is_error)| !is_error),
+        "a successful non-write batch must be journaled, got {results:?}"
+    );
+}
+
+#[test]
+fn a_failing_batch_journals_the_error() {
+    let (fs, f) = memory_fixture(0, 0);
+    fs.write("/ok/a", b"1").unwrap();
+    let batch = [FsMutation::Remove {
+        path: "/ok/missing".into(),
+        precondition: Precondition::Unconditional,
+    }];
+    assert!(VirtualFs::apply_batch(&f.proxy, &batch).is_err());
+    assert!(
+        tool_results(&f).iter().any(|(_, is_error)| *is_error),
+        "a failed batch must journal its error"
+    );
+    assert!(fs.exists("/ok/a"));
+}

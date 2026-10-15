@@ -241,3 +241,56 @@ fn list_dir_bounded_of_a_denied_path_is_refused_without_calling_the_inner_method
     assert!(matches!(result, Err(ref e) if !matches!(e, VfsError::Unsupported(_))));
     assert_eq!(fs.calls(), [0, 0, 0, 0]);
 }
+
+#[test]
+fn rename_onto_an_existing_path_surfaces_the_inner_conflict() {
+    let (fs, proxy) = proxy();
+    fs.inner.write("/ok/a", b"1").unwrap();
+    fs.inner.write("/ok/b", b"2").unwrap();
+    let result = VirtualFs::rename(&proxy, "/ok/a", "/ok/b");
+    assert!(
+        matches!(result, Err(VfsError::Conflict(_))),
+        "inner Conflict must survive the proxy, got {result:?}"
+    );
+}
+
+#[test]
+fn rename_of_a_missing_source_surfaces_the_inner_not_found() {
+    let (_fs, proxy) = proxy();
+    let result = VirtualFs::rename(&proxy, "/ok/missing", "/ok/b");
+    assert!(
+        matches!(result, Err(VfsError::NotFound(_))),
+        "inner NotFound must survive the proxy, got {result:?}"
+    );
+}
+
+#[test]
+fn rename_to_a_denied_path_is_still_permission_denied() {
+    let (_fs, proxy) = proxy();
+    let result = VirtualFs::rename(&proxy, "/ok/a", "/denied/b");
+    assert!(
+        matches!(result, Err(VfsError::PermissionDenied(_))),
+        "a capability denial stays PermissionDenied, got {result:?}"
+    );
+}
+
+#[test]
+fn metadata_carries_the_inner_revision() {
+    let (fs, proxy) = proxy();
+    fs.inner.write("/ok/a", b"1").unwrap();
+    let expected = fs.inner.metadata("/ok/a").unwrap().revision;
+    assert!(expected.is_some(), "MemoryFs reports revisions");
+    let meta = VirtualFs::metadata(&proxy, "/ok/a").unwrap();
+    assert_eq!(meta.revision, expected);
+}
+
+#[test]
+fn metadata_revision_changes_when_the_file_does() {
+    let (fs, proxy) = proxy();
+    fs.inner.write("/ok/a", b"1").unwrap();
+    let before = VirtualFs::metadata(&proxy, "/ok/a").unwrap().revision;
+    fs.inner.write("/ok/a", b"2").unwrap();
+    let after = VirtualFs::metadata(&proxy, "/ok/a").unwrap().revision;
+    assert!(before.is_some() && after.is_some());
+    assert_ne!(before, after);
+}
