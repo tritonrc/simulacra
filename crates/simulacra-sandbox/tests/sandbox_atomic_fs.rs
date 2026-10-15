@@ -20,6 +20,11 @@ enum Mode {
     AlwaysConflict,
     /// `list_dir_bounded` cuts the listing at this many entries.
     TruncateAt(usize),
+    /// The first `apply_batch` is preceded by a competing writer replacing
+    /// this path with `other`, as if it landed after the revision was read.
+    ReplaceBeforeBatch(&'static str),
+    /// `metadata` reports no revision, as a backend without them would.
+    NoRevisions,
 }
 
 /// A `MemoryFs` that counts the emulation primitives and the atomic methods,
@@ -29,6 +34,8 @@ struct ProbeFs {
     mode: Mode,
     writes: AtomicUsize,
     renames: AtomicUsize,
+    removes: AtomicUsize,
+    batches: Mutex<Vec<Vec<FsMutation>>>,
     raced: AtomicBool,
     preconditions: Mutex<Vec<Precondition>>,
 }
@@ -40,6 +47,8 @@ impl ProbeFs {
             mode,
             writes: AtomicUsize::new(0),
             renames: AtomicUsize::new(0),
+            removes: AtomicUsize::new(0),
+            batches: Mutex::new(Vec::new()),
             raced: AtomicBool::new(false),
             preconditions: Mutex::new(Vec::new()),
         })
@@ -77,10 +86,15 @@ impl VirtualFs for ProbeFs {
         self.inner.mkdir(path)
     }
     fn remove(&self, path: &str) -> Result<(), VfsError> {
+        self.removes.fetch_add(1, SeqCst);
         self.inner.remove(path)
     }
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
-        self.inner.metadata(path)
+        let mut meta = self.inner.metadata(path)?;
+        if matches!(self.mode, Mode::NoRevisions) {
+            meta.revision = None;
+        }
+        Ok(meta)
     }
     fn snapshot(&self) -> Result<VfsSnapshot, VfsError> {
         self.inner.snapshot()
@@ -101,6 +115,12 @@ impl VirtualFs for ProbeFs {
         self.inner.rename(from, to)
     }
     fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        self.batches.lock().unwrap().push(mutations.to_vec());
+        if let Mode::ReplaceBeforeBatch(path) = self.mode
+            && !self.raced.swap(true, SeqCst)
+        {
+            self.inner.write(path, b"other").unwrap();
+        }
         self.inner.apply_batch(mutations)
     }
     fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
@@ -180,20 +200,93 @@ fn js_rename_moves_a_directory_with_one_atomic_rename() {
 }
 
 #[test]
-fn js_rename_onto_an_existing_file_throws_and_changes_nothing() {
-    // The atomic rename's Conflict is the answer: it must not be "fixed" by
-    // falling back to the overwriting copy.
+fn js_rename_onto_an_existing_file_replaces_it_in_one_atomic_batch() {
     let fs = ProbeFs::new(Mode::Plain);
     let cell = js_cell_over(fs.clone());
     fs.inner.write("/a.txt", b"mine").unwrap();
-    fs.inner.write("/b.txt", b"keep").unwrap();
+    fs.inner.write("/b.txt", b"old").unwrap();
+    let revision = fs
+        .inner
+        .metadata("/b.txt")
+        .unwrap()
+        .revision
+        .expect("MemoryFs revisions");
+    cell.execute_js("fs.renameSync('/a.txt', '/b.txt')")
+        .unwrap();
+    assert_eq!(text(&*fs, "/b.txt"), "mine");
+    assert!(!fs.exists("/a.txt"));
+    assert_eq!(
+        *fs.batches.lock().unwrap(),
+        vec![vec![
+            FsMutation::Remove {
+                path: "/b.txt".into(),
+                precondition: Precondition::MustMatch(revision),
+            },
+            FsMutation::Rename {
+                from: "/a.txt".into(),
+                to: "/b.txt".into(),
+                precondition: Precondition::Unconditional,
+            },
+        ]]
+    );
+    assert_eq!(fs.writes.load(SeqCst), 0, "no plain write");
+    assert_eq!(fs.removes.load(SeqCst), 0, "no separate remove");
+    assert_eq!(fs.renames.load(SeqCst), 0, "no separate rename");
+}
+
+#[test]
+fn js_rename_onto_an_existing_file_loses_to_a_concurrent_writer_of_the_target() {
+    // The target changes after its revision was read: the batch conflicts,
+    // and the concurrent writer's bytes are what survive.
+    let fs = ProbeFs::new(Mode::ReplaceBeforeBatch("/b.txt"));
+    let cell = js_cell_over(fs.clone());
+    fs.inner.write("/a.txt", b"mine").unwrap();
+    fs.inner.write("/b.txt", b"old").unwrap();
     assert!(
         cell.execute_js("fs.renameSync('/a.txt', '/b.txt')")
             .is_err()
     );
-    assert_eq!(text(&*fs, "/b.txt"), "keep");
+    assert_eq!(fs.batches.lock().unwrap().len(), 1);
+    assert_eq!(text(&*fs, "/b.txt"), "other");
     assert_eq!(text(&*fs, "/a.txt"), "mine");
-    assert_eq!(fs.writes.load(SeqCst), 0);
+}
+
+#[test]
+fn js_rename_onto_an_existing_directory_throws_and_changes_nothing() {
+    let fs = ProbeFs::new(Mode::Plain);
+    let cell = js_cell_over(fs.clone());
+    fs.inner.write("/a.txt", b"mine").unwrap();
+    fs.inner.write("/b/x.txt", b"keep").unwrap();
+    assert!(cell.execute_js("fs.renameSync('/a.txt', '/b')").is_err());
+    assert_eq!(text(&*fs, "/a.txt"), "mine");
+    assert_eq!(text(&*fs, "/b/x.txt"), "keep");
+    assert!(fs.inner.metadata("/b").unwrap().is_dir);
+}
+
+#[test]
+fn js_rename_onto_an_existing_file_without_revisions_removes_unconditionally() {
+    let fs = ProbeFs::new(Mode::NoRevisions);
+    let cell = js_cell_over(fs.clone());
+    fs.inner.write("/a.txt", b"mine").unwrap();
+    fs.inner.write("/b.txt", b"old").unwrap();
+    cell.execute_js("fs.renameSync('/a.txt', '/b.txt')")
+        .unwrap();
+    assert_eq!(text(&*fs, "/b.txt"), "mine");
+    assert!(!fs.exists("/a.txt"));
+    assert_eq!(
+        *fs.batches.lock().unwrap(),
+        vec![vec![
+            FsMutation::Remove {
+                path: "/b.txt".into(),
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Rename {
+                from: "/a.txt".into(),
+                to: "/b.txt".into(),
+                precondition: Precondition::Unconditional,
+            },
+        ]]
+    );
 }
 
 #[test]
@@ -218,6 +311,18 @@ fn js_rename_falls_back_to_copy_when_the_fs_cannot_rename() {
     cell.execute_js("fs.renameSync('/a.txt', '/b.txt')")
         .unwrap();
     assert_eq!(text(&*fs, "/b.txt"), "1");
+    assert!(!fs.exists("/a.txt"));
+}
+
+#[test]
+fn js_rename_fallback_onto_an_existing_file_still_overwrites_it() {
+    let fs = overlay();
+    let cell = js_cell_over(fs.clone());
+    fs.write("/a.txt", b"mine").unwrap();
+    fs.write("/b.txt", b"old").unwrap();
+    cell.execute_js("fs.renameSync('/a.txt', '/b.txt')")
+        .unwrap();
+    assert_eq!(text(&*fs, "/b.txt"), "mine");
     assert!(!fs.exists("/a.txt"));
 }
 
