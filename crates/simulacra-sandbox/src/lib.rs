@@ -20,7 +20,9 @@ mod python;
 mod runtime;
 mod shell;
 mod shell_http_proxy;
+mod vfs_batch;
 mod vfs_mutation;
+mod vfs_mutation_journal;
 mod vfs_state;
 
 pub use executor::ScriptExecutor;

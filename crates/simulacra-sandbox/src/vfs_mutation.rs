@@ -6,12 +6,15 @@
 
 use std::sync::Arc;
 
-use simulacra_types::{
-    JOURNAL_SCHEMA_VERSION, JournalEntry, JournalEntryKind, VfsError, VirtualFs,
-};
+use simulacra_types::{FsMutation, VfsError, VirtualFs};
 
 use crate::SandboxError;
 use crate::guards::{check_and_journal_capability, release_vfs_bytes, reserve_vfs_bytes};
+use crate::vfs_batch::push_batch_items;
+use crate::vfs_mutation_journal::{
+    journal_deletes, journal_execution_failure, journal_moves, journal_plan,
+    journal_unknown_outcome, journal_writes,
+};
 use crate::vfs_state::{
     VfsPathState, VfsRollbackExpectation, capture_vfs_rollback_entries,
     ensure_parent_components_are_directories, ensure_vfs_path_missing, record_missing_parent_dirs,
@@ -74,6 +77,9 @@ enum PreparedVfsMutation {
 
 impl AgentCell {
     /// Apply a set of VFS mutations as a single capability-checked, journaled batch.
+    ///
+    /// The batch commits atomically where the filesystem supports it; it runs
+    /// item by item with rollback only as the `Unsupported` fallback.
     pub fn apply_vfs_mutations(
         &self,
         tool_name: &str,
@@ -129,17 +135,15 @@ impl AgentCell {
             reserve_vfs_bytes(&self.budget, write_bytes, &self.journal, &self.agent_id)?;
         }
 
-        let (rollback_expectations, created_parent_dirs, prepared_mutations) =
-            match prepare_all_mutations(self, mutations) {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    release_reserved_bytes(self, write_bytes)?;
-                    return Err(err);
-                }
-            };
+        let prepared = match prepare_all_mutations(self, mutations) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                release_reserved_bytes(self, write_bytes)?;
+                return Err(err);
+            }
+        };
 
-        let rollback_states = match capture_vfs_rollback_entries(&self.vfs, &rollback_expectations)
-        {
+        let rollback_states = match capture_vfs_rollback_entries(&self.vfs, &prepared.rollback) {
             Ok(states) => states,
             Err(err) => {
                 release_reserved_bytes(self, write_bytes)?;
@@ -164,17 +168,36 @@ impl AgentCell {
             return Err(err);
         }
 
-        if let Err(err) = execute_prepared(&self.vfs, &prepared_mutations) {
-            release_reserved_bytes(self, write_bytes)?;
-            if let Err(restore_err) =
-                restore_vfs_path_states(&self.vfs, &rollback_states, &created_parent_dirs)
-            {
-                return Err(SandboxError::Internal(format!(
-                    "failed to roll back VFS mutations after {err}: {restore_err}"
-                )));
+        match self.vfs.apply_batch(&prepared.batch) {
+            Ok(()) => {}
+            Err(VfsError::Unsupported(_)) => {
+                // No atomic batches on this filesystem: execute item by item
+                // and compensate on failure.
+                if let Err(err) = execute_prepared(&self.vfs, &prepared.mutations) {
+                    release_reserved_bytes(self, write_bytes)?;
+                    if let Err(restore_err) =
+                        restore_vfs_path_states(&self.vfs, &rollback_states, &prepared.parent_dirs)
+                    {
+                        return Err(SandboxError::Internal(format!(
+                            "failed to roll back VFS mutations after {err}: {restore_err}"
+                        )));
+                    }
+                    journal_execution_failure(self, tool_name, &err);
+                    return Err(SandboxError::Vfs(err));
+                }
             }
-            journal_execution_failure(self, tool_name, &err);
-            return Err(SandboxError::Vfs(err));
+            Err(err @ VfsError::OutcomeUnknown(_)) => {
+                // The batch may still land: keep the reservation (over-counting
+                // is the safe direction) and do not roll back.
+                journal_unknown_outcome(self, tool_name, &err);
+                return Err(SandboxError::Vfs(err));
+            }
+            Err(err) => {
+                // An atomic batch that failed changed nothing: no rollback.
+                release_reserved_bytes(self, write_bytes)?;
+                journal_execution_failure(self, tool_name, &err);
+                return Err(SandboxError::Vfs(err));
+            }
         }
 
         Ok(())
@@ -256,36 +279,38 @@ fn check_batch_capabilities(
     Ok(())
 }
 
+/// Everything prepared for a batch: rollback bookkeeping for the item-by-item
+/// fallback, the items for that fallback, and the atomic batch.
+struct Prepared {
+    rollback: Vec<VfsRollbackExpectation>,
+    parent_dirs: Vec<String>,
+    mutations: Vec<PreparedVfsMutation>,
+    batch: Vec<FsMutation>,
+}
+
 /// Validate preconditions and capture rollback metadata for every mutation.
-#[allow(clippy::type_complexity)]
 fn prepare_all_mutations(
     cell: &AgentCell,
     mutations: &[VfsMutation],
-) -> Result<
-    (
-        Vec<VfsRollbackExpectation>,
-        Vec<String>,
-        Vec<PreparedVfsMutation>,
-    ),
-    SandboxError,
-> {
-    let mut rollback_expectations = Vec::new();
-    let mut created_parent_dirs = Vec::new();
-    let mut prepared_mutations = Vec::with_capacity(mutations.len());
+) -> Result<Prepared, SandboxError> {
+    let mut prepared = Prepared {
+        rollback: Vec::new(),
+        parent_dirs: Vec::new(),
+        mutations: Vec::with_capacity(mutations.len()),
+        batch: Vec::with_capacity(mutations.len()),
+    };
     for mutation in mutations {
+        // Pin the revision before prepare_mutation reads the bytes it validates.
+        push_batch_items(&cell.vfs, mutation, &mut prepared.batch)?;
         prepare_mutation(
             cell,
             mutation,
-            &mut rollback_expectations,
-            &mut created_parent_dirs,
-            &mut prepared_mutations,
+            &mut prepared.rollback,
+            &mut prepared.parent_dirs,
+            &mut prepared.mutations,
         )?;
     }
-    Ok((
-        rollback_expectations,
-        created_parent_dirs,
-        prepared_mutations,
-    ))
+    Ok(prepared)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -393,105 +418,4 @@ fn require_file(vfs: &Arc<dyn VirtualFs>, path: &str) -> Result<(), SandboxError
         return Err(SandboxError::Vfs(VfsError::NotAFile(path.to_string())));
     }
     Ok(())
-}
-
-fn journal_plan(cell: &AgentCell, tool_name: &str, count: usize) -> Result<(), SandboxError> {
-    match cell.journal.append(JournalEntry {
-        schema_version: JOURNAL_SCHEMA_VERSION,
-        agent_id: cell.agent_id.clone(),
-        timestamp_ms: 0,
-        entry: JournalEntryKind::ToolResult {
-            tool_call_id: None,
-
-            tool_name: tool_name.to_string(),
-            content: format!("planned {} VFS mutation(s)", count),
-            is_error: false,
-            provider_content: Vec::new(),
-        },
-    }) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            tracing::error!(error = %err, "journal append failed for VFS mutation plan");
-            Err(SandboxError::Internal(format!(
-                "journal append failed for VFS mutation plan: {err}"
-            )))
-        }
-    }
-}
-
-fn journal_deletes(cell: &AgentCell, paths: &[&str]) -> Result<(), SandboxError> {
-    for path in paths {
-        if let Err(err) = cell.journal.append(JournalEntry {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            agent_id: cell.agent_id.clone(),
-            timestamp_ms: 0,
-            entry: JournalEntryKind::FileDelete {
-                path: path.to_string(),
-            },
-        }) {
-            tracing::error!(error = %err, "journal append failed for VFS mutation delete");
-            return Err(SandboxError::Internal(format!(
-                "journal append failed for VFS mutation delete: {err}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn journal_moves(cell: &AgentCell, moves: &[(&str, &str)]) -> Result<(), SandboxError> {
-    for (from, to) in moves {
-        if let Err(err) = cell.journal.append(JournalEntry {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            agent_id: cell.agent_id.clone(),
-            timestamp_ms: 0,
-            entry: JournalEntryKind::FileMove {
-                from: from.to_string(),
-                to: to.to_string(),
-            },
-        }) {
-            tracing::error!(error = %err, "journal append failed for VFS mutation move");
-            return Err(SandboxError::Internal(format!(
-                "journal append failed for VFS mutation move: {err}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn journal_writes(cell: &AgentCell, writes: &[(&str, u64)]) -> Result<(), SandboxError> {
-    for (path, size_bytes) in writes {
-        if let Err(err) = cell.journal.append(JournalEntry {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            agent_id: cell.agent_id.clone(),
-            timestamp_ms: 0,
-            entry: JournalEntryKind::FileWrite {
-                path: path.to_string(),
-                size_bytes: *size_bytes,
-            },
-        }) {
-            tracing::error!(error = %err, "journal append failed for VFS mutation write");
-            return Err(SandboxError::Internal(format!(
-                "journal append failed for VFS mutation write: {err}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn journal_execution_failure(cell: &AgentCell, tool_name: &str, err: &VfsError) {
-    if let Err(journal_err) = cell.journal.append(JournalEntry {
-        schema_version: JOURNAL_SCHEMA_VERSION,
-        agent_id: cell.agent_id.clone(),
-        timestamp_ms: 0,
-        entry: JournalEntryKind::ToolResult {
-            tool_call_id: None,
-
-            tool_name: tool_name.to_string(),
-            content: err.to_string(),
-            is_error: true,
-            provider_content: Vec::new(),
-        },
-    }) {
-        tracing::error!(error = %journal_err, "journal append failed for VFS mutation error");
-    }
 }
