@@ -168,9 +168,20 @@ impl<V: VirtualFs> MemoryStoreFs<V> {
     /// atomicity must handle that (JS rename and patch application degrade to
     /// their emulation). The plain `write` and `remove` they reach enforce
     /// the capability scopes; this layer must not pre-empt them. Atomic calls
-    /// are judged on the resolved path, so `/var/memory/../x` is `/x`.
+    /// are judged on the resolved path, so `/var/memory/../x` is `/x`. A call
+    /// that removes or moves away an ancestor of a memory prefix (`/var`,
+    /// `/`) takes the owned subtree with it, so it answers `Unsupported` too.
     fn gate(touches: &[Touch]) -> Result<(), VfsError> {
-        match touches.iter().find(|t| Self::is_memory_path(&t.path)) {
+        let takes_memory = |t: &Touch| {
+            t.takes_subtree
+                && ["/var/memory", "/mnt"]
+                    .iter()
+                    .any(|prefix| atomic_paths::is_ancestor(&t.path, prefix))
+        };
+        match touches
+            .iter()
+            .find(|t| Self::is_memory_path(&t.path) || takes_memory(t))
+        {
             Some(t) => Err(VfsError::Unsupported(format!(
                 "atomic operation on memory path {}",
                 t.path

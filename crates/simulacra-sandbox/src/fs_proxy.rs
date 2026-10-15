@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use crate::file_io::{read_file_inner, write_file_inner};
 use crate::fs_proxy_append::append_conditionally;
 use crate::fs_proxy_rename::rename_replacing;
-use crate::guards::{check_and_journal_capability, release_vfs_bytes, reserve_vfs_bytes};
+use crate::guards::{check_and_journal_capability, release_unless_unknown, reserve_vfs_bytes};
 use crate::{cap_name_for_read, cap_name_for_write};
 
 pub(crate) struct AgentCellFsProxy {
@@ -57,8 +57,10 @@ impl AgentCellFsProxy {
             .map_err(|e| e.to_string())
     }
 
-    pub(crate) fn release_write_budget(&self, bytes: usize) -> Result<(), String> {
-        release_vfs_bytes(&self.budget, bytes as u64).map_err(|e| e.to_string())
+    /// Release a reservation after a write failed with `err`, unless its
+    /// outcome is unknown (the write may still land).
+    pub(crate) fn release_write_budget(&self, err: &VfsError, bytes: usize) -> Result<(), String> {
+        release_unless_unknown(&self.budget, err, bytes as u64).map_err(|e| e.to_string())
     }
 
     pub(crate) fn journal_file_write(&self, path: &str, size_bytes: usize) {
@@ -184,8 +186,8 @@ impl FsProxy for AgentCellFsProxy {
         self.journal_file_write(path, data.len());
 
         if let Err(err) = append_conditionally(self.vfs.as_ref(), path, data) {
-            self.release_write_budget(data.len())?;
-            return Err(err);
+            self.release_write_budget(&err, data.len())?;
+            return Err(err.to_string());
         }
         Ok(())
     }
@@ -238,9 +240,10 @@ impl FsProxy for AgentCellFsProxy {
         self.check_write(to, "rename")?;
         self.reserve_write_budget(0)?;
 
+        let write = |path: &str, data: &[u8]| self.charged_copy_write(path, data);
         self.finish(
             "rename",
-            rename_replacing(self.vfs.as_ref(), from, to),
+            rename_replacing(self.vfs.as_ref(), from, to, &write),
             |_| format!("renamed {from} to {to}"),
         )
     }

@@ -13,7 +13,7 @@ use simulacra_types::{
 };
 
 use crate::SandboxError;
-use crate::guards::{release_vfs_bytes, reserve_vfs_bytes};
+use crate::guards::{release_unless_unknown, reserve_vfs_bytes};
 use crate::{cap_name_for_read, cap_name_for_write, check_and_journal_capability};
 
 /// Core read_file logic: span → capability → execute → journal → return.
@@ -131,9 +131,10 @@ pub(crate) fn write_file_inner(
         tracing::error!(error = %err, "journal append failed for write_file");
     }
 
-    // Execute. If the VFS rejects the write, roll back the byte reservation.
+    // Execute. If the VFS rejects the write, roll back the byte reservation,
+    // unless the outcome is unknown and the write may still land.
     if let Err(err) = vfs.write(path, data) {
-        release_vfs_bytes(budget, write_bytes)?;
+        release_unless_unknown(budget, &err, write_bytes)?;
         return Err(SandboxError::Vfs(err));
     }
 

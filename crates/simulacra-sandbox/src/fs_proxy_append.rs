@@ -50,22 +50,19 @@ enum Attempt {
     Raced,
 }
 
-fn attempt(vfs: &dyn VirtualFs, path: &str, data: &[u8]) -> Result<Attempt, String> {
+fn attempt(vfs: &dyn VirtualFs, path: &str, data: &[u8]) -> Result<Attempt, VfsError> {
     let (mut combined, precondition) = match observe(vfs, path) {
         Ok(Observed::Stable(existing, precondition)) => (existing, precondition),
         Ok(Observed::Changed) => return Ok(Attempt::Raced),
-        Err(err) => return Err(err.to_string()),
+        Err(err) => return Err(err),
     };
     combined.extend_from_slice(data);
     match vfs.write_if(path, &combined, precondition) {
         Ok(()) => Ok(Attempt::Done),
         // No conditional writes here: the old, racy behaviour.
-        Err(VfsError::Unsupported(_)) => vfs
-            .write(path, &combined)
-            .map(|()| Attempt::Done)
-            .map_err(|e| e.to_string()),
+        Err(VfsError::Unsupported(_)) => vfs.write(path, &combined).map(|()| Attempt::Done),
         Err(VfsError::Conflict(_)) => Ok(Attempt::Raced),
-        Err(err) => Err(err.to_string()),
+        Err(err) => Err(err),
     }
 }
 
@@ -75,18 +72,19 @@ fn attempt(vfs: &dyn VirtualFs, path: &str, data: &[u8]) -> Result<Attempt, Stri
 /// revision the bytes were read at, so a concurrent writer's bytes are not
 /// overwritten: the append is retried once, then fails. Without revisions the
 /// write is unconditional and can lose a concurrent writer's bytes. A failure
-/// that is `OutcomeUnknown` may still have landed.
+/// that is `OutcomeUnknown` may still have landed, and stays typed so the
+/// caller keeps its budget reservation.
 pub(crate) fn append_conditionally(
     vfs: &dyn VirtualFs,
     path: &str,
     data: &[u8],
-) -> Result<(), String> {
+) -> Result<(), VfsError> {
     match attempt(vfs, path, data)? {
         Attempt::Done => return Ok(()),
         Attempt::Raced => {}
     }
     match attempt(vfs, path, data)? {
         Attempt::Done => Ok(()),
-        Attempt::Raced => Err(RACED.to_string()),
+        Attempt::Raced => Err(VfsError::Conflict(RACED.to_string())),
     }
 }

@@ -81,7 +81,7 @@ impl VirtualFs for AgentCellFsProxy {
             .map_err(sandbox_error_to_vfs)?;
         self.journal_file_write(path, data.len());
         if let Err(err) = self.vfs.write_if(path, data, precondition) {
-            self.release_write_budget(data.len())
+            self.release_write_budget(&err, data.len())
                 .map_err(sandbox_error_to_vfs)?;
             return Err(err);
         }
@@ -152,7 +152,7 @@ impl VirtualFs for AgentCellFsProxy {
                 Ok(())
             }
             Err(err) => {
-                self.release_write_budget(total)
+                self.release_write_budget(&err, total)
                     .map_err(sandbox_error_to_vfs)?;
                 // `Unsupported` attempted nothing; the caller emulates.
                 if !matches!(err, VfsError::Unsupported(_)) {

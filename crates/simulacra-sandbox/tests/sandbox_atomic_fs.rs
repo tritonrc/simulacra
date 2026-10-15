@@ -211,6 +211,7 @@ fn js_rename_onto_an_existing_file_replaces_it_in_one_atomic_batch() {
         .unwrap()
         .revision
         .expect("MemoryFs revisions");
+    let source_revision = fs.inner.metadata("/a.txt").unwrap().revision.unwrap();
     cell.execute_js("fs.renameSync('/a.txt', '/b.txt')")
         .unwrap();
     assert_eq!(text(&*fs, "/b.txt"), "mine");
@@ -225,7 +226,7 @@ fn js_rename_onto_an_existing_file_replaces_it_in_one_atomic_batch() {
             FsMutation::Rename {
                 from: "/a.txt".into(),
                 to: "/b.txt".into(),
-                precondition: Precondition::Unconditional,
+                precondition: Precondition::MustMatch(source_revision),
             },
         ]]
     );

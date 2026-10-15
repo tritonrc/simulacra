@@ -190,11 +190,18 @@ impl VirtualFs for OverlayFs {
         if self.is_whited_out(&path) {
             return Err(VfsError::NotFound(path));
         }
-        match self.upper.metadata(&path) {
-            Ok(m) => Ok(m),
-            Err(VfsError::NotFound(_)) => self.lower.metadata(&path),
-            Err(e) => Err(e),
-        }
+        let mut metadata = match self.upper.metadata(&path) {
+            Ok(m) => m,
+            Err(VfsError::NotFound(_)) => self.lower.metadata(&path)?,
+            Err(e) => return Err(e),
+        };
+        // The two layers number their revisions independently: a file first
+        // written in a fresh lower layer and the same path later written in
+        // the empty upper layer would both be revision 1 for different
+        // bytes. A revision here would name no single state, so none is
+        // reported, and a caller falls back to its unconditional path.
+        metadata.revision = None;
+        Ok(metadata)
     }
 
     fn snapshot(&self) -> Result<VfsSnapshot, VfsError> {

@@ -77,7 +77,12 @@ impl<V: VirtualFs> MailboxFs<V> {
     /// their emulation), and the plain `write` it reaches then applies the
     /// store's rules.
     fn gate(&self, touches: &[Touch]) -> Result<(), VfsError> {
-        match touches.iter().find(|t| is_mailbox(&t.path)) {
+        // A call that removes or moves away an ancestor of the mailbox
+        // (`/proc`, `/`) takes it along, so it is refused too.
+        match touches.iter().find(|t| {
+            is_mailbox(&t.path)
+                || (t.takes_subtree && atomic_paths::is_ancestor(&t.path, MAILBOX_PREFIX))
+        }) {
             Some(t) => Err(VfsError::Unsupported(format!(
                 "atomic operation on mailbox path {}",
                 t.path

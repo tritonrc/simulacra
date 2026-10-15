@@ -59,6 +59,15 @@ pub(crate) fn batched(mutations: &[FsMutation]) -> Vec<Touch> {
     touches
 }
 
+/// True when `path` is a strict ancestor of `prefix` (`/` and every parent of
+/// it), so removing or moving `path` away takes `prefix` with it. Both are
+/// normalized here; `prefix` may carry a trailing slash.
+pub(crate) fn is_ancestor(path: &str, prefix: &str) -> bool {
+    let path = normalize(path);
+    let prefix = normalize(prefix);
+    path == "/" || (prefix != path && prefix.starts_with(&format!("{path}/")))
+}
+
 pub(crate) fn is_root(path: &str) -> bool {
     normalize(path) == "/"
 }

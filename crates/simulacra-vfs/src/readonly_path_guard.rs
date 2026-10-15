@@ -48,8 +48,7 @@ impl ReadOnlyPathGuard {
     /// with it (`/` and every parent of the prefix), though `path` itself is
     /// not locked.
     fn is_ancestor_of_locked(&self, path: &str) -> bool {
-        let path = normalize(path);
-        path == "/" || self.locked_prefix.starts_with(&format!("{path}/"))
+        atomic_paths::is_ancestor(path, &self.locked_prefix)
     }
 
     /// Refuses a call before it reaches `inner` if any touched path is locked.

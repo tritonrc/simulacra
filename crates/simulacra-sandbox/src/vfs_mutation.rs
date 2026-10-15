@@ -174,6 +174,12 @@ impl AgentCell {
                 // No atomic batches on this filesystem: execute item by item
                 // and compensate on failure.
                 if let Err(err) = execute_prepared(&self.vfs, &prepared.mutations) {
+                    if matches!(err, VfsError::OutcomeUnknown(_)) {
+                        // The write may still land: keep the reservation and
+                        // do not compensate, a rollback would race it.
+                        journal_unknown_outcome(self, tool_name, &err);
+                        return Err(SandboxError::Vfs(err));
+                    }
                     release_reserved_bytes(self, write_bytes)?;
                     if let Err(restore_err) =
                         restore_vfs_path_states(&self.vfs, &rollback_states, &prepared.parent_dirs)
