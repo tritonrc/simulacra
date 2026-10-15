@@ -7,6 +7,7 @@
 
 pub mod mailboxfs;
 mod memory;
+mod memory_atomic;
 mod memory_store_fs;
 pub mod mount;
 mod notifying;

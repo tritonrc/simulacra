@@ -275,7 +275,8 @@ pub trait VirtualFs: Send + Sync + 'static {
     /// `write` would race, and callers must know when that is all they get.
     ///
     /// Errors: a failed precondition is `Conflict`; a directory at `path` is
-    /// `NotAFile`. Missing parents are created, as `write` does.
+    /// `NotAFile`; a file where a parent directory is needed is
+    /// `NotADirectory`. Missing parents are created, as `write` does.
     fn write_if(
         &self,
         path: &str,
@@ -288,7 +289,8 @@ pub trait VirtualFs: Send + Sync + 'static {
     /// Move a file or directory in one step.
     ///
     /// Errors: `from` missing is `NotFound`; `to` existing is `Conflict`;
-    /// moving a directory into itself is `Io`. As an `apply_batch` item, its
+    /// moving a directory into itself is `Io`; a file where a parent directory
+    /// of `to` is needed is `NotADirectory`. As an `apply_batch` item, its
     /// precondition applies to `from`.
     fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
         Err(VfsError::Unsupported(format!("rename {from} -> {to}")))
