@@ -48,11 +48,11 @@ impl ProbeFs {
             .lock()
             .unwrap()
             .push((op, std::thread::current().id()));
-        if op.starts_with(self.gate_op) {
-            if let Some(rx) = self.gate.lock().unwrap().take() {
-                rx.recv_timeout(Duration::from_secs(2))
-                    .map_err(|_| VfsError::Io(format!("{op} ran on the async worker thread")))?;
-            }
+        if op.starts_with(self.gate_op)
+            && let Some(rx) = self.gate.lock().unwrap().take()
+        {
+            rx.recv_timeout(Duration::from_secs(2))
+                .map_err(|_| VfsError::Io(format!("{op} ran on the async worker thread")))?;
         }
         Ok(())
     }
