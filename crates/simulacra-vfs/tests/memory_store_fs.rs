@@ -16,6 +16,8 @@ use simulacra_vfs::{
 
 #[path = "memory_store_fs/atomic.rs"]
 mod atomic;
+#[path = "memory_store_fs/plain.rs"]
+mod plain;
 
 fn tenant() -> TenantId {
     TenantId::parse("tenant-a").unwrap()

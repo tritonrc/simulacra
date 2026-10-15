@@ -15,6 +15,8 @@ use simulacra_vfs::{
 
 #[path = "mailbox_fs/atomic.rs"]
 mod atomic;
+#[path = "mailbox_fs/plain.rs"]
+mod plain;
 
 type ArtifactKey = (String, String, String);
 

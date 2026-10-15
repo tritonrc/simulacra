@@ -9,3 +9,4 @@ mod notifying_atomic;
 mod overlay;
 mod procfs;
 mod servicefs_atomic;
+mod servicefs_plain;

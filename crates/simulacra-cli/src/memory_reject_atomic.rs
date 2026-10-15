@@ -284,3 +284,76 @@ fn non_canonical_paths_outside_memory_forward_to_the_normalized_path() {
     assert_eq!(inner.read("/d").unwrap(), vec![9]);
     assert_eq!(inner.read("/e").unwrap(), vec![9]);
 }
+
+/// Non-canonical spellings of memory directories.
+const MEMORY_DIR_SPELLINGS: [&str; 6] = [
+    "/x/../var/memory/self",
+    "//var/memory/self",
+    "/var/./memory/self",
+    "/x/../mnt/policies",
+    "//mnt/policies",
+    "/mnt/./policies",
+];
+
+fn seeded_memory() -> (Arc<MemoryFs>, MemoryRejectFs<Arc<dyn VirtualFs>>) {
+    let (inner, fs) = rejecting();
+    inner.write("/var/memory/self/x.md", b"seeded").unwrap();
+    inner.write("/mnt/policies/x.md", b"seeded").unwrap();
+    (inner, fs)
+}
+
+#[test]
+fn non_canonical_memory_paths_answer_not_found_for_write_and_write_nothing() {
+    let (inner, fs) = seeded_memory();
+    for path in MEMORY_SPELLINGS {
+        not_found(fs.write(path, b"changed"), path);
+        assert_eq!(
+            inner.read(normalized(path)).unwrap(),
+            b"seeded",
+            "{path} must not reach the inner filesystem"
+        );
+    }
+}
+
+#[test]
+fn non_canonical_memory_paths_answer_not_found_for_mkdir_and_create_nothing() {
+    let (inner, fs) = rejecting();
+    for path in MEMORY_SPELLINGS {
+        not_found(fs.mkdir(path), path);
+        assert!(
+            !inner.exists(normalized(path)),
+            "{path} must not create a directory in the inner filesystem"
+        );
+    }
+}
+
+#[test]
+fn non_canonical_memory_paths_answer_not_found_for_remove_and_remove_nothing() {
+    let (inner, fs) = seeded_memory();
+    for path in MEMORY_SPELLINGS {
+        not_found(fs.remove(path), path);
+        assert_eq!(
+            inner.read(normalized(path)).unwrap(),
+            b"seeded",
+            "{path} must not remove from the inner filesystem"
+        );
+    }
+}
+
+#[test]
+fn non_canonical_memory_paths_read_as_absent_like_the_canonical_ones() {
+    let (_inner, fs) = seeded_memory();
+    for path in ["/var/memory/self/x.md", "/mnt/policies/x.md"] {
+        not_found(fs.read(path), path);
+        not_found(fs.metadata(path), path);
+        assert!(!fs.exists(path), "canonical {path}");
+    }
+    for path in MEMORY_SPELLINGS {
+        not_found(fs.read(path), path);
+        not_found(fs.metadata(path), path);
+        assert!(!fs.exists(path), "exists {path}");
+    }
+    for path in MEMORY_DIR_SPELLINGS {
+        not_found(fs.list_dir(path), path);
+    }
+}
