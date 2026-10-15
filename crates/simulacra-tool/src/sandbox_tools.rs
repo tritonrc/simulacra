@@ -15,7 +15,11 @@ use crate::ToolRegistry;
 #[cfg(feature = "sandbox")]
 mod apply_patch;
 #[cfg(feature = "sandbox")]
+mod blocking;
+#[cfg(feature = "sandbox")]
 use apply_patch::ApplyPatchTool;
+#[cfg(feature = "sandbox")]
+use blocking::on_blocking_thread;
 
 // File-tool advertisement can only use the coarse, statically decidable
 // signal that some matching grant exists. It does not imply that the path in a
@@ -138,7 +142,10 @@ impl Tool for FileReadTool {
         Box::pin(async move {
             let path = require_str(&args, "path")?;
 
-            match self.cell.read_file(&path) {
+            let read_path = path.clone();
+            let result =
+                on_blocking_thread(&self.cell, move |cell| cell.read_file(&read_path)).await?;
+            match result {
                 Ok(data) => {
                     let content = String::from_utf8_lossy(&data).into_owned();
                     Ok(ToolOutput::success(content).to_value())
@@ -195,10 +202,15 @@ impl Tool for FileWriteTool {
             let path = require_str(&args, "path")?;
             let content = require_str(&args, "content")?;
 
-            let bytes = content.as_bytes();
-            match self.cell.write_file(&path, bytes) {
+            let data = content.into_bytes();
+            let len = data.len();
+            let write_path = path.clone();
+            let result =
+                on_blocking_thread(&self.cell, move |cell| cell.write_file(&write_path, &data))
+                    .await?;
+            match result {
                 Ok(()) => {
-                    let msg = format!("wrote {} bytes to {path}", bytes.len());
+                    let msg = format!("wrote {len} bytes to {path}");
                     Ok(ToolOutput::success(msg).to_value())
                 }
                 Err(err) => Err(map_sandbox_error(err)),
@@ -416,28 +428,39 @@ impl Tool for ListDirTool {
         Box::pin(async move {
             let path = require_str(&args, "path")?;
 
-            match self.cell.list_dir(&path) {
-                Ok(entries) => {
-                    let mut lines = Vec::new();
-                    for entry in &entries {
-                        let full_path = if path == "/" {
-                            format!("/{entry}")
-                        } else {
-                            format!("{path}/{entry}")
-                        };
-                        let is_dir = self
-                            .cell
-                            .metadata(&full_path)
-                            .map_err(map_sandbox_error)?
-                            .is_dir;
-                        if is_dir {
-                            lines.push(format!("{entry}/"));
-                        } else {
-                            lines.push(entry.clone());
-                        }
+            let list_path = path.clone();
+            let result = on_blocking_thread(&self.cell, move |cell| {
+                // Only a failed listing takes the lenient not-found arms
+                // below; a failed per-entry lookup is a tool error.
+                let listing = match cell.list_dir_bounded(&list_path) {
+                    Ok(listing) => listing,
+                    Err(err) => return Ok::<_, ToolError>(Err(err)),
+                };
+                let mut lines = Vec::with_capacity(listing.entries.len() + 1);
+                for entry in &listing.entries {
+                    let full_path = if list_path == "/" {
+                        format!("/{entry}")
+                    } else {
+                        format!("{list_path}/{entry}")
+                    };
+                    let is_dir = cell.metadata(&full_path).map_err(map_sandbox_error)?.is_dir;
+                    if is_dir {
+                        lines.push(format!("{entry}/"));
+                    } else {
+                        lines.push(entry.clone());
                     }
-                    Ok(ToolOutput::success(lines.join("\n")).to_value())
                 }
+                if listing.truncated {
+                    lines.push(format!(
+                        "… truncated: listing stopped at {} entries",
+                        listing.entries.len()
+                    ));
+                }
+                Ok(Ok(lines))
+            })
+            .await??;
+            match result {
+                Ok(lines) => Ok(ToolOutput::success(lines.join("\n")).to_value()),
                 Err(ref sandbox_err @ SandboxError::Vfs(ref vfs_err))
                     if format!("{vfs_err}")
                         .to_ascii_lowercase()

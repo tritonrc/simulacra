@@ -34,8 +34,8 @@ pub use vfs_mutation::{VfsMutation, VfsWritePrecondition};
 use guards::{check_and_journal_capability, journal_budget_exhaustion};
 use runtime::SendableJsRuntime;
 use simulacra_types::{
-    AgentId, BudgetExhausted, CapabilityDenied, CapabilityToken, FsMetadata, ResourceBudget,
-    VfsError, VirtualFs,
+    AgentId, BudgetExhausted, CapabilityDenied, CapabilityToken, DirListing, FsMetadata,
+    ResourceBudget, VfsError, VirtualFs,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -303,8 +303,9 @@ impl AgentCell {
         Ok(())
     }
 
-    /// List directory contents, checking path read capability.
-    pub fn list_dir(&self, path: &str) -> Result<Vec<String>, SandboxError> {
+    /// List directory contents, checking path read capability. A backend that
+    /// cuts the listing short says so in the result.
+    pub fn list_dir_bounded(&self, path: &str) -> Result<DirListing, SandboxError> {
         let _span = tracing::info_span!(
             "sandbox_list_dir",
             simulacra.operation.name = "sandbox_list_dir",
@@ -320,7 +321,7 @@ impl AgentCell {
         )?;
 
         // No budget check — S011 §10: list_dir is a metadata query, not a tool invocation.
-        let entries = self.vfs.list_dir(path).map_err(SandboxError::Vfs)?;
+        let listing = self.vfs.list_dir_bounded(path).map_err(SandboxError::Vfs)?;
 
         // S029 §72: /proc list_dir produces a journal entry (same as regular file reads).
         if path == "/proc" || path.starts_with("/proc/") {
@@ -332,7 +333,7 @@ impl AgentCell {
                     tool_call_id: None,
 
                     tool_name: "list_dir".to_string(),
-                    content: format!("listed {} entries in {}", entries.len(), path),
+                    content: format!("listed {} entries in {}", listing.entries.len(), path),
                     is_error: false,
                     provider_content: Vec::new(),
                 },
@@ -342,7 +343,12 @@ impl AgentCell {
             }
         }
 
-        Ok(entries)
+        Ok(listing)
+    }
+
+    /// List directory contents, checking path read capability.
+    pub fn list_dir(&self, path: &str) -> Result<Vec<String>, SandboxError> {
+        self.list_dir_bounded(path).map(|listing| listing.entries)
     }
 
     /// Return VFS metadata, checking path read capability first.

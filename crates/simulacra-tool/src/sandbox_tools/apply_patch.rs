@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use simulacra_sandbox::{AgentCell, SandboxError, VfsMutation, VfsWritePrecondition};
 use simulacra_types::{CapabilityToken, Tool, ToolDefinition, ToolError, ToolOutput};
 
-use super::{has_write_grant, map_sandbox_error, require_str};
+use super::{has_write_grant, map_sandbox_error, on_blocking_thread, require_str};
 
 pub(crate) struct ApplyPatchTool {
     pub(crate) cell: Arc<AgentCell>,
@@ -43,11 +43,15 @@ impl Tool for ApplyPatchTool {
     ) -> Pin<Box<dyn Future<Output = Result<Value, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let patch = require_str(&args, "patch")?;
-            match plan_patch(&self.cell, &patch) {
-                Ok(plan) => apply_plan(&self.cell, plan),
+            // Planning reads through the cell and the commit writes through
+            // it; both are synchronous VFS calls, so both run off the async
+            // worker in one blocking closure.
+            on_blocking_thread(&self.cell, move |cell| match plan_patch(cell, &patch) {
+                Ok(plan) => apply_plan(cell, plan),
                 Err(PatchError::User(message)) => Ok(ToolOutput::error(message).to_value()),
                 Err(PatchError::Sandbox(err)) => Err(map_sandbox_error(err)),
-            }
+            })
+            .await?
         })
     }
 }
