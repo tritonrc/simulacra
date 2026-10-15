@@ -456,6 +456,9 @@ impl<V: VirtualFs> VirtualFs for MemoryRejectFs<V> {
     }
 }
 
+#[cfg(test)]
+mod memory_reject_atomic;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliOutput {
     pub stdout_content: String,

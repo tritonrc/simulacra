@@ -13,6 +13,9 @@ use simulacra_vfs::{
     ServiceFs, ToolLister,
 };
 
+#[path = "mailbox_fs/atomic.rs"]
+mod atomic;
+
 type ArtifactKey = (String, String, String);
 
 #[derive(Default)]

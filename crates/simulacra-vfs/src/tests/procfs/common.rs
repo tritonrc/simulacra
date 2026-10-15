@@ -124,6 +124,11 @@ fn default_capabilities() -> CapabilityToken {
 /// Standard ProcFs: agent "agent-abc123", turn=3, 100k token budget with 4521
 /// used, no parent.
 pub(super) fn make_procfs() -> ProcFs<MemoryFs> {
+    make_procfs_over(MemoryFs::new())
+}
+
+/// The standard ProcFs over a caller-supplied inner filesystem.
+pub(super) fn make_procfs_over<V: VirtualFs>(inner: V) -> ProcFs<V> {
     let state = Arc::new(ProcState {
         agent_id: "agent-abc123".to_string(),
         agent_name: "researcher".to_string(),
@@ -138,7 +143,7 @@ pub(super) fn make_procfs() -> ProcFs<MemoryFs> {
         hooks: FakeHookLister::with_tool_call_hooks(),
         turn: Arc::new(AtomicU64::new(3)),
     });
-    ProcFs::new(MemoryFs::new(), state)
+    ProcFs::new(inner, state)
 }
 
 /// Child agent with parent_id set.

@@ -188,3 +188,45 @@ fn read_duplicate_names_returns_first_matching_file_bytes() {
 
     assert_eq!(read, b"first".to_vec());
 }
+
+#[test]
+fn atomic_methods_are_permission_denied_and_change_nothing() {
+    use simulacra_types::{FsMutation, Precondition};
+
+    let fs = fs(vec![file("handbook.pdf", b"bytes")]);
+    let batch = [FsMutation::Write {
+        path: "/new.txt".into(),
+        data: vec![1],
+        precondition: Precondition::Unconditional,
+    }];
+
+    for result in [
+        fs.rename("/handbook.pdf", "/moved.pdf"),
+        fs.rename("/missing", "/moved.pdf"),
+        fs.write_if("/new.txt", b"x", Precondition::MustBeAbsent),
+        fs.write_if("/handbook.pdf", b"x", Precondition::Unconditional),
+        fs.apply_batch(&batch),
+        fs.apply_batch(&[]),
+    ] {
+        assert!(
+            matches!(result, Err(VfsError::PermissionDenied(_))),
+            "{result:?}"
+        );
+    }
+    assert_eq!(fs.read("/handbook.pdf").unwrap(), b"bytes");
+    assert!(!fs.exists("/moved.pdf") && !fs.exists("/new.txt"));
+}
+
+#[test]
+fn bounded_listing_is_the_whole_untruncated_listing() {
+    let fs = fs(vec![file("a.csv", b"1"), file("b.csv", b"2")]);
+
+    let listing = fs.list_dir_bounded("/").unwrap();
+
+    assert_eq!(listing.entries, fs.list_dir("/").unwrap());
+    assert!(!listing.truncated);
+    assert!(matches!(
+        fs.list_dir_bounded("/nope").unwrap_err(),
+        VfsError::NotFound(_)
+    ));
+}

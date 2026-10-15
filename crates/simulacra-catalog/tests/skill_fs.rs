@@ -215,3 +215,42 @@ fn metadata_reports_root_skill_dir_and_skill_file_shapes() {
     assert!(!file.is_dir);
     assert!(file.size > 0);
 }
+
+#[test]
+fn atomic_methods_are_permission_denied_and_change_nothing() {
+    use simulacra_types::{FsMutation, Precondition};
+
+    let fs = CatalogSkillFs::new(vec![skill("alpha", "body", None)]);
+    let before = fs.read("/alpha/SKILL.md").unwrap();
+    let batch = [FsMutation::Write {
+        path: "/beta/SKILL.md".into(),
+        data: vec![1],
+        precondition: Precondition::Unconditional,
+    }];
+
+    for result in [
+        fs.rename("/alpha", "/gamma"),
+        fs.rename("/alpha/SKILL.md", "/alpha/OLD.md"),
+        fs.write_if("/beta/SKILL.md", b"x", Precondition::MustBeAbsent),
+        fs.write_if("/alpha/SKILL.md", b"x", Precondition::Unconditional),
+        fs.apply_batch(&batch),
+        fs.apply_batch(&[]),
+    ] {
+        assert!(
+            matches!(result, Err(VfsError::PermissionDenied(_))),
+            "{result:?}"
+        );
+    }
+    assert_eq!(fs.read("/alpha/SKILL.md").unwrap(), before);
+    assert!(!fs.exists("/gamma") && !fs.exists("/beta/SKILL.md"));
+}
+
+#[test]
+fn bounded_listing_is_the_whole_untruncated_listing() {
+    let fs = CatalogSkillFs::new(vec![skill("alpha", "a", None), skill("beta", "b", None)]);
+
+    let listing = fs.list_dir_bounded("/").unwrap();
+
+    assert_eq!(listing.entries, fs.list_dir("/").unwrap());
+    assert!(!listing.truncated);
+}

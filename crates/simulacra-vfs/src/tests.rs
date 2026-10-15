@@ -1,7 +1,10 @@
 mod atomic;
 mod atomic_parents;
+pub(crate) mod bounded;
 mod common;
 mod core;
+mod decorators;
 mod mount;
+mod notifying_atomic;
 mod overlay;
 mod procfs;
