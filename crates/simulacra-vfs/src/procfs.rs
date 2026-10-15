@@ -281,11 +281,7 @@ fn proc_read(state: &ProcState, path: &str) -> Result<Vec<u8>, VfsError> {
 fn proc_metadata(state: &ProcState, path: &str) -> Result<FsMetadata, VfsError> {
     let normalized = path.trim_end_matches('/');
     if normalized == "/proc" {
-        return Ok(FsMetadata {
-            is_file: false,
-            is_dir: true,
-            size: 0,
-        });
+        return Ok(FsMetadata::dir());
     }
 
     let tail = proc_tail(path).unwrap_or("");
@@ -293,22 +289,14 @@ fn proc_metadata(state: &ProcState, path: &str) -> Result<FsMetadata, VfsError> 
     // Known top-level directories
     match tail {
         "agent" | "budget" | "capabilities" | "tools" | "session" | "hooks" | "mailbox" => {
-            return Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            });
+            return Ok(FsMetadata::dir());
         }
         _ => {}
     }
 
     // Try to read as a file to get its byte length
     match proc_read(state, path) {
-        Ok(bytes) => Ok(FsMetadata {
-            is_file: true,
-            is_dir: false,
-            size: bytes.len() as u64,
-        }),
+        Ok(bytes) => Ok(FsMetadata::file(bytes.len() as u64)),
         Err(VfsError::NotFound(_)) => Err(VfsError::NotFound(path.to_string())),
         Err(e) => Err(e),
     }

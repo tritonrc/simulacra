@@ -150,16 +150,8 @@ impl VirtualFs for MemoryFs {
         let path = normalize(path);
         let map = self.inner.read().unwrap();
         match map.get(&path) {
-            Some(Entry::File(data)) => Ok(FsMetadata {
-                is_file: true,
-                is_dir: false,
-                size: data.len() as u64,
-            }),
-            Some(Entry::Dir) => Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            }),
+            Some(Entry::File(data)) => Ok(FsMetadata::file(data.len() as u64)),
+            Some(Entry::Dir) => Ok(FsMetadata::dir()),
             None => Err(VfsError::NotFound(path)),
         }
     }

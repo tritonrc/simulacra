@@ -81,18 +81,10 @@ impl VirtualFs for CatalogAgentFileFs {
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
         if path == "/" || path.is_empty() {
-            return Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            });
+            return Ok(FsMetadata::dir());
         }
         match self.lookup(path) {
-            Some((_, bytes)) => Ok(FsMetadata {
-                is_file: true,
-                is_dir: false,
-                size: bytes.len() as u64,
-            }),
+            Some((_, bytes)) => Ok(FsMetadata::file(bytes.len() as u64)),
             None => Err(VfsError::NotFound(path.to_owned())),
         }
     }

@@ -270,22 +270,14 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
 
             // The mailbox root is always a directory.
             if normalized == MAILBOX_PREFIX {
-                return Ok(FsMetadata {
-                    is_file: false,
-                    is_dir: true,
-                    size: 0,
-                });
+                return Ok(FsMetadata::dir());
             }
 
             let tail = mailbox_tail(path).ok_or_else(|| VfsError::NotFound(path.to_string()))?;
 
             // Check exact file match first.
             if let Ok(data) = self.store.get(&self.tenant, &self.task_id, tail) {
-                return Ok(FsMetadata {
-                    is_file: true,
-                    is_dir: false,
-                    size: data.len() as u64,
-                });
+                return Ok(FsMetadata::file(data.len() as u64));
             }
 
             // Check if it's a virtual directory.
@@ -295,11 +287,7 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
                     .iter()
                     .any(|e| e.path.starts_with(&prefix_with_slash))
             {
-                return Ok(FsMetadata {
-                    is_file: false,
-                    is_dir: true,
-                    size: 0,
-                });
+                return Ok(FsMetadata::dir());
             }
 
             return Err(VfsError::NotFound(path.to_string()));

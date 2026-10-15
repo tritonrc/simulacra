@@ -318,6 +318,8 @@ impl VirtualFs for AgentCellFsProxy {
             is_file,
             is_dir,
             size,
+            revision: None,
+            media_type: None,
         })
     }
 

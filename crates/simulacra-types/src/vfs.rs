@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::TenantId;
+use crate::vfs_ops::{DirListing, FsMutation, Precondition};
 
 /// Metadata about a file or directory in the virtual filesystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,6 +12,40 @@ pub struct FsMetadata {
     pub is_file: bool,
     pub is_dir: bool,
     pub size: u64,
+    /// What `Precondition::MustMatch` compares against. Only backends that
+    /// version entries set it; a revision never names different contents twice.
+    #[serde(default)]
+    pub revision: Option<u64>,
+    /// The entry's media type, where the backend records one.
+    #[serde(default)]
+    pub media_type: Option<String>,
+}
+
+impl FsMetadata {
+    pub fn file(size: u64) -> Self {
+        Self {
+            is_file: true,
+            is_dir: false,
+            size,
+            revision: None,
+            media_type: None,
+        }
+    }
+
+    pub fn dir() -> Self {
+        Self {
+            is_file: false,
+            is_dir: true,
+            size: 0,
+            revision: None,
+            media_type: None,
+        }
+    }
+
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = Some(revision);
+        self
+    }
 }
 
 /// A serializable snapshot of all VFS state.
@@ -195,6 +230,28 @@ pub enum VfsError {
     /// security pitfall and produces this error.
     #[error("hook contract violation")]
     HookContractViolation,
+    /// This filesystem cannot do the operation atomically. A caller may fall
+    /// back to a non-atomic emulation only where that is acceptable and it
+    /// knows it is giving up atomicity (as `AgentCellFsProxy::rename` and
+    /// `AgentCell::apply_vfs_mutations` do today).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+    /// A precondition did not hold, or a target already exists.
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// The write would exceed a storage limit.
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
+    /// Nothing changed: the deadline passed before the commit was sent.
+    #[error("deadline exceeded: {0}")]
+    DeadlineExceeded(String),
+    /// The commit was sent and no answer came. It may still land.
+    #[error("outcome unknown: {0}")]
+    OutcomeUnknown(String),
+    /// The filesystem was restored to an earlier snapshot after this handle
+    /// opened; nothing changed. Reopen to write.
+    #[error("filesystem restored: {0}")]
+    FilesystemRestored(String),
 }
 
 /// Virtual filesystem trait. Object-safe.
@@ -211,6 +268,49 @@ pub trait VirtualFs: Send + Sync + 'static {
     fn restore(&self, snapshot: &VfsSnapshot) -> Result<(), VfsError>;
     fn subscribe(&self, prefix: &str) -> VfsWatcher {
         VfsWatcher::dead(prefix)
+    }
+
+    /// Write only if `precondition` holds, checked and applied as one step.
+    /// The default refuses: a check-then-write built from `metadata` and
+    /// `write` would race, and callers must know when that is all they get.
+    ///
+    /// Errors: a failed precondition is `Conflict`; a directory at `path` is
+    /// `NotAFile`. Missing parents are created, as `write` does.
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!("write_if {path}")))
+    }
+
+    /// Move a file or directory in one step.
+    ///
+    /// Errors: `from` missing is `NotFound`; `to` existing is `Conflict`;
+    /// moving a directory into itself is `Io`. As an `apply_batch` item, its
+    /// precondition applies to `from`.
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!("rename {from} -> {to}")))
+    }
+
+    /// Apply every mutation or none. Items apply in order and each sees the
+    /// effects of the earlier ones.
+    ///
+    /// Any error means nothing in the batch changed, except `OutcomeUnknown`,
+    /// where the batch may still land. `FilesystemRestored` means the tree was
+    /// restored since this handle opened, and nothing changed.
+    fn apply_batch(&self, _mutations: &[FsMutation]) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("apply_batch".to_owned()))
+    }
+
+    /// List a directory, possibly cut short by the backend's listing bound.
+    /// The default never truncates.
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        Ok(DirListing {
+            entries: self.list_dir(path)?,
+            truncated: false,
+        })
     }
 }
 
@@ -245,5 +345,22 @@ impl VirtualFs for std::sync::Arc<dyn VirtualFs> {
     }
     fn subscribe(&self, prefix: &str) -> VfsWatcher {
         (**self).subscribe(prefix)
+    }
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        (**self).write_if(path, data, precondition)
+    }
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        (**self).rename(from, to)
+    }
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        (**self).apply_batch(mutations)
+    }
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        (**self).list_dir_bounded(path)
     }
 }

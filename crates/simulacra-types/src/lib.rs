@@ -25,3 +25,4 @@ pub use message::*;
 pub use provider::*;
 pub use tool::*;
 pub use vfs::*;
+pub use vfs_ops::{DirListing, FsMutation, Precondition};

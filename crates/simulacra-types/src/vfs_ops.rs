@@ -1,3 +1,58 @@
+//! Value types for the atomic `VirtualFs` operations: conditional writes,
+//! rename, mutation batches and bounded listings.
+
+/// What a mutation requires of its target before it may run. `MustMatch`
+/// applies to files; on a directory it does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precondition {
+    Unconditional,
+    MustBeAbsent,
+    /// The target's current revision must equal this value.
+    MustMatch(u64),
+}
+
+/// One item of an atomic batch. A batch commits every item or none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsMutation {
+    Write {
+        path: String,
+        data: Vec<u8>,
+        precondition: Precondition,
+    },
+    Mkdir {
+        path: String,
+    },
+    /// Removes a file, or a directory and everything under it.
+    Remove {
+        path: String,
+        precondition: Precondition,
+    },
+    /// `to` must not exist; the precondition applies to `from`.
+    Rename {
+        from: String,
+        to: String,
+        precondition: Precondition,
+    },
+}
+
+impl FsMutation {
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            Self::Write { path, .. } | Self::Mkdir { path } | Self::Remove { path, .. } => {
+                vec![path.as_str()]
+            }
+            Self::Rename { from, to, .. } => vec![from.as_str(), to.as_str()],
+        }
+    }
+}
+
+/// A directory listing that a backend may cut short.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DirListing {
+    pub entries: Vec<String>,
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -26,14 +81,6 @@ mod tests {
             precondition: Precondition::MustMatch(2),
         };
         assert_eq!(remove.paths(), vec!["/e"]);
-    }
-
-    #[test]
-    fn must_match_precondition_carries_the_revision_it_requires() {
-        assert_eq!(Precondition::MustMatch(4), Precondition::MustMatch(4));
-        assert_ne!(Precondition::MustMatch(4), Precondition::MustMatch(5));
-        assert_ne!(Precondition::MustMatch(0), Precondition::MustBeAbsent);
-        assert_ne!(Precondition::MustBeAbsent, Precondition::Unconditional);
     }
 
     #[test]
@@ -87,9 +134,15 @@ mod tests {
             (VfsError::Unsupported("x1".into()), "unsupported: x1"),
             (VfsError::Conflict("x2".into()), "conflict: x2"),
             (VfsError::QuotaExceeded("x3".into()), "quota exceeded: x3"),
-            (VfsError::DeadlineExceeded("x4".into()), "deadline exceeded: x4"),
+            (
+                VfsError::DeadlineExceeded("x4".into()),
+                "deadline exceeded: x4",
+            ),
             (VfsError::OutcomeUnknown("x5".into()), "outcome unknown: x5"),
-            (VfsError::FilesystemRestored("x6".into()), "filesystem restored: x6"),
+            (
+                VfsError::FilesystemRestored("x6".into()),
+                "filesystem restored: x6",
+            ),
         ];
         for (err, expected) in cases {
             assert_eq!(err.to_string(), expected);
@@ -97,44 +150,64 @@ mod tests {
     }
 
     /// Implements only the required methods, so every new method is a default.
-    struct Bare;
+    /// Every basic call is logged, so a default that emulates through them
+    /// leaves a trace.
+    #[derive(Default)]
+    struct Bare {
+        basic_calls: Mutex<Vec<String>>,
+    }
+
+    impl Bare {
+        fn log(&self, call: String) {
+            self.basic_calls.lock().unwrap().push(call);
+        }
+    }
 
     impl VirtualFs for Bare {
         fn read(&self, p: &str) -> Result<Vec<u8>, VfsError> {
+            self.log(format!("read {p}"));
             Err(VfsError::NotFound(p.into()))
         }
-        fn write(&self, _: &str, _: &[u8]) -> Result<(), VfsError> {
+        fn write(&self, p: &str, d: &[u8]) -> Result<(), VfsError> {
+            self.log(format!("write {p} {}", d.len()));
             Ok(())
         }
-        fn exists(&self, _: &str) -> bool {
+        fn exists(&self, p: &str) -> bool {
+            self.log(format!("exists {p}"));
             false
         }
         fn list_dir(&self, p: &str) -> Result<Vec<String>, VfsError> {
+            self.log(format!("list_dir {p}"));
             if p == "/missing" {
                 return Err(VfsError::NotFound(p.into()));
             }
             Ok(vec!["x".into()])
         }
-        fn mkdir(&self, _: &str) -> Result<(), VfsError> {
+        fn mkdir(&self, p: &str) -> Result<(), VfsError> {
+            self.log(format!("mkdir {p}"));
             Ok(())
         }
-        fn remove(&self, _: &str) -> Result<(), VfsError> {
+        fn remove(&self, p: &str) -> Result<(), VfsError> {
+            self.log(format!("remove {p}"));
             Ok(())
         }
         fn metadata(&self, p: &str) -> Result<FsMetadata, VfsError> {
+            self.log(format!("metadata {p}"));
             Err(VfsError::NotFound(p.into()))
         }
         fn snapshot(&self) -> Result<VfsSnapshot, VfsError> {
+            self.log("snapshot".into());
             Ok(VfsSnapshot { data: vec![] })
         }
         fn restore(&self, _: &VfsSnapshot) -> Result<(), VfsError> {
+            self.log("restore".into());
             Ok(())
         }
     }
 
     #[test]
     fn defaults_refuse_atomic_operations_instead_of_emulating_them() {
-        let fs = Bare;
+        let fs = Bare::default();
         assert!(matches!(
             fs.rename("/a", "/b"),
             Err(VfsError::Unsupported(_))
@@ -143,10 +216,7 @@ mod tests {
             fs.write_if("/a", b"x", Precondition::MustBeAbsent),
             Err(VfsError::Unsupported(_))
         ));
-        assert!(matches!(
-            fs.apply_batch(&[]),
-            Err(VfsError::Unsupported(_))
-        ));
+        assert!(matches!(fs.apply_batch(&[]), Err(VfsError::Unsupported(_))));
         let listing = fs.list_dir_bounded("/").unwrap();
         assert_eq!(
             listing,
@@ -159,17 +229,39 @@ mod tests {
 
     #[test]
     fn refusing_defaults_leave_the_filesystem_untouched() {
-        // A refusal that quietly wrote anything would be an emulation.
-        let fs = Bare;
-        let _ = fs.write_if("/a", b"x", Precondition::Unconditional);
-        let _ = fs.rename("/a", "/b");
-        let _ = fs.apply_batch(&[FsMutation::Mkdir { path: "/d".into() }]);
-        assert!(!fs.exists("/a") && !fs.exists("/b") && !fs.exists("/d"));
+        // A refusal that quietly wrote, removed or created anything would be
+        // an emulation; the log catches any basic call a default makes.
+        let fs = Bare::default();
+        let batch = [
+            FsMutation::Write {
+                path: "/w".into(),
+                data: vec![1],
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Remove {
+                path: "/r".into(),
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Mkdir { path: "/d".into() },
+        ];
+        assert!(matches!(
+            fs.write_if("/a", b"x", Precondition::Unconditional),
+            Err(VfsError::Unsupported(_))
+        ));
+        assert!(matches!(
+            fs.rename("/a", "/b"),
+            Err(VfsError::Unsupported(_))
+        ));
+        assert!(matches!(
+            fs.apply_batch(&batch),
+            Err(VfsError::Unsupported(_))
+        ));
+        assert_eq!(*fs.basic_calls.lock().unwrap(), Vec::<String>::new());
     }
 
     #[test]
     fn bounded_listing_default_passes_list_dir_errors_through() {
-        let err = Bare.list_dir_bounded("/missing").unwrap_err();
+        let err = Bare::default().list_dir_bounded("/missing").unwrap_err();
         assert!(matches!(err, VfsError::NotFound(p) if p == "/missing"));
     }
 
@@ -216,11 +308,17 @@ mod tests {
             Err(VfsError::Conflict("from-write-if".into()))
         }
         fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
-            self.calls.lock().unwrap().push(format!("rename {from} {to}"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("rename {from} {to}"));
             Err(VfsError::QuotaExceeded("from-rename".into()))
         }
         fn apply_batch(&self, m: &[FsMutation]) -> Result<(), VfsError> {
-            self.calls.lock().unwrap().push(format!("batch {}", m.len()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("batch {}", m.len()));
             Err(VfsError::OutcomeUnknown("from-batch".into()))
         }
         fn list_dir_bounded(&self, _: &str) -> Result<DirListing, VfsError> {
@@ -268,7 +366,7 @@ mod tests {
 
     #[test]
     fn arc_dyn_of_a_bare_filesystem_still_refuses() {
-        let fs: Arc<dyn VirtualFs> = Arc::new(Bare);
+        let fs: Arc<dyn VirtualFs> = Arc::new(Bare::default());
         assert!(matches!(
             fs.rename("/a", "/b"),
             Err(VfsError::Unsupported(_))

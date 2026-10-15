@@ -140,28 +140,16 @@ impl VirtualFs for CatalogSkillFs {
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
         if path == "/" || path.is_empty() {
-            return Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            });
+            return Ok(FsMetadata::dir());
         }
         if self.lookup_dir(path).is_some() {
-            return Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            });
+            return Ok(FsMetadata::dir());
         }
 
         match self.lookup_file(path) {
             Some(skill) => {
                 let rendered = Self::render(skill);
-                Ok(FsMetadata {
-                    is_file: true,
-                    is_dir: false,
-                    size: rendered.len() as u64,
-                })
+                Ok(FsMetadata::file(rendered.len() as u64))
             }
             None => Err(VfsError::NotFound(path.to_owned())),
         }

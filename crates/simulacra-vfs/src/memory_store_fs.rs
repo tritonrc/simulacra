@@ -354,11 +354,7 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
         // file metadata; otherwise, if any entries exist under it as a
         // prefix, it's a directory.
         match self.store.get(&self.tenant, &mem_path) {
-            Ok((bytes, _version)) => Ok(FsMetadata {
-                is_file: true,
-                is_dir: false,
-                size: bytes.len() as u64,
-            }),
+            Ok((bytes, _version)) => Ok(FsMetadata::file(bytes.len() as u64)),
             Err(simulacra_memory::MemoryError::NotFound(_)) => {
                 let children = self
                     .store
@@ -367,11 +363,7 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
                 if children.is_empty() {
                     Err(VfsError::NotFound(path.to_string()))
                 } else {
-                    Ok(FsMetadata {
-                        is_file: false,
-                        is_dir: true,
-                        size: 0,
-                    })
+                    Ok(FsMetadata::dir())
                 }
             }
             Err(e) => {

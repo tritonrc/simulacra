@@ -161,11 +161,7 @@ fn svc_metadata(integrations: &dyn IntegrationLister, path: &str) -> Result<FsMe
     let normalized = path.trim_end_matches('/');
 
     if normalized == "/svc" {
-        return Ok(FsMetadata {
-            is_file: false,
-            is_dir: true,
-            size: 0,
-        });
+        return Ok(FsMetadata::dir());
     }
 
     let tail = svc_tail(path).unwrap_or("");
@@ -173,11 +169,7 @@ fn svc_metadata(integrations: &dyn IntegrationLister, path: &str) -> Result<FsMe
     // Check if it's an integration directory name (e.g., "hubspot")
     if !tail.contains('/') {
         if integrations.integration_metadata(tail).is_some() {
-            return Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            });
+            return Ok(FsMetadata::dir());
         }
         return Err(VfsError::NotFound(path.to_string()));
     }
@@ -189,19 +181,11 @@ fn svc_metadata(integrations: &dyn IntegrationLister, path: &str) -> Result<FsMe
     }
 
     match file {
-        "skills" => Ok(FsMetadata {
-            is_file: false,
-            is_dir: true,
-            size: 0,
-        }),
+        "skills" => Ok(FsMetadata::dir()),
         "README.md" | "config.json" => {
             // Read the content to get the size
             match svc_read(integrations, path) {
-                Ok(bytes) => Ok(FsMetadata {
-                    is_file: true,
-                    is_dir: false,
-                    size: bytes.len() as u64,
-                }),
+                Ok(bytes) => Ok(FsMetadata::file(bytes.len() as u64)),
                 Err(e) => Err(e),
             }
         }
