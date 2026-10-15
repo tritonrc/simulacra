@@ -294,3 +294,24 @@ fn metadata_revision_changes_when_the_file_does() {
     assert!(before.is_some() && after.is_some());
     assert_ne!(before, after);
 }
+
+#[test]
+fn metadata_of_a_missing_readable_path_is_not_found() {
+    let (_fs, proxy) = proxy();
+    let result = VirtualFs::metadata(&proxy, "/ok/missing");
+    assert!(
+        matches!(result, Err(VfsError::NotFound(_))),
+        "a missing readable path must surface NotFound, got {result:?}"
+    );
+}
+
+#[test]
+fn metadata_of_a_read_denied_path_is_still_permission_denied() {
+    let (fs, proxy) = proxy();
+    fs.inner.write("/denied/a", b"1").unwrap();
+    let result = VirtualFs::metadata(&proxy, "/denied/a");
+    assert!(
+        matches!(result, Err(VfsError::PermissionDenied(_))),
+        "a capability denial stays PermissionDenied, got {result:?}"
+    );
+}
