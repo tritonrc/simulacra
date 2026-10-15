@@ -297,3 +297,133 @@ fn composed_stack_forwards_atomic_operations_outside_every_owned_prefix() {
     assert_eq!(inner.read("/c").unwrap(), b"3");
     assert!(!inner.exists("/ok") && !inner.exists("/a"));
 }
+
+/// Spellings of `/proc/mailbox/x.md` that are not the canonical one.
+const MAILBOX_SPELLINGS: [&str; 5] = [
+    "/x/../proc/mailbox/x.md",
+    "//proc/mailbox/x.md",
+    "/proc/./mailbox/x.md",
+    "/proc/mailbox/../mailbox/x.md",
+    "/proc//mailbox/x.md",
+];
+
+fn unsupported<T: std::fmt::Debug>(result: Result<T, VfsError>, what: &str) {
+    assert!(
+        matches!(result, Err(VfsError::Unsupported(_))),
+        "{what}: {result:?}"
+    );
+}
+
+#[test]
+fn mailbox_answers_unsupported_for_write_if_on_a_non_canonical_path_and_changes_nothing() {
+    let inner: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    let store = Arc::new(RecordingArtifactStore::default());
+    let fs = mailbox_fs(Arc::clone(&inner), store.clone());
+    for path in MAILBOX_SPELLINGS {
+        for precondition in [Precondition::Unconditional, Precondition::MustBeAbsent] {
+            unsupported(fs.write_if(path, b"1", precondition), path);
+        }
+        assert!(
+            !inner.exists("/proc/mailbox/x.md"),
+            "{path} must not land in the inner filesystem"
+        );
+        assert!(store.stored("tenant-a", "task-123", "x.md").is_none());
+    }
+}
+
+#[test]
+fn mailbox_answers_unsupported_for_a_rename_into_the_mailbox_by_a_non_canonical_path() {
+    let inner: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    inner.write("/a", b"1").unwrap();
+    let store = Arc::new(RecordingArtifactStore::default());
+    let fs = mailbox_fs(Arc::clone(&inner), store.clone());
+    for path in MAILBOX_SPELLINGS {
+        unsupported(fs.rename("/a", path), path);
+        assert_eq!(inner.read("/a").unwrap(), b"1", "{path}");
+        assert!(!inner.exists("/proc/mailbox/x.md"), "{path}");
+        assert!(store.stored("tenant-a", "task-123", "x.md").is_none());
+    }
+}
+
+#[test]
+fn mailbox_answers_unsupported_for_a_rename_out_of_the_mailbox_by_a_non_canonical_path() {
+    let inner: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    inner.write("/proc/mailbox/x.md", b"seeded").unwrap();
+    let fs = mailbox_fs(
+        Arc::clone(&inner),
+        Arc::new(RecordingArtifactStore::default()),
+    );
+    for path in MAILBOX_SPELLINGS {
+        unsupported(fs.rename(path, "/copy.md"), path);
+        assert_eq!(
+            inner.read("/proc/mailbox/x.md").unwrap(),
+            b"seeded",
+            "{path}"
+        );
+        assert!(!inner.exists("/copy.md"), "{path}");
+    }
+}
+
+#[test]
+fn mailbox_answers_unsupported_for_a_batch_touching_it_by_a_non_canonical_path() {
+    let inner: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    inner.write("/a", b"1").unwrap();
+    inner.write("/proc/mailbox/x.md", b"seeded").unwrap();
+    let store = Arc::new(RecordingArtifactStore::default());
+    let fs = mailbox_fs(Arc::clone(&inner), store.clone());
+    for path in MAILBOX_SPELLINGS {
+        let last_items = [
+            write_item(path, &[2], Precondition::Unconditional),
+            FsMutation::Remove {
+                path: path.into(),
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Rename {
+                from: "/a".into(),
+                to: path.into(),
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Rename {
+                from: path.into(),
+                to: "/copy.md".into(),
+                precondition: Precondition::Unconditional,
+            },
+        ];
+        for last in last_items {
+            let batch = [write_item("/one", &[1], Precondition::Unconditional), last];
+            unsupported(fs.apply_batch(&batch), path);
+            assert!(!inner.exists("/one") && !inner.exists("/copy.md"), "{path}");
+            assert_eq!(inner.read("/a").unwrap(), b"1", "{path}");
+            assert_eq!(
+                inner.read("/proc/mailbox/x.md").unwrap(),
+                b"seeded",
+                "{path}"
+            );
+            assert!(store.stored("tenant-a", "task-123", "x.md").is_none());
+        }
+    }
+}
+
+#[test]
+fn mailbox_forwards_non_canonical_paths_outside_the_mailbox_to_the_normalized_path() {
+    let inner: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
+    let fs = mailbox_fs(
+        Arc::clone(&inner),
+        Arc::new(RecordingArtifactStore::default()),
+    );
+    fs.write_if("/a/../b", b"1", Precondition::MustBeAbsent)
+        .unwrap();
+    assert_eq!(inner.read("/b").unwrap(), b"1");
+
+    fs.rename("//b", "/./c").unwrap();
+    assert_eq!(inner.read("/c").unwrap(), b"1");
+    assert!(!inner.exists("/b"));
+
+    fs.apply_batch(&[
+        write_item("/a/../d", &[9], Precondition::Unconditional),
+        write_item("//e", &[9], Precondition::Unconditional),
+    ])
+    .unwrap();
+    assert_eq!(inner.read("/d").unwrap(), vec![9]);
+    assert_eq!(inner.read("/e").unwrap(), vec![9]);
+}

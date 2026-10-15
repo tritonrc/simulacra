@@ -228,3 +228,136 @@ fn memory_store_forwards_list_dir_bounded_outside_memory_and_answers_memory_itse
     assert!(!memory.entries.is_empty());
     assert!(!memory.truncated, "the memory listing comes from the store");
 }
+
+/// Non-canonical spellings of memory (`/var/memory/self`) and `/mnt` paths.
+const MEMORY_SPELLINGS: [&str; 7] = [
+    "/x/../var/memory/self/x.md",
+    "//var/memory/self/x.md",
+    "/var/./memory/self/x.md",
+    "/var/memory/self/y/../x.md",
+    "/x/../mnt/policies/hr.md",
+    "//mnt/policies/hr.md",
+    "/mnt/./policies/hr.md",
+];
+
+/// The normalized path a spelling in `MEMORY_SPELLINGS` names.
+fn normalized(spelling: &str) -> &'static str {
+    if spelling.contains("mnt") {
+        "/mnt/policies/hr.md"
+    } else {
+        "/var/memory/self/x.md"
+    }
+}
+
+fn unsupported<T: std::fmt::Debug>(result: Result<T, VfsError>, what: &str) {
+    assert!(
+        matches!(result, Err(VfsError::Unsupported(_))),
+        "{what}: {result:?}"
+    );
+}
+
+#[test]
+fn memory_store_answers_unsupported_for_write_if_on_a_non_canonical_path_and_writes_nothing() {
+    let fx = fixture();
+    for path in MEMORY_SPELLINGS {
+        for precondition in [Precondition::Unconditional, Precondition::MustBeAbsent] {
+            unsupported(fx.fs.write_if(path, b"1", precondition), path);
+        }
+        assert!(
+            !fx.inner.exists(normalized(path)),
+            "{path} must not land in the inner filesystem"
+        );
+    }
+}
+
+#[test]
+fn memory_store_answers_unsupported_for_a_rename_into_memory_by_a_non_canonical_path() {
+    let fx = fixture();
+    fx.inner.write("/a", b"1").unwrap();
+    for path in MEMORY_SPELLINGS {
+        unsupported(fx.fs.rename("/a", path), path);
+        assert_eq!(fx.inner.read("/a").unwrap(), b"1", "{path}");
+        assert!(!fx.inner.exists(normalized(path)), "{path}");
+    }
+}
+
+#[test]
+fn memory_store_answers_unsupported_for_a_rename_out_of_memory_by_a_non_canonical_path() {
+    let fx = fixture();
+    for target in ["/var/memory/self/x.md", "/mnt/policies/hr.md"] {
+        fx.inner.write(target, b"seeded").unwrap();
+    }
+    for path in MEMORY_SPELLINGS {
+        unsupported(fx.fs.rename(path, "/copy.md"), path);
+        assert_eq!(
+            fx.inner.read(normalized(path)).unwrap(),
+            b"seeded",
+            "{path}"
+        );
+        assert!(!fx.inner.exists("/copy.md"), "{path}");
+    }
+}
+
+#[test]
+fn memory_store_answers_unsupported_for_a_batch_touching_memory_by_a_non_canonical_path() {
+    let fx = fixture();
+    fx.inner.write("/a", b"1").unwrap();
+    for target in ["/var/memory/self/x.md", "/mnt/policies/hr.md"] {
+        fx.inner.write(target, b"seeded").unwrap();
+    }
+    for path in MEMORY_SPELLINGS {
+        let last_items = [
+            write_item(path, &[2], Precondition::Unconditional),
+            FsMutation::Remove {
+                path: path.into(),
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Rename {
+                from: "/a".into(),
+                to: path.into(),
+                precondition: Precondition::Unconditional,
+            },
+            FsMutation::Rename {
+                from: path.into(),
+                to: "/copy.md".into(),
+                precondition: Precondition::Unconditional,
+            },
+        ];
+        for last in last_items {
+            let batch = [write_item("/one", &[1], Precondition::Unconditional), last];
+            unsupported(fx.fs.apply_batch(&batch), path);
+            assert!(
+                !fx.inner.exists("/one") && !fx.inner.exists("/copy.md"),
+                "{path}"
+            );
+            assert_eq!(fx.inner.read("/a").unwrap(), b"1", "{path}");
+            assert_eq!(
+                fx.inner.read(normalized(path)).unwrap(),
+                b"seeded",
+                "{path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn memory_store_forwards_non_canonical_paths_outside_memory_to_the_normalized_path() {
+    let fx = fixture();
+    fx.fs
+        .write_if("/a/../b", b"1", Precondition::MustBeAbsent)
+        .unwrap();
+    assert_eq!(fx.inner.read("/b").unwrap(), b"1");
+
+    fx.fs.rename("//b", "/./c").unwrap();
+    assert_eq!(fx.inner.read("/c").unwrap(), b"1");
+    assert!(!fx.inner.exists("/b"));
+
+    fx.fs
+        .apply_batch(&[
+            write_item("/a/../d", &[9], Precondition::Unconditional),
+            write_item("//e", &[9], Precondition::Unconditional),
+        ])
+        .unwrap();
+    assert_eq!(fx.inner.read("/d").unwrap(), vec![9]);
+    assert_eq!(fx.inner.read("/e").unwrap(), vec![9]);
+}

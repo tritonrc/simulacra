@@ -8,3 +8,4 @@ mod mount;
 mod notifying_atomic;
 mod overlay;
 mod procfs;
+mod servicefs_atomic;
