@@ -53,6 +53,17 @@ pub struct DirListing {
     pub truncated: bool,
 }
 
+impl DirListing {
+    /// A listing nothing cut short: for a layer that computes the listing
+    /// itself, so no backend bound applies.
+    pub fn complete(entries: Vec<String>) -> Self {
+        Self {
+            entries,
+            truncated: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};

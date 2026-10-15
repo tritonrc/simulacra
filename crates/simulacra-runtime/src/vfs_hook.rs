@@ -24,7 +24,10 @@
 use std::sync::Arc;
 
 use simulacra_hooks::{HookError, HookPipeline, Operation, Verdict};
-use simulacra_types::{FsMetadata, TenantId, VfsError, VfsSnapshot, VfsWatcher, VirtualFs};
+use simulacra_types::{
+    DirListing, FsMetadata, FsMutation, Precondition, TenantId, VfsError, VfsSnapshot, VfsWatcher,
+    VirtualFs,
+};
 
 /// A `VirtualFs` decorator that runs every `write` and `remove` through the
 /// global `Operation::VfsWrite` hook chain before forwarding to the inner FS.
@@ -241,5 +244,39 @@ impl VirtualFs for HookedVfsLayer {
 
     fn subscribe(&self, prefix: &str) -> VfsWatcher {
         self.inner.subscribe(prefix)
+    }
+
+    // The atomic operations are refused, not forwarded: forwarding would
+    // commit a write the `VfsWrite` chain never saw. A caller that needs
+    // atomicity must handle `Unsupported` (JS rename and patch application
+    // degrade to their emulation), whose per-half `write` and `remove` run
+    // the chain once per half. Nothing here consumes a hook invocation.
+
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!(
+            "write_if {path} would bypass VfsWrite hooks"
+        )))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!(
+            "rename {from} -> {to} would bypass VfsWrite hooks"
+        )))
+    }
+
+    fn apply_batch(&self, _mutations: &[FsMutation]) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(
+            "apply_batch would bypass VfsWrite hooks".to_owned(),
+        ))
+    }
+
+    // Reads are not hooked, so the bound a backend applies stays visible.
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        self.inner.list_dir_bounded(path)
     }
 }

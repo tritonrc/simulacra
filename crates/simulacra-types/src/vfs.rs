@@ -309,10 +309,7 @@ pub trait VirtualFs: Send + Sync + 'static {
     /// List a directory, possibly cut short by the backend's listing bound.
     /// The default never truncates.
     fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
-        Ok(DirListing {
-            entries: self.list_dir(path)?,
-            truncated: false,
-        })
+        Ok(DirListing::complete(self.list_dir(path)?))
     }
 }
 

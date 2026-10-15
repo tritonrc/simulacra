@@ -39,8 +39,9 @@ use simulacra_tool::{
     register_memory_tools,
 };
 use simulacra_types::{
-    AgentId, CapabilityToken, FsMetadata, JournalStorage, MemoryPath, Message, Provider,
-    ResourceBudget, TenantId, ToolDefinition, VfsError, VfsSnapshot, VirtualFs,
+    AgentId, CapabilityToken, DirListing, FsMetadata, FsMutation, JournalStorage, MemoryPath,
+    Message, Precondition, Provider, ResourceBudget, TenantId, ToolDefinition, VfsError,
+    VfsSnapshot, VirtualFs,
 };
 use simulacra_vfs::{
     HookLister, IntegrationLister, MemoryFs, MemoryStoreFs, ProcFs, ProcState, ServiceFs,
@@ -403,46 +404,73 @@ impl<V: VirtualFs> MemoryRejectFs<V> {
     fn is_memory(path: &str) -> bool {
         MemoryPath::is_memory_path_str(path)
     }
+
+    /// Every operation on a memory path answers `NotFound`, so an atomic call
+    /// touching one must too, before anything is applied. Paths are judged
+    /// normalized, so a spelling like `/x/../var/memory/a` cannot slip past.
+    fn reject_memory<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<(), VfsError> {
+        for path in paths {
+            let path = simulacra_vfs::normalize_path(path);
+            if Self::is_memory(&path) {
+                return Err(VfsError::NotFound(path));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<V: VirtualFs> VirtualFs for MemoryRejectFs<V> {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return Err(VfsError::NotFound(path.to_string()));
         }
         self.inner.read(path)
     }
     fn write(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return Err(VfsError::NotFound(path.to_string()));
         }
         self.inner.write(path, data)
     }
     fn exists(&self, path: &str) -> bool {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return false;
         }
         self.inner.exists(path)
     }
     fn list_dir(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return Err(VfsError::NotFound(path.to_string()));
         }
         self.inner.list_dir(path)
     }
     fn mkdir(&self, path: &str) -> Result<(), VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return Err(VfsError::NotFound(path.to_string()));
         }
         self.inner.mkdir(path)
     }
     fn remove(&self, path: &str) -> Result<(), VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return Err(VfsError::NotFound(path.to_string()));
         }
         self.inner.remove(path)
     }
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
         if Self::is_memory(path) {
             return Err(VfsError::NotFound(path.to_string()));
         }
@@ -453,6 +481,36 @@ impl<V: VirtualFs> VirtualFs for MemoryRejectFs<V> {
     }
     fn restore(&self, snapshot: &VfsSnapshot) -> Result<(), VfsError> {
         self.inner.restore(snapshot)
+    }
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Self::reject_memory(std::iter::once(path))?;
+        self.inner
+            .write_if(&simulacra_vfs::normalize_path(path), data, precondition)
+    }
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        Self::reject_memory([from, to])?;
+        self.inner.rename(
+            &simulacra_vfs::normalize_path(from),
+            &simulacra_vfs::normalize_path(to),
+        )
+    }
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        Self::reject_memory(mutations.iter().flat_map(FsMutation::paths))?;
+        self.inner
+            .apply_batch(&simulacra_vfs::normalize_mutations(mutations))
+    }
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        let normalized = simulacra_vfs::normalize_path(path);
+        let path = normalized.as_str();
+        if Self::is_memory(path) {
+            return Err(VfsError::NotFound(path.to_string()));
+        }
+        self.inner.list_dir_bounded(path)
     }
 }
 

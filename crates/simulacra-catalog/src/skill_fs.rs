@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VirtualFs};
 
 use crate::models::Skill;
 
@@ -164,5 +164,34 @@ impl VirtualFs for CatalogSkillFs {
         Err(VfsError::PermissionDenied(
             "catalog skills are read-only".into(),
         ))
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::PermissionDenied(format!(
+            "catalog skills are read-only: {path}"
+        )))
+    }
+
+    fn rename(&self, from: &str, _to: &str) -> Result<(), VfsError> {
+        Err(VfsError::PermissionDenied(format!(
+            "catalog skills are read-only: {from}"
+        )))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        // Name the first path the batch touches, as the single-path calls do.
+        let path = mutations
+            .iter()
+            .flat_map(FsMutation::paths)
+            .next()
+            .unwrap_or("/");
+        Err(VfsError::PermissionDenied(format!(
+            "catalog skills are read-only: {path}"
+        )))
     }
 }

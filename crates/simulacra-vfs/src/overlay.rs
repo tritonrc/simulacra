@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VirtualFs};
 use tracing::info_span;
 
 use crate::path::normalize;
@@ -156,6 +156,33 @@ impl VirtualFs for OverlayFs {
         // Add whiteout to shadow lower.
         self.whiteouts.write().unwrap().insert(path);
         Ok(())
+    }
+
+    // The atomic operations are refused, not emulated: a conditional write
+    // or a rename would have to read both layers and the whiteout set and
+    // then commit to the upper layer and the set together, and no lock here
+    // spans them. A caller that needs atomicity must handle `Unsupported`
+    // (JS rename and patch application degrade to their emulation).
+    // `list_dir_bounded` keeps the default: the merged listing is this
+    // layer's own and is never cut short.
+
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!("OverlayFs write_if {path}")))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!(
+            "OverlayFs rename {from} -> {to}"
+        )))
+    }
+
+    fn apply_batch(&self, _mutations: &[FsMutation]) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("OverlayFs apply_batch".to_owned()))
     }
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {

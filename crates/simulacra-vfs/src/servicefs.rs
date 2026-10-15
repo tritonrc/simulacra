@@ -4,14 +4,22 @@
 //! and returns integration metadata as virtual files. All other paths are
 //! delegated to the inner VFS unchanged.
 //!
-//! All `/svc/**` writes, mkdir, and remove return [`VfsError::PermissionDenied`].
+//! All `/svc/**` writes, mkdir, and remove return [`VfsError::PermissionDenied`],
+//! and so do the atomic calls (`write_if`, `rename`, `apply_batch`) when any
+//! path they touch is under `/svc`. Those are judged on the normalized path
+//! and refused before anything is applied.
 
 use std::sync::{Arc, OnceLock};
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{
+    DirListing, FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VfsWatcher, VirtualFs,
+};
 use tracing::{debug, info_span, warn};
+
+use crate::atomic_paths::{self, Touch, is_root, normalize_mutations};
+use crate::path::normalize;
 
 // ---------------------------------------------------------------------------
 // OTel instruments
@@ -60,6 +68,29 @@ impl<V: VirtualFs> ServiceFs<V> {
             inner,
             integrations,
         }
+    }
+
+    /// Refuses a mutation before it reaches `inner` if any touched path is
+    /// under `/svc`. It also refuses removing or moving away `/` with
+    /// `PermissionDenied`, so a whole-tree removal through a read-only layer
+    /// does not depend on what `inner` permits.
+    fn gate(&self, touches: &[Touch]) -> Result<(), VfsError> {
+        for touch in touches {
+            let path = touch.path.as_str();
+            if is_svc(path) {
+                warn!(
+                    simulacra.svcfs.path = path,
+                    "mutation attempt on read-only /svc/ path"
+                );
+                return Err(VfsError::PermissionDenied(format!("{path} is read-only")));
+            }
+            if touch.takes_subtree && is_root(path) {
+                return Err(VfsError::PermissionDenied(format!(
+                    "{path}: whole-tree removal through read-only /svc is refused"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -203,6 +234,8 @@ fn svc_exists(integrations: &dyn IntegrationLister, path: &str) -> bool {
 
 impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_svc(path) {
             let integration = svc_tail(path)
                 .and_then(|t| t.split('/').next())
@@ -235,6 +268,8 @@ impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
     }
 
     fn write(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_svc(path) {
             let _ = data;
             warn!(
@@ -247,6 +282,8 @@ impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
     }
 
     fn exists(&self, path: &str) -> bool {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_svc(path) {
             return svc_exists(&*self.integrations, path);
         }
@@ -254,6 +291,8 @@ impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
     }
 
     fn list_dir(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_svc(path) {
             let _span =
                 info_span!("simulacra_svcfs_list_dir", "simulacra.svcfs.path" = path).entered();
@@ -263,6 +302,8 @@ impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
     }
 
     fn mkdir(&self, path: &str) -> Result<(), VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_svc(path) {
             warn!(
                 simulacra.svcfs.path = path,
@@ -274,17 +315,15 @@ impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
     }
 
     fn remove(&self, path: &str) -> Result<(), VfsError> {
-        if is_svc(path) {
-            warn!(
-                simulacra.svcfs.path = path,
-                "remove attempt to read-only /svc/ path"
-            );
-            return Err(VfsError::PermissionDenied(format!("{path} is read-only")));
-        }
+        let path = normalize(path);
+        let path = path.as_str();
+        self.gate(&atomic_paths::removed(path))?;
         self.inner.remove(path)
     }
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_svc(path) {
             return svc_metadata(&*self.integrations, path);
         }
@@ -297,5 +336,39 @@ impl<V: VirtualFs> VirtualFs for ServiceFs<V> {
 
     fn restore(&self, snapshot: &VfsSnapshot) -> Result<(), VfsError> {
         self.inner.restore(snapshot)
+    }
+
+    fn subscribe(&self, prefix: &str) -> VfsWatcher {
+        self.inner.subscribe(prefix)
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::written(path))?;
+        self.inner.write_if(&normalize(path), data, precondition)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::renamed(from, to))?;
+        self.inner.rename(&normalize(from), &normalize(to))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::batched(mutations))?;
+        self.inner.apply_batch(&normalize_mutations(mutations))
+    }
+
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
+        if is_svc(path) {
+            // ServiceFs computes these listings itself; the inner bound is not theirs.
+            return Ok(DirListing::complete(self.list_dir(path)?));
+        }
+        self.inner.list_dir_bounded(path)
     }
 }

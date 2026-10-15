@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VirtualFs};
 
 use crate::models::AgentFile;
 
@@ -97,5 +97,34 @@ impl VirtualFs for CatalogAgentFileFs {
         Err(VfsError::PermissionDenied(
             "agent files are read-only".into(),
         ))
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::PermissionDenied(format!(
+            "agent files are read-only: {path}"
+        )))
+    }
+
+    fn rename(&self, from: &str, _to: &str) -> Result<(), VfsError> {
+        Err(VfsError::PermissionDenied(format!(
+            "agent files are read-only: {from}"
+        )))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        // Name the first path the batch touches, as the single-path calls do.
+        let path = mutations
+            .iter()
+            .flat_map(FsMutation::paths)
+            .next()
+            .unwrap_or("/");
+        Err(VfsError::PermissionDenied(format!(
+            "agent files are read-only: {path}"
+        )))
     }
 }

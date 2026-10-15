@@ -11,6 +11,10 @@
 //! - All writes/removes/mkdir on `/proc/**` (except `/proc/mailbox/`) return
 //!   [`VfsError::PermissionDenied`].
 //! - `/proc/mailbox/**` reads and writes are delegated to the inner VFS.
+//! - The atomic calls (`write_if`, `rename`, `apply_batch`) follow the same
+//!   split: any touched path under the read-only part of `/proc` is refused
+//!   before anything is applied, the rest is forwarded, and `/proc/mailbox`
+//!   paths reach the inner VFS, which answers for them.
 //!
 //! # Traits
 //!
@@ -18,14 +22,19 @@
 //! via narrow traits ([`ToolLister`] and [`HookLister`]) that callers must
 //! implement on their concrete types before wiring in a [`ProcFs`].
 
-use std::sync::atomic::Ordering;
-
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{
+    DirListing, FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VfsWatcher, VirtualFs,
+};
 use tracing::{debug, info_span, warn};
 
+use crate::atomic_paths::{self, normalize_mutations};
 use crate::path::normalize;
 
+mod atomic;
 mod state;
+mod values;
+
+use values::{agent_value, budget_value, capabilities_value, session_value};
 
 pub use state::{HookLister, ProcFs, ProcState, ToolLister};
 
@@ -52,95 +61,6 @@ fn proc_tail(path: &str) -> Option<&str> {
         None
     } else {
         normalized.strip_prefix("/proc/")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Value computation
-// ---------------------------------------------------------------------------
-
-fn budget_value(state: &ProcState, name: &str) -> Option<String> {
-    let b = state.budget.lock().unwrap();
-    match name {
-        "max_tokens" => Some(b.max_tokens.to_string()),
-        "used_tokens" => Some(b.used_tokens.to_string()),
-        "remaining_tokens" => {
-            if b.max_tokens == 0 {
-                Some("0".to_string())
-            } else {
-                Some(b.max_tokens.saturating_sub(b.used_tokens).to_string())
-            }
-        }
-        "max_turns" => Some(b.max_turns.to_string()),
-        "used_turns" => Some(b.used_turns.to_string()),
-        "remaining_turns" => {
-            if b.max_turns == 0 {
-                Some("0".to_string())
-            } else {
-                Some(
-                    (b.max_turns as u64)
-                        .saturating_sub(b.used_turns as u64)
-                        .to_string(),
-                )
-            }
-        }
-        "max_fuel" => Some(b.max_fuel.to_string()),
-        "used_fuel" => Some(b.used_fuel.to_string()),
-        "max_cost" => Some(format!("{:.2}", b.max_cost)),
-        "used_cost" => Some(format!("{:.2}", b.used_cost)),
-        _ => None,
-    }
-}
-
-fn capabilities_value(state: &ProcState, name: &str) -> Option<String> {
-    let c = &state.capabilities;
-    match name {
-        "shell" => Some(if c.shell { "true" } else { "false" }.to_string()),
-        "javascript" => Some(if c.javascript { "true" } else { "false" }.to_string()),
-        "python" => Some(if c.python { "true" } else { "false" }.to_string()),
-        "network" => Some(
-            c.network
-                .iter()
-                .map(|n| n.0.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        "mcp_tools" => Some(c.mcp_tools.join("\n")),
-        "paths_read" => Some(
-            c.paths_read
-                .iter()
-                .map(|p| p.0.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        "paths_write" => Some(
-            c.paths_write
-                .iter()
-                .map(|p| p.0.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        _ => None,
-    }
-}
-
-fn session_value(state: &ProcState, name: &str) -> Option<String> {
-    match name {
-        "id" => Some(state.session_id.clone()),
-        "uptime_ms" => Some(state.session_start.elapsed().as_millis().to_string()),
-        "journal_entries" => Some(state.journal_entries.load(Ordering::Relaxed).to_string()),
-        _ => None,
-    }
-}
-
-fn agent_value(state: &ProcState, name: &str) -> Option<String> {
-    match name {
-        "id" => Some(state.agent_id.clone()),
-        "name" => Some(state.agent_name.clone()),
-        "model" => Some(state.model.clone()),
-        "turn" => Some(state.turn.load(Ordering::Relaxed).to_string()),
-        "parent_id" => Some(state.parent_id.as_deref().unwrap_or("").to_string()),
-        _ => None,
     }
 }
 
@@ -436,18 +356,10 @@ impl<V: VirtualFs> VirtualFs for ProcFs<V> {
         let path = normalize(path);
         let path = path.as_str();
 
-        if is_mailbox(path) {
-            return self.inner.remove(path);
-        }
-
-        if is_proc(path) {
-            warn!(
-                simulacra.procfs.path = path,
-                "remove attempt to read-only procfs path"
-            );
-            return Err(VfsError::PermissionDenied(format!("{path} is read-only")));
-        }
-
+        // Refuses `/proc` and everything under it except `/proc/mailbox`,
+        // and a whole-tree removal from `/`, which this layer refuses rather
+        // than leave to the inner filesystem.
+        self.gate(&atomic_paths::removed(path))?;
         self.inner.remove(path)
     }
 
@@ -472,5 +384,42 @@ impl<V: VirtualFs> VirtualFs for ProcFs<V> {
 
     fn restore(&self, snapshot: &VfsSnapshot) -> Result<(), VfsError> {
         self.inner.restore(snapshot)
+    }
+
+    fn subscribe(&self, prefix: &str) -> VfsWatcher {
+        self.inner.subscribe(prefix)
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::written(path))?;
+        self.inner.write_if(&normalize(path), data, precondition)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::renamed(from, to))?;
+        self.inner.rename(&normalize(from), &normalize(to))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::batched(mutations))?;
+        self.inner.apply_batch(&normalize_mutations(mutations))
+    }
+
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        let normalized = normalize(path);
+        if is_proc(&normalized) && !is_mailbox(&normalized) {
+            // ProcFs computes these listings itself; the inner bound is not theirs.
+            return Ok(DirListing::complete(self.list_dir(path)?));
+        }
+        match self.inner.list_dir_bounded(&normalized) {
+            // Same as `list_dir`: a mailbox directory not yet created is empty.
+            Err(VfsError::NotFound(_)) if is_mailbox(&normalized) => Ok(DirListing::default()),
+            other => other,
+        }
     }
 }

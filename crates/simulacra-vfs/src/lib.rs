@@ -5,6 +5,7 @@
 //! (a virtual `/proc` directory exposing agent runtime state).
 //! All implement [`simulacra_types::VirtualFs`].
 
+mod atomic_paths;
 pub mod mailboxfs;
 mod memory;
 mod memory_atomic;
@@ -17,12 +18,14 @@ pub mod procfs;
 mod readonly_path_guard;
 pub mod servicefs;
 
+pub use atomic_paths::normalize_mutations;
 pub use mailboxfs::{ArtifactWriteSink, MailboxFs};
 pub use memory::MemoryFs;
 pub use memory_store_fs::MemoryStoreFs;
 pub use mount::{MountError, detect_project_root, process_host_mounts};
 pub use notifying::NotifyingFsLayer;
 pub use overlay::OverlayFs;
+pub use path::normalize as normalize_path;
 pub use procfs::{HookLister, ProcFs, ProcState, ToolLister};
 pub use readonly_path_guard::ReadOnlyPathGuard;
 pub use servicefs::{IntegrationLister, ServiceFs};

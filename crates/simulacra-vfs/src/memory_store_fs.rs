@@ -17,46 +17,28 @@
 //! MemoryFs(inner)`. Memory paths are gated here; `/proc/mailbox/**` is
 //! handled below by `MailboxFs` (S036).
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use opentelemetry::KeyValue;
-use opentelemetry::metrics::Counter;
-use simulacra_memory::{MemoryEvent, MemoryRecvOutcome, MemoryStore, RecentWritesBuffer};
+use simulacra_memory::{MemoryRecvOutcome, MemoryStore, RecentWritesBuffer};
 use simulacra_types::{
-    FsMetadata, MemoryCapability, MemoryPath, TenantId, VfsError, VfsEvent, VfsSnapshot,
-    VfsWatcher, VirtualFs,
+    DirListing, FsMetadata, FsMutation, MemoryCapability, MemoryPath, Precondition, TenantId,
+    VfsError, VfsEvent, VfsSnapshot, VfsWatcher, VirtualFs,
 };
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+mod events;
+
+use events::forward_memory_event;
+
+use crate::atomic_paths::{self, Touch, normalize_mutations};
+use crate::path::normalize;
+
 /// Capacity of the per-layer broadcast channel that fans `MemoryEvent`s out
 /// as `VfsEvent`s. Sized to match `simulacra-memory`'s internal event channel so
 /// a slow watcher doesn't lag noticeably more than the embedder pipeline.
 const VFS_EVENT_CHANNEL_CAPACITY: usize = 1024;
-
-/// `simulacra.vfs.events` — counter incremented on every published `VfsEvent`,
-/// keyed by `kind ∈ {written, removed, skipped}` and `layer` (this adapter
-/// always tags `layer = "memory_store_fs"`).
-fn vfs_events_counter() -> &'static Counter<u64> {
-    static COUNTER: OnceLock<Counter<u64>> = OnceLock::new();
-    COUNTER.get_or_init(|| {
-        opentelemetry::global::meter("simulacra-vfs")
-            .u64_counter("simulacra.vfs.events")
-            .with_description("VfsEvent publications, keyed by kind and layer")
-            .build()
-    })
-}
-
-fn record_event(kind: &'static str) {
-    vfs_events_counter().add(
-        1,
-        &[
-            KeyValue::new("kind", kind),
-            KeyValue::new("layer", "memory_store_fs"),
-        ],
-    );
-}
 
 /// A VFS layer that gates and routes memory paths. Pass-through for all
 /// non-memory paths.
@@ -180,6 +162,37 @@ impl<V: VirtualFs> MemoryStoreFs<V> {
         MemoryPath::is_memory_path_str(path)
     }
 
+    /// Memory paths live in a durable store behind this layer, so no atomic
+    /// call can span them and the inner filesystem. A call touching one
+    /// answers `Unsupported` before anything is applied: a caller that needs
+    /// atomicity must handle that (JS rename and patch application degrade to
+    /// their emulation). The plain `write` and `remove` they reach enforce
+    /// the capability scopes; this layer must not pre-empt them. Atomic calls
+    /// are judged on the resolved path, so `/var/memory/../x` is `/x`.
+    fn gate(touches: &[Touch]) -> Result<(), VfsError> {
+        match touches.iter().find(|t| Self::is_memory_path(&t.path)) {
+            Some(t) => Err(VfsError::Unsupported(format!(
+                "atomic operation on memory path {}",
+                t.path
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The path to judge and route a plain call by. A path that already
+    /// names memory is kept as spelled, so `MemoryPath::parse` still rejects
+    /// `..` and empty segments inside it rather than have them resolved into
+    /// an accepted path. Any other spelling is normalized first, so
+    /// `/x/../var/memory/a` is judged, and routed to the store, as
+    /// `/var/memory/a` is, and the inner filesystem never sees it.
+    fn route(path: &str) -> std::borrow::Cow<'_, str> {
+        if Self::is_memory_path(path) {
+            std::borrow::Cow::Borrowed(path)
+        } else {
+            std::borrow::Cow::Owned(normalize(path))
+        }
+    }
+
     /// Parse and return a canonical `MemoryPath`, or `VfsError::PermissionDenied`
     /// on any validation failure. This is the authoritative canonicalization
     /// point for memory paths — no upstream caller is trusted to have done it.
@@ -191,6 +204,8 @@ impl<V: VirtualFs> MemoryStoreFs<V> {
 
 impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.read(path);
         }
@@ -212,6 +227,8 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     }
 
     fn write(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.write(path, data);
         }
@@ -249,6 +266,8 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     }
 
     fn exists(&self, path: &str) -> bool {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.exists(path);
         }
@@ -262,6 +281,8 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     }
 
     fn list_dir(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.list_dir(path);
         }
@@ -296,6 +317,8 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     }
 
     fn mkdir(&self, path: &str) -> Result<(), VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.mkdir(path);
         }
@@ -317,6 +340,8 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     }
 
     fn remove(&self, path: &str) -> Result<(), VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.remove(path);
         }
@@ -341,6 +366,8 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
     }
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
         if !Self::is_memory_path(path) {
             return self.inner.metadata(path);
         }
@@ -391,6 +418,36 @@ impl<V: VirtualFs> VirtualFs for MemoryStoreFs<V> {
         self.ensure_drain_task();
         VfsWatcher::new(self.vfs_sender.subscribe(), prefix)
     }
+
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Self::gate(&atomic_paths::written(path))?;
+        self.inner.write_if(&normalize(path), data, precondition)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        Self::gate(&atomic_paths::renamed(from, to))?;
+        self.inner.rename(&normalize(from), &normalize(to))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        Self::gate(&atomic_paths::batched(mutations))?;
+        self.inner.apply_batch(&normalize_mutations(mutations))
+    }
+
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        let path = Self::route(path);
+        let path = path.as_ref();
+        if Self::is_memory_path(path) {
+            // The listing comes from the memory store, not the inner bound.
+            return Ok(DirListing::complete(self.list_dir(path)?));
+        }
+        self.inner.list_dir_bounded(path)
+    }
 }
 
 impl<V: VirtualFs> Drop for MemoryStoreFs<V> {
@@ -400,46 +457,6 @@ impl<V: VirtualFs> Drop for MemoryStoreFs<V> {
             && let Some(handle) = guard.take()
         {
             handle.abort();
-        }
-    }
-}
-
-/// Translate one `MemoryEvent` into a `VfsEvent` and publish it on the
-/// per-layer broadcast, filtering by the layer's bound tenant. The path-
-/// prefix filter is intentionally NOT applied here — it lives on
-/// `VfsWatcher::recv` so the watcher abstraction is uniform across all
-/// `VirtualFs` impls.
-fn forward_memory_event(
-    sender: &broadcast::Sender<VfsEvent>,
-    bound_tenant: &TenantId,
-    event: MemoryEvent,
-) {
-    match event {
-        MemoryEvent::Put {
-            tenant,
-            path,
-            bytes_len,
-            ..
-        } => {
-            if &tenant != bound_tenant {
-                return;
-            }
-            record_event("written");
-            let _ = sender.send(VfsEvent::Written {
-                tenant,
-                path: std::path::PathBuf::from(path.as_str()),
-                len: bytes_len,
-            });
-        }
-        MemoryEvent::Delete { tenant, path, .. } => {
-            if &tenant != bound_tenant {
-                return;
-            }
-            record_event("removed");
-            let _ = sender.send(VfsEvent::Removed {
-                tenant,
-                path: std::path::PathBuf::from(path.as_str()),
-            });
         }
     }
 }

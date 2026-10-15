@@ -1,5 +1,6 @@
 //! [`NotifyingFsLayer`] — a [`VirtualFs`] decorator that publishes a
-//! [`VfsEvent`] for every successful `write` and `remove`.
+//! [`VfsEvent`] for every successful `write`, `remove`, `write_if`, `rename`
+//! and `apply_batch` (one event per path written, removed or renamed).
 //!
 //! Bound to a single tenant at construction; events the layer publishes carry
 //! that tenant. Writers never block on slow consumers — the broadcast channel
@@ -11,7 +12,8 @@ use std::sync::{Arc, OnceLock};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
 use simulacra_types::{
-    FsMetadata, TenantId, VfsError, VfsEvent, VfsSnapshot, VfsWatcher, VirtualFs,
+    DirListing, FsMetadata, FsMutation, Precondition, TenantId, VfsError, VfsEvent, VfsSnapshot,
+    VfsWatcher, VirtualFs,
 };
 use tokio::sync::broadcast;
 
@@ -93,6 +95,19 @@ impl NotifyingFsLayer {
         });
     }
 
+    /// A rename publishes `Removed(from)` then `Written(to)`, one pair for the
+    /// top-level path only: renaming a directory does not publish an event
+    /// per descendant. The call does not carry the destination's size, so it
+    /// is read back after the rename; that read can see a concurrent writer's
+    /// size rather than the renamed entry's, and if it fails (the entry was
+    /// moved on or removed meanwhile) the event reports 0. The event still
+    /// names the path correctly either way; only `len` is best-effort.
+    fn publish_renamed(&self, from: &str, to: &str) {
+        self.publish_removed(from);
+        let len = self.inner.metadata(to).map_or(0, |m| m.size);
+        self.publish_written(to, len);
+    }
+
     fn publish_removed(&self, path: &str) {
         record_event("removed");
         let _ = self.sender.send(VfsEvent::Removed {
@@ -145,5 +160,44 @@ impl VirtualFs for NotifyingFsLayer {
 
     fn subscribe(&self, prefix: &str) -> VfsWatcher {
         VfsWatcher::new(self.sender.subscribe(), prefix)
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        self.inner.write_if(path, data, precondition)?;
+        self.publish_written(path, data.len() as u64);
+        Ok(())
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        self.inner.rename(from, to)?;
+        self.publish_renamed(from, to);
+        Ok(())
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        // Publish only once the whole batch has committed: a failed batch
+        // changed nothing, so it must tell no one anything.
+        self.inner.apply_batch(mutations)?;
+        for mutation in mutations {
+            match mutation {
+                FsMutation::Write { path, data, .. } => {
+                    self.publish_written(path, data.len() as u64);
+                }
+                FsMutation::Remove { path, .. } => self.publish_removed(path),
+                FsMutation::Rename { from, to, .. } => self.publish_renamed(from, to),
+                // `mkdir` publishes nothing outside a batch either.
+                FsMutation::Mkdir { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        self.inner.list_dir_bounded(path)
     }
 }
