@@ -12,6 +12,7 @@ mod message;
 mod provider;
 mod tool;
 mod vfs;
+mod vfs_ops;
 
 pub use activity::*;
 pub use artifact::*;
