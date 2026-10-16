@@ -67,6 +67,10 @@ pub trait FsProxy: Send + Sync {
     }
     /// List directory entries, checking capabilities first.
     fn list_dir(&self, path: &str) -> Result<Vec<String>, String>;
+    /// List directory entries and whether the backend cut the listing short.
+    fn list_dir_bounded(&self, path: &str) -> Result<(Vec<String>, bool), String> {
+        self.list_dir(path).map(|entries| (entries, false))
+    }
     /// Get file/directory metadata, checking capabilities first.
     /// Returns (is_file, is_directory, size).
     fn stat(&self, path: &str) -> Result<(bool, bool, u64), String>;

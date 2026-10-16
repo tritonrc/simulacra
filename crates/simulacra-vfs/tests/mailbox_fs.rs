@@ -13,6 +13,13 @@ use simulacra_vfs::{
     ServiceFs, ToolLister,
 };
 
+#[path = "mailbox_fs/ancestor.rs"]
+mod ancestor;
+#[path = "mailbox_fs/atomic.rs"]
+mod atomic;
+#[path = "mailbox_fs/plain.rs"]
+mod plain;
+
 type ArtifactKey = (String, String, String);
 
 #[derive(Default)]

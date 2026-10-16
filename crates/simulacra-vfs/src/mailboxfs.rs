@@ -12,8 +12,14 @@ use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use simulacra_types::{ArtifactStore, FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{
+    ArtifactStore, DirListing, FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot,
+    VfsWatcher, VirtualFs,
+};
 use tracing::{debug, warn};
+
+use crate::atomic_paths::{self, Touch, normalize_mutations};
+use crate::path::normalize;
 
 // ---------------------------------------------------------------------------
 // MailboxFs
@@ -63,6 +69,27 @@ impl<V: VirtualFs> MailboxFs<V> {
         self.artifact_sink = Some(sink);
         self
     }
+
+    /// The mailbox is a durable store behind this layer, so no atomic call can
+    /// span it and the inner filesystem. A call touching it answers
+    /// `Unsupported` before anything is applied: a caller that needs
+    /// atomicity must handle that (JS rename and patch application degrade to
+    /// their emulation), and the plain `write` it reaches then applies the
+    /// store's rules.
+    fn gate(&self, touches: &[Touch]) -> Result<(), VfsError> {
+        // A call that removes or moves away an ancestor of the mailbox
+        // (`/proc`, `/`) takes it along, so it is refused too.
+        match touches.iter().find(|t| {
+            is_mailbox(&t.path)
+                || (t.takes_subtree && atomic_paths::is_ancestor(&t.path, MAILBOX_PREFIX))
+        }) {
+            Some(t) => Err(VfsError::Unsupported(format!(
+                "atomic operation on mailbox path {}",
+                t.path
+            ))),
+            None => Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +119,8 @@ fn mailbox_tail(path: &str) -> Option<&str> {
 
 impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     fn read(&self, path: &str) -> Result<Vec<u8>, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             let tail = mailbox_tail(path).ok_or_else(|| VfsError::NotAFile(path.to_string()))?;
 
@@ -110,6 +139,8 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     }
 
     fn write(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             let tail = mailbox_tail(path).ok_or_else(|| VfsError::NotAFile(path.to_string()))?;
 
@@ -172,6 +203,8 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     }
 
     fn exists(&self, path: &str) -> bool {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             let normalized = path.trim_end_matches('/');
             if normalized == MAILBOX_PREFIX {
@@ -201,6 +234,8 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     }
 
     fn list_dir(&self, path: &str) -> Result<Vec<String>, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             let prefix = mailbox_tail(path).unwrap_or("");
 
@@ -244,6 +279,8 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     }
 
     fn mkdir(&self, path: &str) -> Result<(), VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             // Directories are implicit in the artifact store.
             return Ok(());
@@ -252,6 +289,8 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     }
 
     fn remove(&self, path: &str) -> Result<(), VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             warn!(
                 simulacra.mailboxfs.path = path,
@@ -265,27 +304,21 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
     }
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
         if is_mailbox(path) {
             let normalized = path.trim_end_matches('/');
 
             // The mailbox root is always a directory.
             if normalized == MAILBOX_PREFIX {
-                return Ok(FsMetadata {
-                    is_file: false,
-                    is_dir: true,
-                    size: 0,
-                });
+                return Ok(FsMetadata::dir());
             }
 
             let tail = mailbox_tail(path).ok_or_else(|| VfsError::NotFound(path.to_string()))?;
 
             // Check exact file match first.
             if let Ok(data) = self.store.get(&self.tenant, &self.task_id, tail) {
-                return Ok(FsMetadata {
-                    is_file: true,
-                    is_dir: false,
-                    size: data.len() as u64,
-                });
+                return Ok(FsMetadata::file(data.len() as u64));
             }
 
             // Check if it's a virtual directory.
@@ -295,11 +328,7 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
                     .iter()
                     .any(|e| e.path.starts_with(&prefix_with_slash))
             {
-                return Ok(FsMetadata {
-                    is_file: false,
-                    is_dir: true,
-                    size: 0,
-                });
+                return Ok(FsMetadata::dir());
             }
 
             return Err(VfsError::NotFound(path.to_string()));
@@ -313,5 +342,39 @@ impl<V: VirtualFs> VirtualFs for MailboxFs<V> {
 
     fn restore(&self, snapshot: &VfsSnapshot) -> Result<(), VfsError> {
         self.inner.restore(snapshot)
+    }
+
+    fn subscribe(&self, prefix: &str) -> VfsWatcher {
+        self.inner.subscribe(prefix)
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        data: &[u8],
+        precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::written(path))?;
+        self.inner.write_if(&normalize(path), data, precondition)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::renamed(from, to))?;
+        self.inner.rename(&normalize(from), &normalize(to))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        self.gate(&atomic_paths::batched(mutations))?;
+        self.inner.apply_batch(&normalize_mutations(mutations))
+    }
+
+    fn list_dir_bounded(&self, path: &str) -> Result<DirListing, VfsError> {
+        let path = normalize(path);
+        let path = path.as_str();
+        if is_mailbox(path) {
+            // The listing comes from the artifact store, not the inner bound.
+            return Ok(DirListing::complete(self.list_dir(path)?));
+        }
+        self.inner.list_dir_bounded(path)
     }
 }

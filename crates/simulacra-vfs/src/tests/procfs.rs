@@ -1,4 +1,5 @@
 mod agent_budget;
+mod atomic;
 pub(super) mod common;
 mod directories;
 mod metadata;

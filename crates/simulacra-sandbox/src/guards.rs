@@ -7,7 +7,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::Counter;
 use simulacra_types::{
     AgentId, BudgetExhausted, CapabilityDenied, JOURNAL_SCHEMA_VERSION, JournalEntry,
-    JournalEntryKind, JournalStorage, ResourceBudget,
+    JournalEntryKind, JournalStorage, ResourceBudget, VfsError,
 };
 use std::sync::{Arc, Mutex};
 
@@ -202,6 +202,20 @@ pub(crate) fn reserve_vfs_bytes(
 
     b.used_vfs_bytes = projected;
     Ok(())
+}
+
+/// Roll back a VFS byte reservation after a write failed with `err`, unless
+/// the outcome is unknown: the write may still land, so its bytes stay
+/// charged (over-counting is the safe direction).
+pub(crate) fn release_unless_unknown(
+    budget: &Arc<Mutex<ResourceBudget>>,
+    err: &VfsError,
+    bytes: u64,
+) -> Result<(), SandboxError> {
+    if matches!(err, VfsError::OutcomeUnknown(_)) {
+        return Ok(());
+    }
+    release_vfs_bytes(budget, bytes)
 }
 
 /// Roll back a previous VFS byte reservation when the underlying write fails.

@@ -16,9 +16,10 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, optional = true }
 
 [features]
-sandbox = ["dep:simulacra-sandbox", "dep:simulacra-vfs"]
+sandbox = ["dep:simulacra-sandbox", "dep:simulacra-vfs", "dep:tokio"]
 
 [dev-dependencies]
 simulacra-http.workspace = true

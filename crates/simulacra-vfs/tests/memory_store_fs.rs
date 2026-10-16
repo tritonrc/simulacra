@@ -14,6 +14,13 @@ use simulacra_vfs::{
     ServiceFs, ToolLister,
 };
 
+#[path = "memory_store_fs/ancestor.rs"]
+mod ancestor;
+#[path = "memory_store_fs/atomic.rs"]
+mod atomic;
+#[path = "memory_store_fs/plain.rs"]
+mod plain;
+
 fn tenant() -> TenantId {
     TenantId::parse("tenant-a").unwrap()
 }

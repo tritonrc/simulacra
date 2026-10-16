@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VirtualFs};
 use tracing::info_span;
 
 use crate::path::normalize;
@@ -158,16 +158,50 @@ impl VirtualFs for OverlayFs {
         Ok(())
     }
 
+    // The atomic operations are refused, not emulated: a conditional write
+    // or a rename would have to read both layers and the whiteout set and
+    // then commit to the upper layer and the set together, and no lock here
+    // spans them. A caller that needs atomicity must handle `Unsupported`
+    // (JS rename and patch application degrade to their emulation).
+    // `list_dir_bounded` keeps the default: the merged listing is this
+    // layer's own and is never cut short.
+
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!("OverlayFs write_if {path}")))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported(format!(
+            "OverlayFs rename {from} -> {to}"
+        )))
+    }
+
+    fn apply_batch(&self, _mutations: &[FsMutation]) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("OverlayFs apply_batch".to_owned()))
+    }
+
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
         let path = normalize(path);
         if self.is_whited_out(&path) {
             return Err(VfsError::NotFound(path));
         }
-        match self.upper.metadata(&path) {
-            Ok(m) => Ok(m),
-            Err(VfsError::NotFound(_)) => self.lower.metadata(&path),
-            Err(e) => Err(e),
-        }
+        let mut metadata = match self.upper.metadata(&path) {
+            Ok(m) => m,
+            Err(VfsError::NotFound(_)) => self.lower.metadata(&path)?,
+            Err(e) => return Err(e),
+        };
+        // The two layers number their revisions independently: a file first
+        // written in a fresh lower layer and the same path later written in
+        // the empty upper layer would both be revision 1 for different
+        // bytes. A revision here would name no single state, so none is
+        // reported, and a caller falls back to its unconditional path.
+        metadata.revision = None;
+        Ok(metadata)
     }
 
     fn snapshot(&self) -> Result<VfsSnapshot, VfsError> {

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use simulacra_types::{VfsError, VirtualFs};
+use simulacra_types::{FsMutation, Precondition, VfsError, VirtualFs};
 
 use crate::{IntegrationLister, MemoryFs, ServiceFs};
 
@@ -336,3 +336,145 @@ fn config_json_reflects_connectivity_status() {
 // Observability assertions (spans, counters, warn logs) are validated via
 // Aniani queries per S010, not unit tests. The tracing instrumentation
 // is present in servicefs.rs — see info_span!("simulacra_svcfs_read"), warn!(), etc.
+
+// ---------------------------------------------------------------------------
+// Atomic operations: refuse /svc, forward everything else
+// ---------------------------------------------------------------------------
+
+fn atomic_write(path: &str, data: &[u8], precondition: Precondition) -> FsMutation {
+    FsMutation::Write {
+        path: path.into(),
+        data: data.to_vec(),
+        precondition,
+    }
+}
+
+#[test]
+fn servicefs_refuses_a_rename_into_svc_and_forwards_elsewhere() {
+    let fs = service_fs(&[]);
+    fs.write("/a", b"1").unwrap();
+    assert!(matches!(
+        fs.rename("/a", "/svc/x"),
+        Err(VfsError::PermissionDenied(_))
+    ));
+    assert_eq!(fs.read("/a").unwrap(), b"1");
+    fs.rename("/a", "/b").unwrap();
+    assert_eq!(fs.read("/b").unwrap(), b"1");
+    assert!(!fs.exists("/a"));
+}
+
+#[test]
+fn servicefs_refuses_a_rename_out_of_svc() {
+    let fs = service_fs(&["hubspot"]);
+    assert!(matches!(
+        fs.rename("/svc/hubspot/README.md", "/copy.md"),
+        Err(VfsError::PermissionDenied(_))
+    ));
+    assert!(!fs.exists("/copy.md"));
+}
+
+#[test]
+fn servicefs_refuses_write_if_into_svc_for_every_precondition() {
+    let fs = service_fs(&[]);
+    for precondition in [Precondition::Unconditional, Precondition::MustBeAbsent] {
+        assert!(matches!(
+            fs.write_if("/svc/x", b"1", precondition),
+            Err(VfsError::PermissionDenied(_))
+        ));
+    }
+}
+
+#[test]
+fn servicefs_refuses_a_batch_whose_last_item_alone_touches_svc() {
+    let fs = service_fs(&[]);
+    fs.write("/a", b"1").unwrap();
+    let batch = [
+        atomic_write("/one", &[1], Precondition::Unconditional),
+        FsMutation::Rename {
+            from: "/a".into(),
+            to: "/b".into(),
+            precondition: Precondition::Unconditional,
+        },
+        atomic_write("/svc/x", &[2], Precondition::Unconditional),
+    ];
+    assert!(matches!(
+        fs.apply_batch(&batch),
+        Err(VfsError::PermissionDenied(_))
+    ));
+    assert!(!fs.exists("/one") && !fs.exists("/b"));
+    assert_eq!(fs.read("/a").unwrap(), b"1");
+}
+
+#[test]
+fn servicefs_refuses_removing_the_root_that_would_take_svc_with_it() {
+    let fs = service_fs(&[]);
+    fs.write("/a", b"1").unwrap();
+    assert!(matches!(fs.remove("/"), Err(VfsError::PermissionDenied(_))));
+    let batch = [FsMutation::Remove {
+        path: "/".into(),
+        precondition: Precondition::Unconditional,
+    }];
+    assert!(matches!(
+        fs.apply_batch(&batch),
+        Err(VfsError::PermissionDenied(_))
+    ));
+    assert!(fs.exists("/a"));
+}
+
+#[test]
+fn servicefs_forwards_write_if_and_batches_with_their_atomicity() {
+    let fs = service_fs(&[]);
+    fs.write("/taken", b"t").unwrap();
+    assert!(matches!(
+        fs.write_if("/taken", b"x", Precondition::MustBeAbsent),
+        Err(VfsError::Conflict(_))
+    ));
+    let batch = [
+        atomic_write("/ok", &[1], Precondition::Unconditional),
+        atomic_write("/taken", &[2], Precondition::MustBeAbsent),
+    ];
+    assert!(matches!(fs.apply_batch(&batch), Err(VfsError::Conflict(_))));
+    assert!(!fs.exists("/ok"));
+    assert_eq!(fs.read("/taken").unwrap(), b"t");
+    fs.write_if("/fresh", b"f", Precondition::MustBeAbsent)
+        .unwrap();
+    assert_eq!(fs.read("/fresh").unwrap(), b"f");
+}
+
+#[test]
+fn servicefs_lists_svc_itself_untruncated_and_forwards_other_bounds() {
+    let fs = ServiceFs::new(
+        crate::tests::bounded::TruncatingFs::new(),
+        Arc::new(FakeIntegrationLister::new(&["hubspot", "slack"])),
+    );
+    let svc = fs.list_dir_bounded("/svc").unwrap();
+    assert_eq!(svc.entries, vec!["hubspot", "slack"]);
+    assert!(!svc.truncated);
+
+    fs.write("/work/a", b"1").unwrap();
+    let work = fs.list_dir_bounded("/work").unwrap();
+    assert_eq!(work.entries, vec!["a".to_string()]);
+    assert!(work.truncated);
+}
+
+#[tokio::test]
+async fn servicefs_forwards_subscribe_to_its_inner_filesystem() {
+    let tenant = simulacra_types::TenantId::parse("tenant-a").unwrap();
+    let layer = crate::NotifyingFsLayer::for_tenant(
+        tenant.clone(),
+        Arc::new(MemoryFs::new()) as Arc<dyn VirtualFs>,
+    );
+    let fs = ServiceFs::new(layer, Arc::new(FakeIntegrationLister::new(&[])));
+    let mut watcher = fs.subscribe("/");
+
+    fs.write("/a.txt", b"hello").unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(100), watcher.recv())
+        .await
+        .expect("a write through ServiceFs must reach a subscriber");
+    assert!(
+        matches!(&event, Some(simulacra_types::VfsEvent::Written { tenant: t, path, len: 5 })
+            if *t == tenant && path == std::path::Path::new("/a.txt")),
+        "{event:?}"
+    );
+}

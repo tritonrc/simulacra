@@ -86,20 +86,27 @@ impl JournalStorage for FakeJournalStorage {
 struct Harness {
     registry: ToolRegistry,
     _cell: Arc<AgentCell>,
-    vfs: Arc<MemoryFs>,
+    vfs: Arc<dyn VirtualFs>,
     journal: Arc<FakeJournalStorage>,
 }
 
 impl Harness {
     fn new(capability: CapabilityToken, budget: ResourceBudget) -> Self {
-        let vfs = Arc::new(MemoryFs::new());
-        let vfs_dyn: Arc<dyn VirtualFs> = vfs.clone();
+        Self::over_vfs(Arc::new(MemoryFs::new()), capability, budget)
+    }
+
+    /// A harness whose cell sits over a caller-supplied filesystem.
+    fn over_vfs(
+        vfs: Arc<dyn VirtualFs>,
+        capability: CapabilityToken,
+        budget: ResourceBudget,
+    ) -> Self {
         let journal = Arc::new(FakeJournalStorage::default());
         let journal_dyn: Arc<dyn JournalStorage> = journal.clone();
         let http_client: Arc<dyn simulacra_http::HttpClient> =
             Arc::new(simulacra_http::UreqHttpClient::default());
         let cell = Arc::new(AgentCell::new(
-            vfs_dyn,
+            Arc::clone(&vfs),
             capability,
             Arc::new(Mutex::new(budget)),
             journal_dyn,
@@ -122,7 +129,7 @@ impl Harness {
         budget: ResourceBudget,
         executor: ScriptExecutor,
     ) -> Self {
-        let vfs = Arc::new(MemoryFs::new());
+        let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
         let vfs_dyn: Arc<dyn VirtualFs> = vfs.clone();
         let journal = Arc::new(FakeJournalStorage::default());
         let journal_dyn: Arc<dyn JournalStorage> = journal.clone();

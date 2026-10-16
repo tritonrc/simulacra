@@ -475,11 +475,7 @@ pub(crate) fn shell_exists(vfs: &dyn VirtualFs, path: &str) -> bool {
 
 pub(crate) fn shell_metadata(vfs: &dyn VirtualFs, path: &str) -> Result<FsMetadata, VfsError> {
     if path == DEV_NULL {
-        Ok(FsMetadata {
-            is_file: true,
-            is_dir: false,
-            size: 0,
-        })
+        Ok(FsMetadata::file(0))
     } else {
         vfs.metadata(path)
     }

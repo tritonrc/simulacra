@@ -7,3 +7,6 @@ include!("parts/builtin_tools_03.rs");
 include!("parts/builtin_tools_04.rs");
 include!("parts/builtin_tools_05.rs");
 include!("parts/builtin_tools_06.rs");
+include!("parts/builtin_tools_07.rs");
+include!("parts/builtin_tools_08.rs");
+include!("parts/builtin_tools_09.rs");

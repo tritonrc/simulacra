@@ -12,6 +12,7 @@ mod message;
 mod provider;
 mod tool;
 mod vfs;
+mod vfs_ops;
 
 pub use activity::*;
 pub use artifact::*;
@@ -24,3 +25,4 @@ pub use message::*;
 pub use provider::*;
 pub use tool::*;
 pub use vfs::*;
+pub use vfs_ops::{DirListing, FsMutation, Precondition};

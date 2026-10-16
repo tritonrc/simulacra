@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use simulacra_types::{FsMetadata, VfsError, VfsSnapshot, VirtualFs};
+use simulacra_types::{FsMetadata, FsMutation, Precondition, VfsError, VfsSnapshot, VirtualFs};
 
 use crate::models::AgentFile;
 
@@ -81,18 +81,10 @@ impl VirtualFs for CatalogAgentFileFs {
 
     fn metadata(&self, path: &str) -> Result<FsMetadata, VfsError> {
         if path == "/" || path.is_empty() {
-            return Ok(FsMetadata {
-                is_file: false,
-                is_dir: true,
-                size: 0,
-            });
+            return Ok(FsMetadata::dir());
         }
         match self.lookup(path) {
-            Some((_, bytes)) => Ok(FsMetadata {
-                is_file: true,
-                is_dir: false,
-                size: bytes.len() as u64,
-            }),
+            Some((_, bytes)) => Ok(FsMetadata::file(bytes.len() as u64)),
             None => Err(VfsError::NotFound(path.to_owned())),
         }
     }
@@ -105,5 +97,34 @@ impl VirtualFs for CatalogAgentFileFs {
         Err(VfsError::PermissionDenied(
             "agent files are read-only".into(),
         ))
+    }
+
+    fn write_if(
+        &self,
+        path: &str,
+        _data: &[u8],
+        _precondition: Precondition,
+    ) -> Result<(), VfsError> {
+        Err(VfsError::PermissionDenied(format!(
+            "agent files are read-only: {path}"
+        )))
+    }
+
+    fn rename(&self, from: &str, _to: &str) -> Result<(), VfsError> {
+        Err(VfsError::PermissionDenied(format!(
+            "agent files are read-only: {from}"
+        )))
+    }
+
+    fn apply_batch(&self, mutations: &[FsMutation]) -> Result<(), VfsError> {
+        // Name the first path the batch touches, as the single-path calls do.
+        let path = mutations
+            .iter()
+            .flat_map(FsMutation::paths)
+            .next()
+            .unwrap_or("/");
+        Err(VfsError::PermissionDenied(format!(
+            "agent files are read-only: {path}"
+        )))
     }
 }
