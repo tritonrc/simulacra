@@ -14,6 +14,7 @@ pub mod mount;
 mod notifying;
 mod overlay;
 mod path;
+mod prefix_mount;
 pub mod procfs;
 mod readonly_path_guard;
 pub mod servicefs;
@@ -26,11 +27,14 @@ pub use mount::{MountError, detect_project_root, process_host_mounts};
 pub use notifying::NotifyingFsLayer;
 pub use overlay::OverlayFs;
 pub use path::normalize as normalize_path;
+pub use prefix_mount::PrefixMountFs;
 pub use procfs::{HookLister, ProcFs, ProcState, ToolLister};
 pub use readonly_path_guard::ReadOnlyPathGuard;
 pub use servicefs::{IntegrationLister, ServiceFs};
 pub use simulacra_types::{VfsEvent, VfsWatcher};
 
+#[cfg(test)]
+mod prefix_mount_tests;
 #[cfg(test)]
 mod service_discovery_vfs;
 #[cfg(test)]
