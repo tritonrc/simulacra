@@ -487,20 +487,22 @@ fn register_exec_tools_detects_late_duplicate_before_partial_registration() {
 }
 
 #[test]
-fn register_builtins_preserves_legacy_definition_order() {
+fn register_builtins_registers_the_file_tools_before_the_exec_tools() {
     let cell = make_cell(full_capability());
     let mut registry = ToolRegistry::new();
     register_builtins(&mut registry, cell).expect("full builtin registration should succeed");
 
+    // The four file tools come from one constructor a host can reuse, so
+    // list_dir sits with them rather than after the exec tools.
     assert_eq!(
         definition_names(registry.definitions()),
         vec![
             "file_read".to_string(),
             "file_write".to_string(),
             "apply_patch".to_string(),
+            "list_dir".to_string(),
             "shell_exec".to_string(),
             "js_exec".to_string(),
-            "list_dir".to_string(),
         ]
     );
 }

@@ -74,11 +74,15 @@ helpers while provider adapters continue to receive plain JSON Schema values.
 
 ### `file_read`
 
-**Description:** Read the contents of a file at the given path.
+**Description:** Read a file at the given path. offset and limit select a byte window.
 
-**Input schema:** object with required string `path`.
+**Input schema:** object with required string `path`, optional integer `offset`
+(bytes, at least 0) and optional integer `limit` (bytes, at least 1). Anything
+else for `offset` or `limit` is `ToolError::InvalidArguments`.
 
-**Output:** File contents as a string. If the file does not exist, returns
+**Output:** The requested byte window of the file, decoded lossily to a string,
+unless the host supplied a file presenter, which receives the whole file and the
+request and decides what the model sees. If the file does not exist, returns
 `ToolOutput { is_error: true, .. }` with a descriptive message.
 
 **Delegates to:** `AgentCell::read_file(path)`
