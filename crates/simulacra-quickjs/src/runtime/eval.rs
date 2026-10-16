@@ -78,14 +78,21 @@ impl JsRuntime {
     }
 
     async fn eval_async_inner(&self, code: &str) -> Result<JsOutput, JsError> {
+        // One cutoff for the whole evaluation: prefetch, the interrupt handler
+        // and host calls the script makes all stop at this same instant.
+        let deadline = Instant::now() + self.timeout;
         let allowed_remote_urls: RemoteUrlSet = Rc::new(RefCell::new(HashSet::new()));
         let fetched_remote_urls: RemoteUrlSet = Rc::new(RefCell::new(HashSet::new()));
         if self.host_api.module_loader {
-            self.prefetch_remote_static_imports(code, &allowed_remote_urls, &fetched_remote_urls)
-                .await?;
+            self.prefetch_remote_static_imports(
+                code,
+                deadline,
+                &allowed_remote_urls,
+                &fetched_remote_urls,
+            )
+            .await?;
         }
 
-        let deadline = Instant::now() + self.timeout;
         let (rt, ctx) = self
             .fresh_async_engine(allowed_remote_urls, fetched_remote_urls)
             .await?;
@@ -109,8 +116,11 @@ impl JsRuntime {
         .await;
 
         let is_module = code.contains("import ") || code.contains("export ");
-        let outcome = ctx
-            .async_with(async |ctx| {
+        // Host calls the script makes read this cutoff, since the engine cannot
+        // interrupt a call already in flight.
+        let outcome = simulacra_types::evaluation_deadline::scoped(
+            deadline,
+            ctx.async_with(async |ctx| {
                 let (stdout_buf, exit_code_cell) = self.register_globals(&ctx)?;
                 if self.host_api == JsHostApiProfile::workflow() {
                     install_workflow_api_restrictions(&ctx)
@@ -126,8 +136,9 @@ impl JsRuntime {
                     self.eval_as_script_async(&ctx, code, &stdout_buf, &exit_code_cell)
                         .await
                 }
-            })
-            .await;
+            }),
+        )
+        .await;
 
         // Re-type the interrupt as the deadline variant — keyed on the flag,
         // not the message.
@@ -157,7 +168,7 @@ impl JsRuntime {
                 .await;
 
             let mut setup = Some(setup);
-            ctx.async_with(async move |ctx| {
+            let evaluation = ctx.async_with(async move |ctx| {
                 install_workflow_api_restrictions(&ctx)
                     .map_err(|e| JsError::Runtime(e.to_string()))?;
                 let setup = setup
@@ -183,8 +194,8 @@ impl JsRuntime {
                     .map_err(|caught| JsError::Execution(format!("{caught}")))?;
                 rquickjs_serde::from_value(result)
                     .map_err(|error| JsError::Execution(error.to_string()))
-            })
-            .await
+            });
+            simulacra_types::evaluation_deadline::scoped(deadline, evaluation).await
         })
         .await
         .map_err(|_| JsError::Timeout)?

@@ -17,6 +17,7 @@ impl JsRuntime {
     pub(super) async fn prefetch_remote_static_imports(
         &self,
         root_source: &str,
+        deadline: Instant,
         allowed_remote_urls: &RemoteUrlSet,
         fetched_remote_urls: &RemoteUrlSet,
     ) -> Result<(), JsError> {
@@ -27,10 +28,13 @@ impl JsRuntime {
         let handle = tokio::task::spawn_blocking(move || {
             tracing::dispatcher::with_default(&dispatch, || {
                 let _guard = span.enter();
-                runtime.prefetch_remote_static_imports_owned(&source)
+                // The worker's reads belong to this evaluation, so they see its cutoff.
+                simulacra_types::evaluation_deadline::within(deadline, || {
+                    runtime.prefetch_remote_static_imports_owned(&source, deadline)
+                })
             })
         });
-        let prefetched = tokio::time::timeout(self.timeout, handle)
+        let prefetched = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), handle)
             .await
             .map_err(|_| JsError::Timeout)?
             .map_err(|error| JsError::Runtime(format!("module prefetch task failed: {error}")))??;
@@ -49,10 +53,10 @@ impl JsRuntime {
     fn prefetch_remote_static_imports_owned(
         &self,
         root_source: &str,
+        deadline: Instant,
     ) -> Result<PrefetchedRemoteModules, JsError> {
         // The join in the caller only abandons this task on timeout; the walk
-        // itself must stop at the same deadline instead of fetching forever.
-        let deadline = Instant::now() + self.timeout;
+        // itself must stop at the same deadline instead of reading forever.
         let mut stack = vec![("<eval>".to_string(), root_source.to_string())];
         let mut visited = HashSet::new();
         let mut allowed_remote_urls = HashSet::new();
@@ -75,6 +79,10 @@ impl JsRuntime {
                         && visited.insert(resolved.clone())
                         && let Some(proxy) = self.fs_proxy.as_ref()
                     {
+                        // The deadline binds every read, local or remote.
+                        if Instant::now() >= deadline {
+                            return Err(JsError::Timeout);
+                        }
                         let data = proxy.read_file(&resolved).map_err(|e| {
                             JsError::Execution(format!(
                                 "Failed to load VFS module '{resolved}' during prefetch: {e}"
@@ -110,8 +118,8 @@ impl JsRuntime {
                 let remote_source = if let Some(source) = cached {
                     source
                 } else {
-                    // The deadline binds EVERY fetch: a wide graph importing
-                    // many siblings must stop like a deep chain does.
+                    // A wide graph importing many siblings must stop like a
+                    // deep chain does.
                     if Instant::now() >= deadline {
                         return Err(JsError::Timeout);
                     }

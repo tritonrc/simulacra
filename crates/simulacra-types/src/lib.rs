@@ -6,6 +6,7 @@ mod artifact;
 mod budget;
 mod capability;
 mod context;
+pub mod evaluation_deadline;
 mod journal;
 mod memory;
 mod message;

@@ -4614,6 +4614,7 @@ dependencies = [
 name = "simulacra-types"
 version = "0.1.0"
 dependencies = [
+ "pin-project-lite",
  "rust_decimal",
  "schemars",
  "serde",
