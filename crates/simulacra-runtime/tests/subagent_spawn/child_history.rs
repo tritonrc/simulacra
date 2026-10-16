@@ -102,6 +102,7 @@ fn agent_task_factory_runs_a_real_child_agent_loop_with_the_default_prompt_and_p
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));
@@ -213,6 +214,7 @@ fn agent_task_factory_applies_child_cell_and_tool_hooks_before_provider_call() {
             Ok(())
         })),
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let spawn = spawn_config("child-hooks-1", "parent-agent", child_budget(32, 1, 0));
@@ -302,6 +304,7 @@ fn agent_task_factory_intersects_child_type_capability_with_the_spawn_override()
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let mut spawn = spawn_config("child-1", "parent-agent", child_budget(32, 1, 0));

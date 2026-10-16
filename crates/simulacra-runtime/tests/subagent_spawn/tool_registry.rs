@@ -61,6 +61,7 @@ fn configured_spawn_capable_child_registry_includes_all_child_control_tools() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+            child_environment_provider: None,
             acp_child_runtime: None,
     };
 
@@ -206,6 +207,7 @@ fn configured_native_child_builds_its_own_stable_skill_mcp_catalog_without_conne
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let spawn = spawn_config("child-mcp-catalog", "parent-agent", child_budget(32, 1, 0));
@@ -269,6 +271,7 @@ fn configured_native_child_prevalidates_skill_dependencies_with_attenuated_capab
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let spawn = spawn_config("child-mcp-denied", "parent-agent", child_budget(32, 1, 0));
@@ -329,6 +332,7 @@ fn configured_native_child_enforces_tenant_mcp_allowlist_before_network_access()
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let spawn = spawn_config("tenant-child-mcp-denied", "parent-agent", child_budget(32, 1, 0));

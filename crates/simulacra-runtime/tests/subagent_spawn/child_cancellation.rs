@@ -42,6 +42,7 @@ fn agent_task_factory_attaches_child_cancellation_token() {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let token = CancellationToken::new(Duration::from_secs(1));

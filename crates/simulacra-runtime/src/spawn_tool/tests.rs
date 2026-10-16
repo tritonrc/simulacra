@@ -446,6 +446,7 @@ pub(super) fn s056_factory(
             Ok(())
         })),
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime,
     }
 }

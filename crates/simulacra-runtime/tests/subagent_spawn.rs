@@ -20,3 +20,4 @@ include!("subagent_spawn/spawn_hierarchical_budget_security.rs");
 include!("subagent_spawn/spawn_policy_outcomes.rs");
 include!("subagent_spawn/spawn_failure_privacy.rs");
 include!("subagent_spawn/child_cell_identity.rs");
+include!("subagent_spawn/child_environment_provider.rs");

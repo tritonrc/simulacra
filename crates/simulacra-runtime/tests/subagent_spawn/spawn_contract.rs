@@ -160,6 +160,7 @@ fn s060_real_task_factory(config: SimulacraConfig) -> AgentTaskFactory {
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     }
 }

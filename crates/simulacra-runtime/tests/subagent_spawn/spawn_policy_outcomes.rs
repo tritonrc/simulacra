@@ -283,6 +283,7 @@ fn s060_policy_outcome_stack(
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: Some(runtime),
     });
     let budget = Arc::new(Mutex::new(ResourceBudget::new(100, 10, Decimal::ZERO, 4)));
@@ -673,6 +674,7 @@ fn s060_a40_real_factory_prepare_preserves_typed_before_kill_when_audit_fails() 
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
     let mut config = SpawnConfig {

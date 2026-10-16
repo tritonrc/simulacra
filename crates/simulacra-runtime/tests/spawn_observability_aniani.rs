@@ -629,6 +629,7 @@ async fn s060_a42_live_run_exports_native_and_acp_telemetry_without_secret_label
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: Some(Arc::new(|_kind, _model| Ok(Box::new(ChildProvider)))),
+        child_environment_provider: None,
         acp_child_runtime: Some(Arc::new(RecordingAcpRuntime {
             requests: Arc::clone(&acp_requests),
         })),
@@ -815,6 +816,7 @@ async fn s060_a42_live_run_exports_native_and_acp_telemetry_without_secret_label
                 error: provider_error_for_factory.clone(),
             }) as Box<dyn Provider>)
         })),
+        child_environment_provider: None,
         acp_child_runtime: None,
     });
     let mut failure_supervisor = AgentSupervisor::with_task_factory_and_shared_budget(

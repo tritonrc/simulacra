@@ -1871,6 +1871,7 @@ impl SimulacraEngine {
                         child_cell_configurator,
                         child_tool_registrar,
                         child_provider_factory,
+                        child_environment_provider: None,
                         acp_child_runtime: None,
                     });
                     let mut supervisor = AgentSupervisor::with_task_factory_and_shared_budget(

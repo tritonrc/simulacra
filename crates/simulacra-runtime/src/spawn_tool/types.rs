@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 pub type ChildCellConfigurator = Arc<dyn Fn(&mut simulacra_sandbox::AgentCell) + Send + Sync>;
@@ -7,6 +10,23 @@ pub type ChildToolRegistrar = Arc<
             &mut simulacra_tool::ToolRegistry,
             Arc<simulacra_sandbox::AgentCell>,
         ) -> Result<(), simulacra_types::ToolError>
+        + Send
+        + Sync,
+>;
+
+/// What a host gives one native child: the filesystem it sees and how its
+/// `file_read` presents. Asked once per spawn, inside the spawned task, so the
+/// host can open per-child state with the child's id.
+pub struct ChildFsEnvironment {
+    pub vfs: Arc<dyn VirtualFs>,
+    pub file_presenter: Option<Arc<dyn simulacra_tool::FilePresenter>>,
+}
+
+pub type ChildEnvironmentProvider = Arc<
+    dyn Fn(
+            &SpawnConfig,
+        )
+            -> Pin<Box<dyn Future<Output = Result<ChildFsEnvironment, RuntimeError>> + Send>>
         + Send
         + Sync,
 >;

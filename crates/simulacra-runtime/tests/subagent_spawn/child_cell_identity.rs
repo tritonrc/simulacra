@@ -79,6 +79,7 @@ fn child_cell_identity_harness(
         child_provider_factory: Some(Arc::new(|_kind, _model| {
             Ok(Box::new(completing_native_child_provider()))
         })),
+        child_environment_provider: None,
         acp_child_runtime: None,
     });
     let budget = Arc::new(Mutex::new(ResourceBudget::new(
