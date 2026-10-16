@@ -12,7 +12,7 @@ fn tool_registry_definitions_after_register_builtins_have_correct_names_and_desc
     let expected = [
         (
             "file_read",
-            "Read the contents of a file at the given path.",
+            "Read a file at the given path. offset and limit select a byte window.",
         ),
         (
             "file_write",

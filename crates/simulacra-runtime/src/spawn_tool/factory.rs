@@ -37,6 +37,9 @@ pub struct AgentTaskFactory {
     pub script_executor: Option<simulacra_sandbox::ScriptExecutor>,
     pub child_cell_configurator: Option<ChildCellConfigurator>,
     pub child_tool_registrar: Option<ChildToolRegistrar>,
+    /// Supplies each native child's filesystem and `file_read` presenter,
+    /// awaited inside the child's own task. `None` shares `vfs` with every child.
+    pub child_environment_provider: Option<ChildEnvironmentProvider>,
     pub child_provider_factory: Option<ChildProviderFactory>,
     pub acp_child_runtime: Option<Arc<dyn AcpChildRuntime>>,
 }
@@ -156,6 +159,7 @@ impl crate::TaskFactory for AgentTaskFactory {
         let script_executor = self.script_executor.clone();
         let child_cell_configurator = self.child_cell_configurator.clone();
         let child_tool_registrar = self.child_tool_registrar.clone();
+        let child_environment_provider = self.child_environment_provider.clone();
         let child_provider_factory = self.child_provider_factory.clone();
         let acp_child_runtime = self.acp_child_runtime.clone();
         let runtime_config = self.config.clone();
@@ -266,8 +270,18 @@ impl crate::TaskFactory for AgentTaskFactory {
             } else {
                 None
             };
+            // Awaited here, in the child's own task, so a slow host environment
+            // delays only this child and never the supervisor that spawned it.
+            let (vfs, file_presenter) = match &child_environment_provider {
+                Some(provide) => {
+                    let environment = provide(&spawn_config).await?;
+                    (environment.vfs, environment.file_presenter)
+                }
+                None => (vfs, None),
+            };
             let child_env = build_child_environment(ChildEnvironmentSpec {
                 inherited_vfs: vfs,
+                file_presenter,
                 inherited_journal: journal,
                 spawn_config: &spawn_config,
                 child_config: &child_config,

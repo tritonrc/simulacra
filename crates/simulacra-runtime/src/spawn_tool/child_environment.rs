@@ -7,6 +7,7 @@ pub(super) struct ChildSpawnToolSpec {
 
 pub(super) struct ChildEnvironmentSpec<'a> {
     pub(super) inherited_vfs: Arc<dyn VirtualFs>,
+    pub(super) file_presenter: Option<Arc<dyn simulacra_tool::FilePresenter>>,
     pub(super) inherited_journal: Arc<dyn JournalStorage>,
     pub(super) spawn_config: &'a SpawnConfig,
     pub(super) child_config: &'a AgentLoopConfig,
@@ -105,7 +106,14 @@ fn build_child_registry(
     sink: &Arc<dyn ActivitySink>,
 ) -> Result<simulacra_tool::ToolRegistry, simulacra_types::ToolError> {
     let mut registry = simulacra_tool::ToolRegistry::new();
-    simulacra_tool::register_builtins(&mut registry, Arc::clone(cell))?;
+    match &spec.file_presenter {
+        Some(presenter) => simulacra_tool::register_builtins_with_presenter(
+            &mut registry,
+            Arc::clone(cell),
+            Arc::clone(presenter),
+        )?,
+        None => simulacra_tool::register_builtins(&mut registry, Arc::clone(cell))?,
+    }
     if let Some(config) = spec.runtime_config {
         register_child_skill_mcp_catalog(&mut registry, cell, spec, config)?;
     }

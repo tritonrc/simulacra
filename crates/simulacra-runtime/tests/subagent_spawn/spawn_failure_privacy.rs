@@ -264,6 +264,7 @@ fn s060_privacy_factory(
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory,
+        child_environment_provider: None,
         acp_child_runtime,
     }
 }

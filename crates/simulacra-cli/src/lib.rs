@@ -2238,6 +2238,7 @@ fn start_supervisor_actor(
         child_cell_configurator,
         child_tool_registrar,
         child_provider_factory: parts.child_provider_factory,
+        child_environment_provider: None,
         acp_child_runtime: None,
     });
     let mut supervisor = simulacra_runtime::AgentSupervisor::with_task_factory_and_shared_budget(

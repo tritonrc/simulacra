@@ -230,6 +230,7 @@ async fn s060_a30_concurrent_invalid_placements_have_zero_accepted_effects() {
             provider_constructions_for_factory.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeProvider::new(Vec::new())))
         })),
+        child_environment_provider: None,
         acp_child_runtime: None,
     });
     let budget = Arc::new(Mutex::new(ResourceBudget::new(

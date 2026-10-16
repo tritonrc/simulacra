@@ -190,6 +190,7 @@ async fn s060_a26_a27_a36_nested_spawn_uses_immediate_callers_effective_capabili
                 FakeProvider::new(s060_middle_provider_responses()),
             ))
         })),
+        child_environment_provider: None,
         acp_child_runtime: Some(runtime),
     });
     let budget = Arc::new(Mutex::new(ResourceBudget::new(
@@ -603,6 +604,7 @@ async fn s060_capture_final_memory_capabilities(
                     model: "child-model".into(),
                 }])))
             })),
+            child_environment_provider: None,
             acp_child_runtime: Some(acp_runtime),
         });
         let budget = Arc::new(Mutex::new(ResourceBudget::new(100, 10, Decimal::ZERO, 4)));

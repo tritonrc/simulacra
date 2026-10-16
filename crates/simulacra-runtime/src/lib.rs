@@ -46,10 +46,11 @@ pub use session_file::FileSessionStorage;
 pub use session_sqlite::SqliteSessionStorage;
 #[cfg(feature = "spawn")]
 pub use spawn_tool::{
-    AgentTaskFactory, CancelChildAgentTool, ChildCellConfigurator, ChildProviderFactory,
-    ChildStatusTool, ChildToolRegistrar, CloseChildAgentTool, DEFAULT_SYSTEM_PROMPT,
-    JoinChildAgentTool, ListChildAgentTool, NoopContextStrategy, ProviderKind, SpawnAgentGuidance,
-    SpawnAgentTool, SteerChildAgentTool, WaitChildAgentTool,
+    AgentTaskFactory, CancelChildAgentTool, ChildCellConfigurator, ChildEnvironmentProvider,
+    ChildFsEnvironment, ChildProviderFactory, ChildStatusTool, ChildToolRegistrar,
+    CloseChildAgentTool, DEFAULT_SYSTEM_PROMPT, JoinChildAgentTool, ListChildAgentTool,
+    NoopContextStrategy, ProviderKind, SpawnAgentGuidance, SpawnAgentTool, SteerChildAgentTool,
+    WaitChildAgentTool,
 };
 pub use supervisor::{
     AgentSupervisor, BoxTaskFuture, CancellationToken, ChildAgentStatus, ChildMetadata,

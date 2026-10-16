@@ -28,8 +28,8 @@ pub use factory::AgentTaskFactory;
 pub use prompt::DEFAULT_SYSTEM_PROMPT;
 pub use tool::{SpawnAgentGuidance, SpawnAgentTool};
 pub use types::{
-    ChildCellConfigurator, ChildProviderFactory, ChildToolRegistrar, NoopContextStrategy,
-    ProviderKind,
+    ChildCellConfigurator, ChildEnvironmentProvider, ChildFsEnvironment, ChildProviderFactory,
+    ChildToolRegistrar, NoopContextStrategy, ProviderKind,
 };
 
 use std::sync::atomic::AtomicU64;

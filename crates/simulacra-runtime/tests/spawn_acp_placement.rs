@@ -301,6 +301,7 @@ fn acp_harness(
                 .fetch_add(1, Ordering::SeqCst);
             panic!("ACP placement must not construct a native provider")
         })),
+        child_environment_provider: None,
         acp_child_runtime: inject_runtime.then_some(runtime),
     });
 

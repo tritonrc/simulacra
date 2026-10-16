@@ -97,6 +97,7 @@ fn agent_task_factory_performs_three_way_capability_intersection_parent_config_a
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: None,
     };
 

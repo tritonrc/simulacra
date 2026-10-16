@@ -321,6 +321,7 @@ fn s060_hook_stack_with_config_and_outcome(
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_provider_factory: None,
+        child_environment_provider: None,
         acp_child_runtime: Some(runtime),
     });
     let budget = Arc::new(Mutex::new(ResourceBudget::new(100, 10, Decimal::ZERO, 4)));
