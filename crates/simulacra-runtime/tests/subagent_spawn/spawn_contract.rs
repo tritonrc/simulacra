@@ -309,8 +309,8 @@ fn s060_a08_spawn_schema_is_flat_and_matches_the_complete_contract() {
                 "shell": { "type": "boolean", "description": "Whether this child keeps shell access; true keeps it only where the envelope grants it." },
                 "javascript": { "type": "boolean", "description": "Whether this child keeps JavaScript execution; true keeps it only where the envelope grants it." },
                 "python": { "type": "boolean", "description": "Whether this child keeps Python execution; true keeps it only where the envelope grants it." },
-                "paths_write": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps write access to." },
-                "paths_read": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps read access to." },
+                "paths_write": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps write access to: /dir/** (the directory and everything below), /dir/* (its direct entries) or an exact path." },
+                "paths_read": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps read access to: /dir/** (the directory and everything below), /dir/* (its direct entries) or an exact path." },
                 "spawn_placements": { "type": "array", "items": { "type": "string" }, "description": "Placements this child keeps permission to spawn its own children into." }
             },
             "additionalProperties": false

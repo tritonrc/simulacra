@@ -20,6 +20,13 @@ pub(super) fn normalize_spawn_path_scope(path: &str) -> PathPattern {
         };
     }
 
+    if let Some(prefix) = trimmed.strip_suffix("/*")
+        && !prefix.contains('*')
+    {
+        let normalized = normalize_absolute_spawn_path(prefix);
+        return PathPattern(format!("{}/*", normalized.trim_end_matches('/')));
+    }
+
     if path.contains('*') {
         return PathPattern(path.to_string());
     }

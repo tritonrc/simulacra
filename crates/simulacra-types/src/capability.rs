@@ -388,24 +388,9 @@ impl std::error::Error for CapabilityDenied {}
 /// A child pattern `/workspace/project/**` is covered by parent `/workspace/**`
 /// because every path the child matches is also matched by the parent.
 fn path_pattern_covered_by(child: &str, parents: &[PathPattern]) -> bool {
-    parents.iter().any(|p| {
-        let parent = &p.0;
-        if parent == child {
-            return true;
-        }
-        // Parent `/**` covers everything.
-        if parent == "/**" {
-            return true;
-        }
-        // Parent `/foo/**` covers child `/foo/bar/**` or child `/foo/bar.txt`.
-        if let Some(parent_prefix) = parent.strip_suffix("/**") {
-            let child_base = child.strip_suffix("/**").unwrap_or(child);
-            return child_base.starts_with(parent_prefix)
-                && (child_base.len() == parent_prefix.len()
-                    || child_base.as_bytes().get(parent_prefix.len()) == Some(&b'/'));
-        }
-        false
-    })
+    parents
+        .iter()
+        .any(|p| crate::path_glob::covers(&p.0, child))
 }
 
 /// Intersect two sets of path patterns using glob-aware subset logic.
@@ -415,13 +400,13 @@ fn path_pattern_covered_by(child: &str, parents: &[PathPattern]) -> bool {
 fn intersect_path_patterns(a: &[PathPattern], b: &[PathPattern]) -> Vec<PathPattern> {
     let mut out = Vec::new();
     for ap in a {
-        if path_pattern_covered_by(&ap.0, b) && !out.contains(ap) {
-            out.push(ap.clone());
-        }
-    }
-    for bp in b {
-        if path_pattern_covered_by(&bp.0, a) && !out.contains(bp) {
-            out.push(bp.clone());
+        for bp in b {
+            if let Some(shared) = crate::path_glob::intersect(&ap.0, &bp.0) {
+                let shared = PathPattern(shared);
+                if !out.contains(&shared) {
+                    out.push(shared);
+                }
+            }
         }
     }
     out
@@ -558,21 +543,13 @@ fn normalize_path(path: &str) -> String {
 /// Supported patterns:
 /// - `/**` matches any path
 /// - `/foo/**` matches any path starting with `/foo/` (or exactly `/foo`)
+/// - `/foo/*` matches the entries directly inside `/foo`
 /// - Exact match: `/foo/bar.txt` matches `/foo/bar.txt`
 /// - Empty patterns list = deny all
 fn path_matches(patterns: &[PathPattern], path: &str) -> bool {
-    patterns.iter().any(|p| {
-        let pat = &p.0;
-        if pat == "/**" {
-            return true;
-        }
-        if let Some(prefix) = pat.strip_suffix("/**") {
-            return path.starts_with(prefix)
-                && (path.len() == prefix.len()
-                    || path.as_bytes().get(prefix.len()) == Some(&b'/'));
-        }
-        pat == path
-    })
+    patterns
+        .iter()
+        .any(|p| crate::path_glob::matches(&p.0, path))
 }
 
 /// Prefix-aware intersection of two memory scope lists.
@@ -1057,6 +1034,31 @@ mod tests {
         let result = wide.intersect(&narrow);
         assert_eq!(result.paths_read.len(), 1);
         assert_eq!(result.paths_read[0].0, "/workspace/project/**");
+    }
+
+    #[test]
+    fn a_single_star_and_a_subtree_below_one_entry_share_that_entry_in_either_order() {
+        let star = CapabilityToken {
+            paths_read: vec![PathPattern("/artifacts/*".into())],
+            ..Default::default()
+        };
+        let subtree = CapabilityToken {
+            paths_read: vec![PathPattern("/artifacts/report/**".into())],
+            ..Default::default()
+        };
+        for result in [star.intersect(&subtree), subtree.intersect(&star)] {
+            assert_eq!(
+                result.paths_read,
+                vec![PathPattern("/artifacts/report".into())]
+            );
+            assert!(result.check_path_read("/artifacts/report").is_ok());
+            assert!(
+                result
+                    .check_path_read("/artifacts/report/inside.md")
+                    .is_err()
+            );
+            assert!(result.check_path_read("/artifacts/other.md").is_err());
+        }
     }
 
     // ─── Network wildcard safety (WARNING 3) ─────────────────────────────────
