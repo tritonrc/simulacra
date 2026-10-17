@@ -83,6 +83,28 @@ struct SpawnCapabilities {
 }
 
 impl SpawnCapabilities {
+    /// Refuses a path pattern no capability can match, so a child is never
+    /// spawned holding a grant that silently reaches nothing.
+    fn check_path_patterns(&self) -> Result<(), simulacra_types::ToolError> {
+        let named = [
+            ("paths_read", &self.paths_read),
+            ("paths_write", &self.paths_write),
+        ];
+        for (field, values) in named {
+            for value in values.iter().flatten() {
+                if !simulacra_types::path_pattern_is_supported(value.trim_end_matches('/'))
+                    && !simulacra_types::path_pattern_is_supported(value)
+                {
+                    return Err(simulacra_types::ToolError::InvalidArguments(format!(
+                        "{field} pattern {value} is not supported: use /dir/** for a directory and \
+                         everything below it, /dir/* for its direct entries, or an exact path"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn into_token(self, parent: &CapabilityToken) -> CapabilityToken {
         let requested = CapabilityToken {
             network: self.network.map_or_else(
@@ -189,8 +211,8 @@ impl simulacra_types::Tool for SpawnAgentTool {
                             "shell": { "type": "boolean", "description": "Whether this child keeps shell access; true keeps it only where the envelope grants it." },
                             "javascript": { "type": "boolean", "description": "Whether this child keeps JavaScript execution; true keeps it only where the envelope grants it." },
                             "python": { "type": "boolean", "description": "Whether this child keeps Python execution; true keeps it only where the envelope grants it." },
-                            "paths_write": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps write access to." },
-                            "paths_read": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps read access to." },
+                            "paths_write": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps write access to: /dir/** (the directory and everything below), /dir/* (its direct entries) or an exact path." },
+                            "paths_read": { "type": "array", "items": { "type": "string" }, "description": "Path patterns this child keeps read access to: /dir/** (the directory and everything below), /dir/* (its direct entries) or an exact path." },
                             "spawn_placements": { "type": "array", "items": { "type": "string" }, "description": "Placements this child keeps permission to spawn its own children into." }
                         },
                         "additionalProperties": false
@@ -221,6 +243,9 @@ impl simulacra_types::Tool for SpawnAgentTool {
                 .map_err(|error| simulacra_types::ToolError::InvalidArguments(error.to_string()))?;
             validate_text(&parsed.placement, "placement")?;
             validate_text(&parsed.task, "task")?;
+            if let Some(capabilities) = &parsed.capabilities {
+                capabilities.check_path_patterns()?;
+            }
 
             let instructions = match parsed.instructions {
                 Some(value) => {
