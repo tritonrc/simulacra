@@ -590,9 +590,15 @@ S060 supersedes these earlier clauses:
 - **S017:** root agents continue using `[agent_types.<name>].skills`. Native
   S060 children instead use `[child_placements.<name>].skills`, and their
   effective catalog is placement skills ∩ discovered skills ∩ effective
-  `skill_patterns`, ordered by the placement list. Loaded parent skill bodies
-  are not copied. All discovery, progressive-disclosure, invocation, metadata
-  budget, and call-site capability rules remain. ACP skill delivery is opaque.
+  `skill_patterns`, ordered by the placement list. When the host's per-spawn
+  child environment names a skill list, that list replaces the placement's for
+  that spawn (same intersection, ordered by the host's list): the host chooses
+  which of its skills a child may discover, and the capability still decides
+  which it may use. An empty host list means no skills; no host list means the
+  placement's. A listed name that is not discovered still fails the spawn.
+  Loaded parent skill bodies are not copied. All discovery,
+  progressive-disclosure, invocation, metadata budget, and call-site capability
+  rules remain. ACP skill delivery is opaque.
 - **S018:** replace the complete old `spawn_agent` argument schema,
   acknowledgement `agent_type`, terminal-result `agent_type`, `SpawnConfig`
   type/prompt/tier fields, configured-type provider/prompt resolution,
