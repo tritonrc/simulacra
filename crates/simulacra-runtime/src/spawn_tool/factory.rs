@@ -272,12 +272,16 @@ impl crate::TaskFactory for AgentTaskFactory {
             };
             // Awaited here, in the child's own task, so a slow host environment
             // delays only this child and never the supervisor that spawned it.
-            let (vfs, file_presenter) = match &child_environment_provider {
+            let (vfs, file_presenter, provided_skills) = match &child_environment_provider {
                 Some(provide) => {
                     let environment = provide(&spawn_config).await?;
-                    (environment.vfs, environment.file_presenter)
+                    (
+                        environment.vfs,
+                        environment.file_presenter,
+                        environment.skills,
+                    )
                 }
-                None => (vfs, None),
+                None => (vfs, None, None),
             };
             let child_env = build_child_environment(ChildEnvironmentSpec {
                 inherited_vfs: vfs,
@@ -294,7 +298,9 @@ impl crate::TaskFactory for AgentTaskFactory {
                 spawn_tool,
                 parent_sink,
                 runtime_config: Some(&runtime_config),
-                skill_names: &placement_config.skills,
+                skill_names: provided_skills
+                    .as_deref()
+                    .unwrap_or(&placement_config.skills),
                 allowed_mcp_servers: allowed_mcp_servers.as_deref(),
             })?;
             let mut child_loop = AgentLoop::new(

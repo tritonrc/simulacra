@@ -20,6 +20,15 @@ pub type ChildToolRegistrar = Arc<
 pub struct ChildFsEnvironment {
     pub vfs: Arc<dyn VirtualFs>,
     pub file_presenter: Option<Arc<dyn simulacra_tool::FilePresenter>>,
+    /// The skills this child may discover, in place of its placement's
+    /// `skills`. `None` keeps the placement's list; an empty list offers none.
+    /// The child's capability still filters the list (`skill_patterns`), and a
+    /// listed name missing from `/skills` still fails the spawn. A host whose
+    /// skill shelf changes after the factory was built answers with the shelf
+    /// current at this spawn, read together with the `/skills` tree in `vfs`.
+    /// ACP children never ask the provider, so this is native-only. Existing
+    /// constructors keep today's behaviour with `skills: None`.
+    pub skills: Option<Vec<String>>,
 }
 
 pub type ChildEnvironmentProvider = Arc<

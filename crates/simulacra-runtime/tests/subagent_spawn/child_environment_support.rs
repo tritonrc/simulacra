@@ -3,6 +3,9 @@
 
 type ChildEnvRequests = Arc<Mutex<Vec<Vec<Message>>>>;
 
+/// The tool definitions each request to the child's provider carried.
+type ChildEnvTools = Arc<Mutex<Vec<Vec<ToolDefinition>>>>;
+
 type ChildEnvFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
@@ -17,19 +20,21 @@ const CHILD_ENV_MARKER: &str = "/workspace/marker.txt";
 struct ChildEnvScriptedProvider {
     responses: Mutex<Vec<ProviderResponse>>,
     seen: ChildEnvRequests,
+    tools: ChildEnvTools,
 }
 
 impl Provider for ChildEnvScriptedProvider {
     fn chat<'a>(
         &'a self,
         messages: &'a [Message],
-        _tools: &'a [ToolDefinition],
+        tools: &'a [ToolDefinition],
         _budget: &'a mut ResourceBudget,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<ProviderResponse, ProviderError>> + Send + 'a>,
     > {
         Box::pin(async move {
             self.seen.lock().unwrap().push(messages.to_vec());
+            self.tools.lock().unwrap().push(tools.to_vec());
             Ok(self
                 .responses
                 .lock()
@@ -136,12 +141,34 @@ fn child_env_harness_with_script(
     script: impl Fn(usize) -> Vec<ProviderResponse> + Send + Sync + 'static,
     seen: ChildEnvRequests,
 ) -> ChildCellIdentityHarness {
-    let capability = child_cell_identity_capability();
+    child_env_harness_with_config(
+        child_cell_identity_config(),
+        provider,
+        factory_vfs,
+        script,
+        seen,
+        ChildEnvTools::default(),
+    )
+}
+
+fn child_env_harness_with_config(
+    config: SimulacraConfig,
+    provider: Option<simulacra_runtime::ChildEnvironmentProvider>,
+    factory_vfs: Arc<dyn VirtualFs>,
+    script: impl Fn(usize) -> Vec<ProviderResponse> + Send + Sync + 'static,
+    seen: ChildEnvRequests,
+    tools: ChildEnvTools,
+) -> ChildCellIdentityHarness {
+    // The parent may use any skill, so a placement can narrow its children.
+    let capability = CapabilityToken {
+        skill_patterns: vec!["skill:*".into()],
+        ..child_cell_identity_capability()
+    };
     let journal = Arc::new(InMemoryJournalStorage::new());
     let parent_id = AgentId("root-child-environment".into());
     let constructed = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(AgentTaskFactory {
-        config: child_cell_identity_config(),
+        config,
         provider_kind: ProviderKind::OpenAI,
         vfs: factory_vfs,
         journal: Arc::clone(&journal) as Arc<dyn JournalStorage>,
@@ -159,6 +186,7 @@ fn child_env_harness_with_script(
             Ok(Box::new(ChildEnvScriptedProvider {
                 responses: Mutex::new(script(index)),
                 seen: Arc::clone(&seen),
+                tools: Arc::clone(&tools),
             }))
         })),
         acp_child_runtime: None,

@@ -17,6 +17,7 @@ mod child_environment_provider {
                 asked_for_hook.lock().unwrap().push(spawn.agent_id.clone());
                 Ok(simulacra_runtime::ChildFsEnvironment {
                     vfs: child_env_vfs_with_marker(&child_env_marker_for(spawn)),
+                    skills: None,
                     file_presenter: None,
                 })
             })),
@@ -57,6 +58,7 @@ mod child_environment_provider {
             Some(child_env_provider(move |_spawn| {
                 Ok(simulacra_runtime::ChildFsEnvironment {
                     vfs: child_env_vfs_with_marker("raw bytes"),
+                    skills: None,
                     file_presenter: Some(
                         Arc::clone(&presenter_for_hook) as Arc<dyn simulacra_tool::FilePresenter>
                     ),
@@ -144,6 +146,7 @@ mod child_environment_provider {
                 |spawn| {
                     Ok(simulacra_runtime::ChildFsEnvironment {
                         vfs: child_env_vfs_with_marker(&child_env_marker_for(spawn)),
+                        skills: None,
                         file_presenter: None,
                     })
                 },
@@ -201,6 +204,7 @@ mod child_environment_provider {
                     .insert(spawn.agent_id.0.clone(), Arc::clone(&presenter));
                 Ok(simulacra_runtime::ChildFsEnvironment {
                     vfs: child_env_vfs_with_marker(&child_env_marker_for(spawn)),
+                    skills: None,
                     file_presenter: Some(presenter as Arc<dyn simulacra_tool::FilePresenter>),
                 })
             })),
@@ -254,6 +258,7 @@ mod child_environment_provider {
             Some(child_env_provider(move |_spawn| {
                 Ok(simulacra_runtime::ChildFsEnvironment {
                     vfs: child_env_vfs_with_marker("png bytes"),
+                    skills: None,
                     file_presenter: Some(
                         Arc::clone(&presenter) as Arc<dyn simulacra_tool::FilePresenter>
                     ),
@@ -283,6 +288,7 @@ mod child_environment_provider {
             Some(child_env_provider(move |_spawn| {
                 Ok(simulacra_runtime::ChildFsEnvironment {
                     vfs: Arc::clone(&host_vfs_for_hook),
+                    skills: None,
                     file_presenter: None,
                 })
             })),
