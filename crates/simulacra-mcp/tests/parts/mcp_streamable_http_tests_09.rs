@@ -1,4 +1,4 @@
-struct S067BodyServer {
+struct BodyServer {
     addr: String,
     chunks_attempted: Arc<AtomicUsize>,
     hold_after: Arc<AtomicUsize>,
@@ -7,7 +7,7 @@ struct S067BodyServer {
     handle: Option<thread::JoinHandle<()>>,
 }
 
-impl S067BodyServer {
+impl BodyServer {
     fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }
@@ -26,7 +26,7 @@ impl S067BodyServer {
     }
 }
 
-impl Drop for S067BodyServer {
+impl Drop for BodyServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = std::net::TcpStream::connect(&self.addr);
@@ -36,8 +36,8 @@ impl Drop for S067BodyServer {
     }
 }
 
-fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("S067 body server should bind");
+fn spawn_body_server(mode: BodyMode) -> BodyServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("body server should bind");
     listener.set_nonblocking(true).expect("nonblocking");
 
     let addr = listener.local_addr().expect("addr").to_string();
@@ -73,12 +73,12 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                                 "id": 1,
                                 "result": {
                                     "protocolVersion": "2025-03-26",
-                                    "serverInfo": { "name": "s067-body", "version": "1.0.0" },
+                                    "serverInfo": { "name": "body", "version": "1.0.0" },
                                     "capabilities": {}
                                 }
                             })
                             .to_string();
-                            let response = json_http_response_with_session(&body, "s067-body-session");
+                            let response = json_http_response_with_session(&body, "body-session");
                             let _ = stream.write_all(response.as_bytes());
                         } else if request.contains("\"method\":\"notifications/initialized\"") {
                             let body = json!({ "jsonrpc": "2.0", "result": {} }).to_string();
@@ -90,8 +90,8 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                                 "id": 2,
                                 "result": {
                                     "tools": [{
-                                        "name": "s067_tool",
-                                        "description": "S067 test tool",
+                                        "name": "test_tool",
+                                        "description": "test tool",
                                         "inputSchema": { "type": "object", "properties": {} }
                                     }]
                                 }
@@ -101,7 +101,7 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                             let _ = stream.write_all(response.as_bytes());
                         } else if request.contains("\"method\":\"tools/call\"") {
                             match &mode {
-                                S067BodyMode::Json { body, chunk_size } => {
+                                BodyMode::Json { body, chunk_size } => {
                                     // No Content-Length: the body ends at close, so only the
                                     // streamed byte count can trip the cap.
                                     let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
@@ -121,7 +121,7 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                                         thread::sleep(Duration::from_millis(20));
                                     }
                                 }
-                                S067BodyMode::Sse { events, final_result } => {
+                                BodyMode::Sse { events, final_result } => {
                                     let body = format!("{}event: message\ndata: {}\n\n", events.join(""), final_result);
                                     let header = format!(
                                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
@@ -158,7 +158,7 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
         thread::sleep(Duration::from_millis(1));
     }
 
-    S067BodyServer {
+    BodyServer {
         addr,
         chunks_attempted,
         hold_after,
@@ -169,7 +169,7 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
 }
 
 #[tokio::test]
-async fn s067_json_response_over_cap_returns_response_too_large_before_full_body_is_read() {
+async fn json_response_over_cap_returns_response_too_large_before_full_body_is_read() {
     let _guard = test_guard().await;
 
     let cap = 128;
@@ -180,12 +180,12 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
         "result": { "payload": oversized_payload }
     })
     .to_string();
-    let server = spawn_s067_body_server(S067BodyMode::Json {
+    let server = spawn_body_server(BodyMode::Json {
         body,
         chunk_size: 32,
     });
     let mut manager = McpManager::new();
-    connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    connect_test_server(&mut manager, &server.url("/mcp")).await;
     manager.set_max_response_bytes(Some(cap));
     // Five 32-byte chunks cross the 128-byte cap; a client reading to the
     // end would wait at the hold for more.
@@ -194,9 +194,9 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-json-cap".into()),
+            &simulacra_types::AgentId("json-cap".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -214,9 +214,9 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
     manager.set_max_response_bytes(None);
     let ok = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-json-cap".into()),
+            &simulacra_types::AgentId("json-cap".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -226,7 +226,7 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
 }
 
 #[tokio::test]
-async fn s067_json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
+async fn json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
     let _guard = test_guard().await;
 
     let body = json!({
@@ -236,20 +236,20 @@ async fn s067_json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
     })
     .to_string();
     let exact_cap = body.len();
-    let exact_server = spawn_s067_body_server(S067BodyMode::Json {
+    let exact_server = spawn_body_server(BodyMode::Json {
         body: body.clone(),
         chunk_size: 8,
     });
     let mut exact_manager = McpManager::new();
-    connect_s067_server(&mut exact_manager, &exact_server.url("/mcp")).await;
+    connect_test_server(&mut exact_manager, &exact_server.url("/mcp")).await;
     exact_manager.set_max_response_bytes(Some(exact_cap));
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let output = exact_manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-json-exact-cap".into()),
+            &simulacra_types::AgentId("json-exact-cap".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -258,19 +258,19 @@ async fn s067_json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
     assert_eq!(output["payload"], json!("boundary"));
 
     let cap = exact_cap - 1;
-    let server = spawn_s067_body_server(S067BodyMode::Json {
+    let server = spawn_body_server(BodyMode::Json {
         body,
         chunk_size: 8,
     });
     let mut manager = McpManager::new();
-    connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    connect_test_server(&mut manager, &server.url("/mcp")).await;
     manager.set_max_response_bytes(Some(cap));
 
     let err = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-json-one-over".into()),
+            &simulacra_types::AgentId("json-one-over".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -284,7 +284,7 @@ async fn s067_json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
 }
 
 #[tokio::test]
-async fn s067_sse_response_over_cap_counts_total_received_stream_bytes() {
+async fn sse_response_over_cap_counts_total_received_stream_bytes() {
     let _guard = test_guard().await;
 
     let cap = 180;
@@ -306,20 +306,20 @@ async fn s067_sse_response_over_cap_counts_total_received_stream_bytes() {
         "result": { "ok": true }
     })
     .to_string();
-    let server = spawn_s067_body_server(S067BodyMode::Sse {
+    let server = spawn_body_server(BodyMode::Sse {
         events,
         final_result,
     });
     let mut manager = McpManager::new();
-    connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    connect_test_server(&mut manager, &server.url("/mcp")).await;
     manager.set_max_response_bytes(Some(cap));
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-sse-cap".into()),
+            &simulacra_types::AgentId("sse-cap".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -333,7 +333,7 @@ async fn s067_sse_response_over_cap_counts_total_received_stream_bytes() {
 }
 
 #[tokio::test]
-async fn s067_unset_response_cap_preserves_large_json_success() {
+async fn unset_response_cap_preserves_large_json_success() {
     let _guard = test_guard().await;
 
     let large_payload = "x".repeat(2048);
@@ -343,20 +343,20 @@ async fn s067_unset_response_cap_preserves_large_json_success() {
         "result": { "payload": large_payload }
     })
     .to_string();
-    let server = spawn_s067_body_server(S067BodyMode::Json {
+    let server = spawn_body_server(BodyMode::Json {
         body,
         chunk_size: 128,
     });
     let mut manager = McpManager::new();
     manager.set_max_response_bytes(None);
-    connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    connect_test_server(&mut manager, &server.url("/mcp")).await;
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let output = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-json-uncapped".into()),
+            &simulacra_types::AgentId("json-uncapped".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -370,7 +370,7 @@ async fn s067_unset_response_cap_preserves_large_json_success() {
 }
 
 #[test]
-fn s067_mcp_error_kind_literals_are_stable_wire_contract() {
+fn mcp_error_kind_literals_are_stable_wire_contract() {
     assert_eq!(
         McpError::AuthFailed("token expired".into()).kind(),
         "auth_failed"

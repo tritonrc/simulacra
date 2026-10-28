@@ -1,4 +1,4 @@
-struct S067StatusServer {
+struct StatusServer {
     addr: String,
     initialize_status: u16,
     tool_statuses: Arc<Mutex<Vec<u16>>>,
@@ -7,7 +7,7 @@ struct S067StatusServer {
     handle: Option<thread::JoinHandle<()>>,
 }
 
-impl S067StatusServer {
+impl StatusServer {
     fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
     }
@@ -17,7 +17,7 @@ impl S067StatusServer {
     }
 }
 
-impl Drop for S067StatusServer {
+impl Drop for StatusServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = std::net::TcpStream::connect(&self.addr);
@@ -27,8 +27,8 @@ impl Drop for S067StatusServer {
     }
 }
 
-fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> S067StatusServer {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("S067 status server should bind");
+fn spawn_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> StatusServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("status server should bind");
     listener.set_nonblocking(true).expect("nonblocking");
 
     let addr = listener.local_addr().expect("addr").to_string();
@@ -67,7 +67,7 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
                                 "id": 1,
                                 "result": {
                                     "protocolVersion": "2025-03-26",
-                                    "serverInfo": { "name": "s067-status", "version": "1.0.0" },
+                                    "serverInfo": { "name": "status", "version": "1.0.0" },
                                     "capabilities": {}
                                 }
                             })
@@ -84,8 +84,8 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
                                 "id": 2,
                                 "result": {
                                     "tools": [{
-                                        "name": "s067_tool",
-                                        "description": "S067 test tool",
+                                        "name": "test_tool",
+                                        "description": "test tool",
                                         "inputSchema": { "type": "object", "properties": {} }
                                     }]
                                 }
@@ -135,7 +135,7 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
         thread::sleep(Duration::from_millis(1));
     }
 
-    S067StatusServer {
+    StatusServer {
         addr,
         initialize_status,
         tool_statuses,
@@ -146,37 +146,37 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
 }
 
 #[derive(Clone)]
-enum S067BodyMode {
+enum BodyMode {
     Json { body: String, chunk_size: usize },
     Sse { events: Vec<String>, final_result: String },
 }
 
-async fn connect_s067_server(manager: &mut McpManager, url: &str) {
+async fn connect_test_server(manager: &mut McpManager, url: &str) {
     manager
         .connect(url, None)
         .await
         .expect("connect should register the local MCP server");
     let tools = list_tools_with_retry(manager).await;
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "s067_tool");
+    assert_eq!(tools[0].name, "test_tool");
 }
 
 #[tokio::test]
-async fn s067_dispatch_401_and_403_return_auth_failed_without_same_credential_retry() {
+async fn dispatch_401_and_403_return_auth_failed_without_same_credential_retry() {
     let _guard = test_guard().await;
 
     for status in [401, 403] {
-        let server = spawn_s067_status_server(200, vec![status]);
+        let server = spawn_status_server(200, vec![status]);
         let mut manager = McpManager::new();
         manager.set_reconnect_base_delay_ms(10);
-        connect_s067_server(&mut manager, &server.url("/mcp")).await;
+        connect_test_server(&mut manager, &server.url("/mcp")).await;
 
         let capability = capability_with_mcp_tools(&["mcp:*:*"]);
         let err = manager
             .call_tool_for_agent(
-                &simulacra_types::AgentId(format!("s067-agent-{status}")),
+                &simulacra_types::AgentId(format!("agent-{status}")),
                 "127.0.0.1",
-                "s067_tool",
+                "test_tool",
                 json!({}),
                 &capability,
             )
@@ -196,21 +196,21 @@ async fn s067_dispatch_401_and_403_return_auth_failed_without_same_credential_re
 }
 
 #[tokio::test]
-async fn s067_dispatch_404_and_500_remain_transport_errors_and_retryable() {
+async fn dispatch_404_and_500_remain_transport_errors_and_retryable() {
     let _guard = test_guard().await;
 
     for status in [404, 500] {
-        let server = spawn_s067_status_server(200, vec![status, status, status]);
+        let server = spawn_status_server(200, vec![status, status, status]);
         let mut manager = McpManager::new();
         manager.set_reconnect_base_delay_ms(10);
-        connect_s067_server(&mut manager, &server.url("/mcp")).await;
+        connect_test_server(&mut manager, &server.url("/mcp")).await;
 
         let capability = capability_with_mcp_tools(&["mcp:*:*"]);
         let err = manager
             .call_tool_for_agent(
-                &simulacra_types::AgentId(format!("s067-agent-{status}")),
+                &simulacra_types::AgentId(format!("agent-{status}")),
                 "127.0.0.1",
-                "s067_tool",
+                "test_tool",
                 json!({}),
                 &capability,
             )
@@ -229,10 +229,10 @@ async fn s067_dispatch_404_and_500_remain_transport_errors_and_retryable() {
 }
 
 #[tokio::test]
-async fn s067_handshake_401_still_returns_connection_failed() {
+async fn handshake_401_still_returns_connection_failed() {
     let _guard = test_guard().await;
 
-    let server = spawn_s067_status_server(401, vec![200]);
+    let server = spawn_status_server(401, vec![200]);
     let mut manager = McpManager::new();
     manager
         .connect(&server.url("/mcp"), None)
@@ -245,9 +245,9 @@ async fn s067_handshake_401_still_returns_connection_failed() {
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-handshake-agent".into()),
+            &simulacra_types::AgentId("handshake-agent".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
@@ -266,20 +266,20 @@ async fn s067_handshake_401_still_returns_connection_failed() {
 }
 
 #[tokio::test]
-async fn s067_transport_failure_then_auth_failed_stops_after_second_tool_dispatch() {
+async fn transport_failure_then_auth_failed_stops_after_second_tool_dispatch() {
     let _guard = test_guard().await;
 
-    let server = spawn_s067_status_server(200, vec![500, 401, 200]);
+    let server = spawn_status_server(200, vec![500, 401, 200]);
     let mut manager = McpManager::new();
     manager.set_reconnect_base_delay_ms(10);
-    connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    connect_test_server(&mut manager, &server.url("/mcp")).await;
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager
         .call_tool_for_agent(
-            &simulacra_types::AgentId("s067-agent-500-401".into()),
+            &simulacra_types::AgentId("agent-500-401".into()),
             "127.0.0.1",
-            "s067_tool",
+            "test_tool",
             json!({}),
             &capability,
         )
