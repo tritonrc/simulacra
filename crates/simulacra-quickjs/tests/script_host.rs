@@ -283,3 +283,17 @@ fn nested_arrays_around_a_large_string_log_within_the_cap_quickly() {
     assert!(out.stdout.len() <= 64 * 1024 + "[output truncated]\n".len());
     assert!(out.stdout.ends_with("[output truncated]\n"));
 }
+
+#[test]
+fn an_unknown_tool_name_rejects_naming_it_and_the_available_tools() {
+    let rt = runtime(Some(FakeHost::default()), Duration::from_secs(5));
+    let out = rt
+        .eval("tools.nope({}).then(() => 'resolved', (e) => e.message)")
+        .unwrap();
+    let message = out.result.unwrap();
+    assert!(message.contains("nope"), "{message}");
+    assert!(message.contains("echo"), "{message}");
+
+    let known = rt.eval("tools.echo({a: 1}).then((r) => r.a)").unwrap();
+    assert_eq!(known.result.as_deref(), Some("1"));
+}

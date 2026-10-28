@@ -57,7 +57,16 @@ const TOOLS_FACTORY: &str = r#"(function (call, names, cap) {
             return JSON.parse(reply.slice(1));
         };
     }
-    return tools;
+    const missing = (name) => async function () {
+        throw new Error(`tools.${name} does not exist; available: ${names.join(", ")}`);
+    };
+    // `then` stays undefined so awaiting `tools` itself is not a thenable trap.
+    return new Proxy(tools, {
+        get: (target, key) =>
+            typeof key !== "string" || key in target || key === "then"
+                ? target[key]
+                : missing(key),
+    });
 })"#;
 
 pub(super) fn install_tools(
