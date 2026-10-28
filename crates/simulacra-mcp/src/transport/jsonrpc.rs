@@ -20,12 +20,12 @@ pub(crate) async fn read_jsonrpc_http_response(
         .await
         .map_err(|e| McpError::ProtocolError(e.to_string()))?
     {
-        bytes.extend_from_slice(&chunk);
         if let Some(limit_bytes) = max_bytes
-            && bytes.len() > limit_bytes
+            && bytes.len() + chunk.len() > limit_bytes
         {
             return Err(McpError::ResponseTooLarge { limit_bytes });
         }
+        bytes.extend_from_slice(&chunk);
     }
     let body = String::from_utf8_lossy(&bytes).into_owned();
     let trimmed = body.trim_start();

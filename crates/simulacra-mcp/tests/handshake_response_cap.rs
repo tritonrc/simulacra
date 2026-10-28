@@ -13,6 +13,20 @@ enum Wire {
     Sse,
 }
 
+/// Headers ended and the whole `Content-Length` body has arrived.
+fn request_complete(request: &[u8]) -> bool {
+    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+    let length = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    request.len() >= end + 4 + length
+}
+
 /// Serves a valid handshake, padding the `oversize` method's reply past the cap.
 async fn serve(wire: Wire, oversize: &'static str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -23,9 +37,7 @@ async fn serve(wire: Wire, oversize: &'static str) -> String {
             tokio::spawn(async move {
                 let mut request = Vec::new();
                 let mut buf = [0u8; 4096];
-                while !request.windows(4).any(|w| w == b"\r\n\r\n")
-                    || !String::from_utf8_lossy(&request).contains("\"jsonrpc\"")
-                {
+                while !request_complete(&request) {
                     match stream.read(&mut buf).await {
                         Ok(0) | Err(_) => return,
                         Ok(n) => request.extend_from_slice(&buf[..n]),

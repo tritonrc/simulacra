@@ -183,7 +183,7 @@ impl JsRuntime {
             tracing::dispatcher::with_default(&dispatch, || {
                 let _parent_guard = parent_span.enter();
                 let tokio_runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
+                    .enable_all()
                     .build()
                     .map_err(|e| {
                         JsError::Runtime(format!("failed to create JS async runtime: {e}"))
