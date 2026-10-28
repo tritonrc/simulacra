@@ -42,12 +42,12 @@ impl JsHost for Mark {
     }
 }
 
-fn log_after_mark(setup: &str, log: &str) -> (String, usize) {
+fn log_after_mark(cap: Option<usize>, setup: &str, log: &str) -> (String, usize) {
     let rt = JsRuntime::new(Arc::new(MemoryFs::new()))
         .unwrap()
         .with_runtime_options(JsRuntimeOptions {
             host: Some(Arc::new(Mark)),
-            console_cap: Some(256),
+            console_cap: cap,
             ..Default::default()
         });
     let out = rt
@@ -62,11 +62,19 @@ fn log_after_mark(setup: &str, log: &str) -> (String, usize) {
 fn huge_values_are_bounded_before_they_reach_rust() {
     const LIMIT: usize = 4 << 20;
 
-    let (stdout, largest) = log_after_mark("const s = 'x'.repeat(1 << 24)", "console.log(s)");
+    let (_, uncapped) = log_after_mark(None, "const s = 'x'.repeat(1 << 24)", "console.log(s)");
+    assert!(
+        uncapped >= 1 << 24,
+        "the probe sees an uncapped copy, got {uncapped} bytes"
+    );
+
+    let (stdout, largest) =
+        log_after_mark(Some(256), "const s = 'x'.repeat(1 << 24)", "console.log(s)");
     assert!(stdout.len() <= 256 + 32 && stdout.ends_with("[output truncated]\n"));
     assert!(largest < LIMIT, "string copy of {largest} bytes");
 
     let (stdout, largest) = log_after_mark(
+        Some(256),
         "const o = {}; for (let i = 0; i < 200000; i++) o['k' + i] = i",
         "console.log(o)",
     );
@@ -74,6 +82,7 @@ fn huge_values_are_bounded_before_they_reach_rust() {
     assert!(largest < LIMIT, "key copy of {largest} bytes");
 
     let (stdout, largest) = log_after_mark(
+        Some(256),
         "const s = 'x'.repeat(1 << 24)",
         "String.prototype.slice = () => 'y'.repeat(1 << 24); \
          Function.prototype.call = () => 'z'.repeat(1 << 24); console.log(s)",
@@ -81,8 +90,11 @@ fn huge_values_are_bounded_before_they_reach_rust() {
     assert!(stdout.ends_with("[output truncated]\n"));
     assert!(largest < LIMIT, "patched slice copied {largest} bytes");
 
-    let (stdout, largest) =
-        log_after_mark("const o = {['x'.repeat(1 << 24)]: 1}", "console.log(o)");
+    let (stdout, largest) = log_after_mark(
+        Some(256),
+        "const o = {['x'.repeat(1 << 24)]: 1}",
+        "console.log(o)",
+    );
     assert!(stdout.len() <= 256 + 32 && stdout.ends_with("[output truncated]\n"));
     assert!(largest < LIMIT, "key copy of {largest} bytes");
 }
