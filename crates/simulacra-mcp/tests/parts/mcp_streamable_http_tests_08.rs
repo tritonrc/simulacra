@@ -85,7 +85,7 @@ fn spawn_s067_status_server(initialize_status: u16, tool_statuses: Vec<u16>) -> 
                                 "result": {
                                     "tools": [{
                                         "name": "s067_tool",
-                                        "description": "S067 red test tool",
+                                        "description": "S067 test tool",
                                         "inputSchema": { "type": "object", "properties": {} }
                                     }]
                                 }

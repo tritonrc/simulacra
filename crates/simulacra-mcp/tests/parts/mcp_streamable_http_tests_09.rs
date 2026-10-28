@@ -1,6 +1,8 @@
 struct S067BodyServer {
     addr: String,
     chunks_attempted: Arc<AtomicUsize>,
+    hold_after: Arc<AtomicUsize>,
+    released: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -12,6 +14,15 @@ impl S067BodyServer {
 
     fn chunks_attempted(&self) -> usize {
         self.chunks_attempted.load(Ordering::SeqCst)
+    }
+
+    /// The JSON body pauses after `chunks` until [`Self::release`] or 5 s.
+    fn hold_after(&self, chunks: usize) {
+        self.hold_after.store(chunks, Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
     }
 }
 
@@ -31,10 +42,14 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
 
     let addr = listener.local_addr().expect("addr").to_string();
     let chunks_attempted = Arc::new(AtomicUsize::new(0));
+    let hold_after = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicBool::new(false));
 
     let chunks_attempted_t = Arc::clone(&chunks_attempted);
+    let hold_after_t = Arc::clone(&hold_after);
+    let released_t = Arc::clone(&released);
     let stop_t = Arc::clone(&stop);
     let ready_t = Arc::clone(&ready);
 
@@ -76,7 +91,7 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                                 "result": {
                                     "tools": [{
                                         "name": "s067_tool",
-                                        "description": "S067 red test tool",
+                                        "description": "S067 test tool",
                                         "inputSchema": { "type": "object", "properties": {} }
                                     }]
                                 }
@@ -87,17 +102,22 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
                         } else if request.contains("\"method\":\"tools/call\"") {
                             match &mode {
                                 S067BodyMode::Json { body, chunk_size } => {
-                                    let header = format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-                                        body.len()
-                                    );
+                                    // No Content-Length: the body ends at close, so only the
+                                    // streamed byte count can trip the cap.
+                                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
                                     let _ = stream.write_all(header.as_bytes());
                                     for chunk in body.as_bytes().chunks(*chunk_size) {
-                                        chunks_attempted_t.fetch_add(1, Ordering::SeqCst);
+                                        let sent = chunks_attempted_t.fetch_add(1, Ordering::SeqCst) + 1;
                                         if stream.write_all(chunk).is_err() {
                                             break;
                                         }
                                         let _ = stream.flush();
+                                        if sent == hold_after_t.load(Ordering::SeqCst) {
+                                            let until = std::time::Instant::now() + Duration::from_secs(5);
+                                            while !released_t.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                                                thread::sleep(Duration::from_millis(5));
+                                            }
+                                        }
                                         thread::sleep(Duration::from_millis(20));
                                     }
                                 }
@@ -141,6 +161,8 @@ fn spawn_s067_body_server(mode: S067BodyMode) -> S067BodyServer {
     S067BodyServer {
         addr,
         chunks_attempted,
+        hold_after,
+        released,
         stop,
         handle: Some(handle),
     }
@@ -165,6 +187,9 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
     let mut manager = McpManager::new();
     connect_s067_server(&mut manager, &server.url("/mcp")).await;
     manager.set_max_response_bytes(Some(cap));
+    // Five 32-byte chunks cross the 128-byte cap; a client reading to the
+    // end would wait at the hold for more.
+    server.hold_after(5);
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager
@@ -182,10 +207,22 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
         matches!(err, McpError::ResponseTooLarge { limit_bytes } if limit_bytes == cap),
         "oversized JSON response should return ResponseTooLarge with the cap, got {err:?}"
     );
-    assert!(
-        server.chunks_attempted() < 10,
-        "client should abort while streaming instead of reading the full oversized body"
-    );
+    let sent = server.chunks_attempted();
+    server.release();
+    assert_eq!(sent, 5, "client should abort at the chunk that crosses the cap");
+
+    manager.set_max_response_bytes(None);
+    let ok = manager
+        .call_tool_for_agent(
+            &simulacra_types::AgentId("s067-json-cap".into()),
+            "127.0.0.1",
+            "s067_tool",
+            json!({}),
+            &capability,
+        )
+        .await
+        .expect("the same body succeeds with no cap");
+    assert!(ok.to_string().contains(&oversized_payload));
 }
 
 #[tokio::test]
