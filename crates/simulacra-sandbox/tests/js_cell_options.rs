@@ -36,14 +36,11 @@ fn cell() -> AgentCell {
 }
 
 #[test]
-fn a_cell_without_options_has_no_tools_global() {
-    let out = cell().execute_js("typeof tools").unwrap();
-    assert_eq!(out.result.as_deref(), Some("undefined"));
-}
-
-#[test]
 fn cell_options_supply_the_host_and_timeout() {
     let mut cell = cell();
+    let without = cell.execute_js("typeof tools").unwrap();
+    assert_eq!(without.result.as_deref(), Some("undefined"));
+
     cell.set_js_options(JsRuntimeOptions {
         host: Some(Arc::new(Echo)),
         timeout: Some(Duration::from_millis(300)),

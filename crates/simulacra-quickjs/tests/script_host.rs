@@ -124,6 +124,10 @@ fn host_calls_outlasting_the_timeout_are_dropped() {
 #[test]
 fn busy_loop_times_out_with_and_without_a_host() {
     let with = runtime(Some(FakeHost::default()), Duration::from_millis(300));
+    assert_eq!(
+        with.eval("typeof tools").unwrap().result.as_deref(),
+        Some("object")
+    );
     assert!(matches!(
         with.eval("while (true) {}"),
         Err(JsError::Timeout)
@@ -159,6 +163,12 @@ fn oversized_arguments_are_rejected_without_calling_the_host() {
         .unwrap();
     assert!(out.result.unwrap().contains("exceed"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let under = rt
+        .eval("tools.echo({s: 'x'.repeat(900)}).then(r => r.s.length)")
+        .unwrap();
+    assert_eq!(under.result.as_deref(), Some("900"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -179,6 +189,12 @@ fn arguments_over_the_byte_cap_are_rejected_even_when_short_in_utf16() {
         .unwrap();
     assert!(out.result.unwrap().contains("exceed"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let under = rt
+        .eval("tools.echo({s: '\\u20ac'.repeat(300)}).then(r => r.s.length)")
+        .unwrap();
+    assert_eq!(under.result.as_deref(), Some("300"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -243,6 +259,10 @@ fn output_under_the_cap_is_not_marked() {
         ..Default::default()
     });
     assert_eq!(rt.eval("console.log('hi')").unwrap().stdout, "hi\n");
+    let over = rt
+        .eval(&format!("console.log('{}')", "x".repeat(CAP * 2)))
+        .unwrap();
+    assert!(over.stdout.ends_with("[output truncated]\n"));
 }
 
 #[test]
