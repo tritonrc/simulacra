@@ -462,8 +462,8 @@ async fn s067_json_response_over_cap_returns_response_too_large_before_full_body
         chunk_size: 32,
     });
     let mut manager = McpManager::new();
-    manager.set_max_response_bytes(Some(cap));
     connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    manager.set_max_response_bytes(Some(cap));
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager
@@ -503,8 +503,8 @@ async fn s067_json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
         chunk_size: 8,
     });
     let mut exact_manager = McpManager::new();
-    exact_manager.set_max_response_bytes(Some(exact_cap));
     connect_s067_server(&mut exact_manager, &exact_server.url("/mcp")).await;
+    exact_manager.set_max_response_bytes(Some(exact_cap));
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let output = exact_manager
@@ -525,8 +525,8 @@ async fn s067_json_response_cap_boundary_accepts_exact_and_rejects_one_over() {
         chunk_size: 8,
     });
     let mut manager = McpManager::new();
-    manager.set_max_response_bytes(Some(cap));
     connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    manager.set_max_response_bytes(Some(cap));
 
     let err = manager
         .call_tool_for_agent(
@@ -573,8 +573,8 @@ async fn s067_sse_response_over_cap_counts_total_received_stream_bytes() {
         final_result,
     });
     let mut manager = McpManager::new();
-    manager.set_max_response_bytes(Some(cap));
     connect_s067_server(&mut manager, &server.url("/mcp")).await;
+    manager.set_max_response_bytes(Some(cap));
 
     let capability = capability_with_mcp_tools(&["mcp:*:*"]);
     let err = manager

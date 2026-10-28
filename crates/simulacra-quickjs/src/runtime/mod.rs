@@ -1,5 +1,6 @@
 mod eval;
 mod globals;
+mod host;
 mod modules;
 
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use simulacra_vfs::MemoryFs;
 
 use crate::host_api::{DEFAULT_TIMEOUT, WORKFLOW_TIMEOUT};
 use crate::{FsProxy, JsError, JsHostApiProfile, JsOutput, ModuleFetcher};
+pub use host::{BoxFuture, JsHost, JsRuntimeOptions};
 
 /// A minimal QuickJS sandbox with mediated host functions.
 #[derive(Clone)]
@@ -33,6 +35,7 @@ pub struct JsRuntime {
     runtime_start: Instant,
     /// Host API surface to install into fresh eval contexts.
     host_api: JsHostApiProfile,
+    options: JsRuntimeOptions,
 }
 
 impl JsRuntime {
@@ -144,7 +147,17 @@ impl JsRuntime {
             fetch_proxy,
             runtime_start: Instant::now(),
             host_api,
+            options: JsRuntimeOptions::default(),
         })
+    }
+
+    /// Apply embedder options: a `tools` host, timeout, heap and console caps.
+    pub fn with_runtime_options(mut self, options: JsRuntimeOptions) -> Self {
+        if let Some(timeout) = options.timeout {
+            self.timeout = timeout;
+        }
+        self.options = options;
+        self
     }
 
     /// Create a new runtime with host-controlled environment variables.

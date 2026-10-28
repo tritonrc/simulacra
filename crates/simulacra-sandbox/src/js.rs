@@ -235,7 +235,8 @@ impl AgentCell {
                 Some(fs_proxy),
                 Some(fetch_proxy),
             )
-            .map_err(|e| SandboxError::Js(e.to_string()))?;
+            .map_err(|e| SandboxError::Js(e.to_string()))?
+            .with_runtime_options(self.js_options.clone());
             *rt_slot = Some(runtime);
         }
 

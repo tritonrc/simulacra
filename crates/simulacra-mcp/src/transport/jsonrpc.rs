@@ -2,9 +2,11 @@ use crate::error::McpError;
 use crate::transport::sse::parse_next_sse_event;
 
 /// Read a non-streaming JSON-RPC response that may be plain JSON or a single
-/// SSE message, per MCP streamable HTTP.
+/// SSE message, per MCP streamable HTTP. The body is refused once it passes
+/// `max_bytes`.
 pub(crate) async fn read_jsonrpc_http_response(
-    response: reqwest::Response,
+    mut response: reqwest::Response,
+    max_bytes: Option<usize>,
 ) -> Result<serde_json::Value, McpError> {
     let is_event_stream = response
         .headers()
@@ -12,10 +14,20 @@ pub(crate) async fn read_jsonrpc_http_response(
         .and_then(|value| value.to_str().ok())
         .map(|content_type| content_type.starts_with("text/event-stream"))
         .unwrap_or(false);
-    let body = response
-        .text()
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| McpError::ProtocolError(e.to_string()))?;
+        .map_err(|e| McpError::ProtocolError(e.to_string()))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if let Some(limit_bytes) = max_bytes
+            && bytes.len() > limit_bytes
+        {
+            return Err(McpError::ResponseTooLarge { limit_bytes });
+        }
+    }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     let trimmed = body.trim_start();
 
     if is_event_stream || trimmed.starts_with("event:") || trimmed.starts_with("data:") {
