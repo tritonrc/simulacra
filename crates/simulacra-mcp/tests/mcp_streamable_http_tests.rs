@@ -19,3 +19,4 @@ include!("parts/mcp_streamable_http_tests_05.rs");
 include!("parts/mcp_streamable_http_tests_06.rs");
 include!("parts/mcp_streamable_http_tests_07.rs");
 include!("parts/mcp_streamable_http_tests_08.rs");
+include!("parts/mcp_streamable_http_tests_09.rs");

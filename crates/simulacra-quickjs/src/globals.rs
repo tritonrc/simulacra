@@ -3,14 +3,12 @@
 //! Pure computation polyfills and lightweight Rust-backed host functions.
 //! No I/O, no capability requirements.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
 
-use crate::formatting::format_js_value;
+use crate::formatting::{SharedCapture, console_method};
 use base64::Engine as _;
-use rquickjs::{Function, Object, Value};
+use rquickjs::{Function, Object};
 
 /// Register all Tier 1 web-standard globals on the given JS context.
 ///
@@ -18,7 +16,7 @@ use rquickjs::{Function, Object, Value};
 /// `runtime_start` is the `Instant` when the runtime was created (for `performance.now()`).
 pub fn register_web_globals(
     ctx: &rquickjs::Ctx<'_>,
-    stdout_buf: &Rc<RefCell<String>>,
+    stdout_buf: &SharedCapture,
     runtime_start: Instant,
 ) -> Result<(), crate::JsError> {
     register_base64(ctx)?;
@@ -185,7 +183,7 @@ fn register_timers(ctx: &rquickjs::Ctx<'_>) -> Result<(), crate::JsError> {
 
 fn register_console_levels(
     ctx: &rquickjs::Ctx<'_>,
-    stdout_buf: &Rc<RefCell<String>>,
+    stdout_buf: &SharedCapture,
 ) -> Result<(), crate::JsError> {
     let globals = ctx.globals();
     let console: Object<'_> = globals
@@ -198,21 +196,8 @@ fn register_console_levels(
         ("info", "[INFO]"),
         ("debug", "[DEBUG]"),
     ] {
-        let buf = Rc::clone(stdout_buf);
-        let prefix = prefix.to_string();
-        let level_fn = Function::new(
-            ctx.clone(),
-            move |args: rquickjs::function::Rest<Value<'_>>| {
-                let parts: Vec<String> = args
-                    .0
-                    .iter()
-                    .map(|v| format_js_value(v, 0, &mut HashSet::new()))
-                    .collect();
-                let line = parts.join(" ");
-                buf.borrow_mut().push_str(&format!("{prefix} {line}\n"));
-            },
-        )
-        .map_err(|e| crate::JsError::Runtime(e.to_string()))?;
+        let level_fn = console_method(ctx, Rc::clone(stdout_buf), format!("{prefix} "))
+            .map_err(|e| crate::JsError::Runtime(e.to_string()))?;
         console
             .set(name, level_fn)
             .map_err(|e| crate::JsError::Runtime(e.to_string()))?;

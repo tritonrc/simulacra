@@ -159,6 +159,9 @@ impl JsRuntime {
         fetched_remote_urls: RemoteUrlSet,
     ) -> Result<(AsyncRuntime, AsyncContext), JsError> {
         let rt = AsyncRuntime::new().map_err(|e| JsError::Runtime(e.to_string()))?;
+        if let Some(limit) = self.options.memory_limit {
+            rt.set_memory_limit(limit).await;
+        }
 
         if self.host_api.module_loader || self.host_api.simulacra_modules {
             rt.set_loader(

@@ -1,7 +1,7 @@
 use crate::domain::tool_schema::McpToolSchema;
 use crate::error::McpError;
 use crate::manager::McpManager;
-use crate::transport::jsonrpc::jsonrpc_error_from_value;
+use crate::transport::jsonrpc::{jsonrpc_error_from_value, read_jsonrpc_http_response};
 
 impl McpManager {
     /// Perform the MCP HTTP handshake: initialize then tools/list.
@@ -92,10 +92,7 @@ impl McpManager {
         }
 
         // Parse the tools/list response to extract tool schemas.
-        let body: serde_json::Value = tools_response
-            .json()
-            .await
-            .map_err(|e| McpError::ProtocolError(e.to_string()))?;
+        let body = read_jsonrpc_http_response(tools_response, self.max_response_bytes).await?;
 
         // Surface JSON-RPC error envelopes instead of producing empty tools.
         if let Some(err) = body.get("error") {

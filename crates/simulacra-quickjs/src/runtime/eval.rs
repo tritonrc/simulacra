@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rquickjs::context::EvalOptions;
@@ -9,6 +10,8 @@ use rquickjs::{CatchResultExt, Promise, Value};
 use tracing::Instrument;
 
 use super::JsRuntime;
+use super::host::install_tools;
+use crate::formatting::SharedCapture;
 use crate::module_loading::{RemoteUrlSet, extract_module_loading_error, wrap_module_for_result};
 use crate::{JsError, JsHostApiProfile, JsOutput, install_workflow_api_restrictions};
 
@@ -126,6 +129,9 @@ impl JsRuntime {
                     install_workflow_api_restrictions(&ctx)
                         .map_err(|e| JsError::Runtime(e.to_string()))?;
                 }
+                if let Some(host) = &self.options.host {
+                    install_tools(&ctx, Arc::clone(host), self.options.host_arg_cap())?;
+                }
                 if self.host_api.simulacra_modules {
                     Self::register_native_modules_async(&ctx).await?;
                 }
@@ -205,7 +211,7 @@ impl JsRuntime {
         &self,
         ctx: &rquickjs::Ctx<'_>,
         code: &str,
-        stdout_buf: &Rc<RefCell<String>>,
+        stdout_buf: &SharedCapture,
         exit_code_cell: &Rc<RefCell<Option<i32>>>,
     ) -> Result<JsOutput, JsError> {
         let res: rquickjs::Result<rquickjs::Value<'_>> = ctx.eval(code.to_string());
@@ -222,7 +228,7 @@ impl JsRuntime {
 
                 let exit_code = exit_code_cell.borrow_mut().take();
                 Ok(JsOutput {
-                    stdout: stdout_buf.borrow().clone(),
+                    stdout: stdout_buf.output(),
                     result: Self::extract_result(&resolved),
                     exit_code,
                 })
@@ -235,7 +241,7 @@ impl JsRuntime {
         &self,
         ctx: &rquickjs::Ctx<'_>,
         code: &str,
-        stdout_buf: &Rc<RefCell<String>>,
+        stdout_buf: &SharedCapture,
         exit_code_cell: &Rc<RefCell<Option<i32>>>,
     ) -> Result<JsOutput, JsError> {
         let wrapped = wrap_module_for_result(code);
@@ -268,7 +274,7 @@ impl JsRuntime {
                         }
                     };
                     Ok(JsOutput {
-                        stdout: stdout_buf.borrow().clone(),
+                        stdout: stdout_buf.output(),
                         result: Self::extract_result(&resolved),
                         exit_code,
                     })
@@ -297,13 +303,13 @@ impl JsRuntime {
 
     fn handle_error(
         caught: rquickjs::CaughtError<'_>,
-        stdout_buf: &Rc<RefCell<String>>,
+        stdout_buf: &SharedCapture,
         exit_code_cell: &Rc<RefCell<Option<i32>>>,
     ) -> Result<JsOutput, JsError> {
         let exit_code = exit_code_cell.borrow_mut().take();
         if exit_code.is_some() {
             return Ok(JsOutput {
-                stdout: stdout_buf.borrow().clone(),
+                stdout: stdout_buf.output(),
                 result: None,
                 exit_code,
             });

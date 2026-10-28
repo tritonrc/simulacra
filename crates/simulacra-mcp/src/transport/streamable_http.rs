@@ -94,7 +94,8 @@ impl McpManager {
             .filter(|s| !s.is_empty());
 
         // Validate the initialize response is a proper JSON-RPC result.
-        let init_body: serde_json::Value = read_jsonrpc_http_response(init_response).await?;
+        let init_body: serde_json::Value =
+            read_jsonrpc_http_response(init_response, self.max_response_bytes).await?;
 
         if init_body
             .get("result")
@@ -165,7 +166,8 @@ impl McpManager {
         }
 
         // Parse the tools/list response.
-        let body: serde_json::Value = read_jsonrpc_http_response(tools_response).await?;
+        let body: serde_json::Value =
+            read_jsonrpc_http_response(tools_response, self.max_response_bytes).await?;
 
         // Surface JSON-RPC error envelopes instead of producing empty tools.
         if let Some(err) = body.get("error") {

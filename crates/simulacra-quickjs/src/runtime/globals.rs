@@ -1,12 +1,11 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use rquickjs::{Function, Object};
 
 use super::JsRuntime;
-use crate::formatting::format_js_value;
+use crate::formatting::{Capture, SharedCapture, console_method};
 use crate::{JsError, fs_proxy_required_error, globals};
 
 impl JsRuntime {
@@ -16,29 +15,16 @@ impl JsRuntime {
     pub(super) fn register_globals(
         &self,
         ctx: &rquickjs::Ctx<'_>,
-    ) -> Result<(Rc<RefCell<String>>, Rc<RefCell<Option<i32>>>), JsError> {
-        let stdout_buf: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    ) -> Result<(SharedCapture, Rc<RefCell<Option<i32>>>), JsError> {
+        let stdout_buf = Capture::new(self.options.console_cap);
         let exit_code_cell: Rc<RefCell<Option<i32>>> = Rc::new(RefCell::new(None));
 
         let globals_obj = ctx.globals();
 
         if self.host_api.console {
             let console = Object::new(ctx.clone()).map_err(|e| JsError::Runtime(e.to_string()))?;
-            let buf = Rc::clone(&stdout_buf);
-            let log_fn = Function::new(
-                ctx.clone(),
-                move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
-                    let parts: Vec<String> = args
-                        .0
-                        .iter()
-                        .map(|v| format_js_value(v, 0, &mut HashSet::new()))
-                        .collect();
-                    let line = parts.join(" ");
-                    buf.borrow_mut().push_str(&line);
-                    buf.borrow_mut().push('\n');
-                },
-            )
-            .map_err(|e| JsError::Runtime(e.to_string()))?;
+            let log_fn = console_method(ctx, Rc::clone(&stdout_buf), String::new())
+                .map_err(|e| JsError::Runtime(e.to_string()))?;
 
             console
                 .set("log", log_fn)

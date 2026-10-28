@@ -93,6 +93,8 @@ pub struct AgentCell {
     /// JS runtime wrapper that preserves mediated host configuration and
     /// remote source caches. Each eval creates a fresh QuickJS context.
     pub(crate) js_runtime: SendableJsRuntime,
+    /// Host, timeout, heap and console caps layered onto the JS runtime.
+    pub(crate) js_options: simulacra_quickjs::JsRuntimeOptions,
     /// Optional bounded executor for script concurrency control.
     /// When present, `execute_js` acquires a permit before running. Direct sync
     /// callers use a non-blocking permit check; async callers should use
@@ -125,10 +127,18 @@ impl AgentCell {
             shell_cwd: Mutex::new("/".to_string()),
             vfs_mutation_lock: Mutex::new(()),
             js_runtime: SendableJsRuntime::new(),
+            js_options: simulacra_quickjs::JsRuntimeOptions::default(),
             script_executor: None,
             integration_registry: None,
             tenant_integrations: vec![],
         }
+    }
+
+    /// Give JS evaluations a `tools` host, a timeout, and heap and console caps.
+    /// Drops the cached runtime so the next evaluation is built with them.
+    pub fn set_js_options(&mut self, options: simulacra_quickjs::JsRuntimeOptions) {
+        self.js_options = options;
+        self.js_runtime = SendableJsRuntime::new();
     }
 
     /// Set the script executor for bounded concurrency control.

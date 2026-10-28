@@ -19,7 +19,7 @@ mod runtime;
 use rquickjs::Error;
 
 pub use host_api::{JsError, JsHostApiProfile, JsOutput, install_workflow_api_restrictions};
-pub use runtime::JsRuntime;
+pub use runtime::{BoxFuture, JsHost, JsRuntime, JsRuntimeOptions};
 
 /// Error reported by JS filesystem host functions when no capability-checking
 /// proxy has been installed.
