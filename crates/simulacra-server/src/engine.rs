@@ -1845,7 +1845,8 @@ impl SimulacraEngine {
                         provider_factory_for_worker.as_ref().map(|factory| {
                             let factory = Arc::clone(factory);
                             Arc::new(
-                                move |provider_kind: &simulacra_runtime::ProviderKind,
+                                move |_spawn: &simulacra_runtime::SpawnConfig,
+                                      provider_kind: &simulacra_runtime::ProviderKind,
                                       model: &str| {
                                     let provider_kind = engine_provider_kind(provider_kind);
                                     factory(provider_kind, model).map_err(|error| {

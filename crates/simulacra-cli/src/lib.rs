@@ -2451,7 +2451,7 @@ task = "bootstrap"
                 .take()
                 .expect("allowed child placement should create supervisor receiver");
             let child_provider_factory: simulacra_runtime::ChildProviderFactory =
-                Arc::new(|_, _| {
+                Arc::new(|_, _, _| {
                     Ok(Box::new(scripted_provider([response(
                         assistant("child completed"),
                         FinishReason::EndTurn,
@@ -2839,7 +2839,7 @@ task = "bootstrap"
                 .expect("allowed_child_placements should create the supervisor sender");
             let journal: Arc<dyn JournalStorage> = Arc::new(InMemoryJournalStorage::new());
             let child_provider_factory: simulacra_runtime::ChildProviderFactory =
-                Arc::new(|_, _| {
+                Arc::new(|_, _, _| {
                     Ok(Box::new(scripted_provider_with_costs(
                         [response_with_usage(
                             assistant("child complete"),

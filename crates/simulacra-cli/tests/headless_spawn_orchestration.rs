@@ -275,7 +275,7 @@ fn headless_spawn_wait_join_close_can_use_injected_child_provider_factory() {
     let child_factory_calls = Arc::new(AtomicUsize::new(0));
     let child_factory: ChildProviderFactory = {
         let calls = Arc::clone(&child_factory_calls);
-        Arc::new(move |_provider_kind, _model| {
+        Arc::new(move |_spawn, _provider_kind, _model| {
             calls.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ScriptedProvider::new(vec![final_response(
                 "child finding: fixture inspected offline",

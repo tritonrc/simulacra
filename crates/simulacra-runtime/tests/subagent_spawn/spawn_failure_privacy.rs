@@ -483,7 +483,7 @@ async fn s060_a41_real_native_provider_chat_failure_is_bounded_after_running_ack
         capability.clone(),
         vfs,
         Arc::clone(&journal),
-        Some(Arc::new(move |_kind, _model| {
+        Some(Arc::new(move |_spawn, _kind, _model| {
             provider_constructions_for_factory.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(S060PrivacyChatFailureProvider {
                 calls: Arc::clone(&provider_calls_for_factory),
@@ -580,7 +580,7 @@ async fn s060_a41_real_native_skill_discovery_failure_hides_configured_skill_nam
         capability.clone(),
         Arc::new(MemoryFs::new()),
         Arc::clone(&journal),
-        Some(Arc::new(move |_kind, _model| {
+        Some(Arc::new(move |_spawn, _kind, _model| {
             provider_constructions_for_factory.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeProvider::new(Vec::new())))
         })),

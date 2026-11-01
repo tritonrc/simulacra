@@ -31,7 +31,7 @@ skill_patterns = ["skill:missing-native-skill"]
     parent_capability.skill_patterns = vec!["skill:missing-native-skill".into()];
     let mut factory = s060_real_task_factory(config);
     factory.parent_capability = parent_capability;
-    factory.child_provider_factory = Some(Arc::new(|_kind, _model| {
+    factory.child_provider_factory = Some(Arc::new(|_spawn, _kind, _model| {
         Ok(Box::new(FakeProvider::new(Vec::new())))
     }));
 
@@ -226,7 +226,7 @@ async fn s060_a30_concurrent_invalid_placements_have_zero_accepted_effects() {
         script_executor: None,
         child_cell_configurator: None,
         child_tool_registrar: None,
-        child_provider_factory: Some(Arc::new(move |_kind, _model| {
+        child_provider_factory: Some(Arc::new(move |_spawn, _kind, _model| {
             provider_constructions_for_factory.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeProvider::new(Vec::new())))
         })),

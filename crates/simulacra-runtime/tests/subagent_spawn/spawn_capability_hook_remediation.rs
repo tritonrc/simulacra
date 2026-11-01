@@ -184,7 +184,7 @@ async fn s060_a26_a27_a36_nested_spawn_uses_immediate_callers_effective_capabili
                 .push(cell.capability.clone());
         })),
         child_tool_registrar: None,
-        child_provider_factory: Some(Arc::new(|_, model| {
+        child_provider_factory: Some(Arc::new(|_, _, model| {
             assert_eq!(model, "middle-model");
             Ok(Box::new(
                 FakeProvider::new(s060_middle_provider_responses()),
@@ -589,7 +589,7 @@ async fn s060_capture_final_memory_capabilities(
                     .push(cell.capability.clone());
             })),
             child_tool_registrar: None,
-            child_provider_factory: Some(Arc::new(|_, _| {
+            child_provider_factory: Some(Arc::new(|_, _, _| {
                 Ok(Box::new(FakeProvider::new(vec![ProviderResponse {
                     message: Message {
                         role: Role::Assistant,

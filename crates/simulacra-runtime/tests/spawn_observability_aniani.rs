@@ -628,7 +628,9 @@ async fn s060_a42_live_run_exports_native_and_acp_telemetry_without_secret_label
         script_executor: None,
         child_cell_configurator: None,
         child_tool_registrar: None,
-        child_provider_factory: Some(Arc::new(|_kind, _model| Ok(Box::new(ChildProvider)))),
+        child_provider_factory: Some(Arc::new(|_spawn, _kind, _model| {
+            Ok(Box::new(ChildProvider))
+        })),
         child_environment_provider: None,
         acp_child_runtime: Some(Arc::new(RecordingAcpRuntime {
             requests: Arc::clone(&acp_requests),
@@ -811,7 +813,7 @@ async fn s060_a42_live_run_exports_native_and_acp_telemetry_without_secret_label
         script_executor: None,
         child_cell_configurator: None,
         child_tool_registrar: None,
-        child_provider_factory: Some(Arc::new(move |_kind, _model| {
+        child_provider_factory: Some(Arc::new(move |_spawn, _kind, _model| {
             Ok(Box::new(FailingChildProvider {
                 error: provider_error_for_factory.clone(),
             }) as Box<dyn Provider>)
