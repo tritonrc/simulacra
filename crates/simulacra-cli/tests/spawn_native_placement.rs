@@ -279,7 +279,7 @@ paths_read = ["/workspace/**"]
     let observed = Arc::new(Mutex::new(None));
     let child_factory: ChildProviderFactory = {
         let observed = Arc::clone(&observed);
-        Arc::new(move |_kind, _model| {
+        Arc::new(move |_spawn, _kind, _model| {
             let observed = Arc::clone(&observed);
             Ok(Box::new(ClosureProvider::new(
                 move |call, messages, _tools| match call {
@@ -412,7 +412,7 @@ fn native_placement_preserves_shaping_and_task_while_capabilities_control_tools_
     let observed_denial = Arc::new(Mutex::new(false));
     let child_factory: ChildProviderFactory = {
         let observed_denial = Arc::clone(&observed_denial);
-        Arc::new(move |_kind, _model| {
+        Arc::new(move |_spawn, _kind, _model| {
             let observed_denial = Arc::clone(&observed_denial);
             Ok(Box::new(ClosureProvider::new(
                 move |call, messages, tools| match call {
@@ -508,7 +508,7 @@ fn native_placement_without_instructions_uses_default_prompt() {
     let child_provider_calls = Arc::new(AtomicUsize::new(0));
     let child_factory: ChildProviderFactory = {
         let child_provider_calls = Arc::clone(&child_provider_calls);
-        Arc::new(move |_kind, _model| {
+        Arc::new(move |_spawn, _kind, _model| {
             let child_provider_calls = Arc::clone(&child_provider_calls);
             Ok(Box::new(ClosureProvider::new(
                 move |call, messages, _tools| {
@@ -603,7 +603,7 @@ allowed_child_placements = []
         let saw_spawn_tool = Arc::new(Mutex::new(None));
         let child_factory: ChildProviderFactory = {
             let saw_spawn_tool = Arc::clone(&saw_spawn_tool);
-            Arc::new(move |_kind, _model| {
+            Arc::new(move |_spawn, _kind, _model| {
                 let saw_spawn_tool = Arc::clone(&saw_spawn_tool);
                 Ok(Box::new(ClosureProvider::new(
                     move |call, _messages, tools| {
@@ -660,7 +660,7 @@ fn native_parallel_spawns_reserve_one_child_atomically() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let child_factory: ChildProviderFactory = {
         let factory_calls = Arc::clone(&factory_calls);
-        Arc::new(move |_kind, _model| {
+        Arc::new(move |_spawn, _kind, _model| {
             factory_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ClosureProvider::new(|call, _messages, _tools| {
                 if call == 0 {
@@ -759,7 +759,7 @@ fn concurrent_unknown_and_unauthorized_placements_have_no_accepted_effects() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let child_factory: ChildProviderFactory = {
         let factory_calls = Arc::clone(&factory_calls);
-        Arc::new(move |_kind, _model| {
+        Arc::new(move |_spawn, _kind, _model| {
             factory_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ClosureProvider::new(|call, _messages, _tools| {
                 if call == 0 {
@@ -842,7 +842,7 @@ fn empty_effective_placement_list_denies_every_spawn_call() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let child_factory: ChildProviderFactory = {
         let factory_calls = Arc::clone(&factory_calls);
-        Arc::new(move |_kind, _model| {
+        Arc::new(move |_spawn, _kind, _model| {
             factory_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ClosureProvider::new(|_, _, _| {
                 Ok(final_response("unexpected child"))
@@ -924,7 +924,7 @@ allowed_child_placements = []
         &base_config(&["middle_native", "leaf_native"], placements, 1),
         &[],
     );
-    let child_factory: ChildProviderFactory = Arc::new(move |_kind, model| match model {
+    let child_factory: ChildProviderFactory = Arc::new(move |_spawn, _kind, model| match model {
         "middle-model" => Ok(Box::new(ClosureProvider::new(
             move |call, messages, tools| match call {
                 0 => {

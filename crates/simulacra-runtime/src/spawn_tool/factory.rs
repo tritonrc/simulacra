@@ -259,6 +259,7 @@ impl crate::TaskFactory for AgentTaskFactory {
             };
             let provider = build_child_provider(
                 child_provider_factory.as_ref(),
+                &spawn_config,
                 &provider_kind,
                 &child_config.model,
             )?;
@@ -401,11 +402,12 @@ where
 
 fn build_child_provider(
     child_provider_factory: Option<&ChildProviderFactory>,
+    spawn_config: &SpawnConfig,
     provider_kind: &ProviderKind,
     model: &str,
 ) -> Result<Box<dyn Provider>, RuntimeError> {
     match child_provider_factory {
-        Some(factory) => factory(provider_kind, model),
+        Some(factory) => factory(spawn_config, provider_kind, model),
         None => build_provider(provider_kind, model),
     }
 }

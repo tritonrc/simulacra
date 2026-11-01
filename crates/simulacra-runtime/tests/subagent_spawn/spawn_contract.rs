@@ -478,7 +478,7 @@ model = "root-model"
     let (sender, receiver) = tokio::sync::mpsc::channel(4);
     let mut task_factory = s060_real_task_factory(stale_config);
     task_factory.supervisor_sender = Some(sender.clone());
-    task_factory.child_provider_factory = Some(Arc::new(move |_kind, _model| {
+    task_factory.child_provider_factory = Some(Arc::new(move |_spawn, _kind, _model| {
         provider_constructions_for_factory.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(S060CatalogCapturingProvider {
             captured: Arc::new(Mutex::new(Vec::new())),
@@ -674,7 +674,7 @@ model = "leaf-model"
     let (sender, _receiver) = tokio::sync::mpsc::channel(1);
     let mut factory = s060_real_task_factory(config);
     factory.supervisor_sender = Some(sender);
-    factory.child_provider_factory = Some(Arc::new(move |_kind, _model| {
+    factory.child_provider_factory = Some(Arc::new(move |_spawn, _kind, _model| {
         Ok(Box::new(S060CatalogCapturingProvider {
             captured: Arc::clone(&captured_for_provider),
         }))

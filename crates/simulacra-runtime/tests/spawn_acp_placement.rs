@@ -295,7 +295,7 @@ fn acp_harness(
                 .fetch_add(1, Ordering::SeqCst);
             Ok(())
         })),
-        child_provider_factory: Some(Arc::new(move |_kind, _model| {
+        child_provider_factory: Some(Arc::new(move |_spawn, _kind, _model| {
             provider_probe
                 .provider_constructions
                 .fetch_add(1, Ordering::SeqCst);

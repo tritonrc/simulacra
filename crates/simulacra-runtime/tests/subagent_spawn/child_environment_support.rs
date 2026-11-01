@@ -181,7 +181,7 @@ fn child_env_harness_with_config(
         child_cell_configurator: None,
         child_tool_registrar: None,
         child_environment_provider: provider,
-        child_provider_factory: Some(Arc::new(move |_kind, _model| {
+        child_provider_factory: Some(Arc::new(move |_spawn, _kind, _model| {
             let index = constructed.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(ChildEnvScriptedProvider {
                 responses: Mutex::new(script(index)),

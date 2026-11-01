@@ -57,6 +57,18 @@ fn child_cell_identity_harness(
     child_cell_configurator: Option<simulacra_runtime::ChildCellConfigurator>,
     child_tool_registrar: Option<simulacra_runtime::ChildToolRegistrar>,
 ) -> ChildCellIdentityHarness {
+    child_cell_identity_harness_with_provider_factory(
+        child_cell_configurator,
+        child_tool_registrar,
+        Arc::new(|_spawn, _kind, _model| Ok(Box::new(completing_native_child_provider()))),
+    )
+}
+
+fn child_cell_identity_harness_with_provider_factory(
+    child_cell_configurator: Option<simulacra_runtime::ChildCellConfigurator>,
+    child_tool_registrar: Option<simulacra_runtime::ChildToolRegistrar>,
+    child_provider_factory: simulacra_runtime::ChildProviderFactory,
+) -> ChildCellIdentityHarness {
     let capability = child_cell_identity_capability();
     let journal = Arc::new(InMemoryJournalStorage::new());
     let vfs: Arc<dyn VirtualFs> = Arc::new(MemoryFs::new());
@@ -76,9 +88,7 @@ fn child_cell_identity_harness(
         script_executor: None,
         child_cell_configurator,
         child_tool_registrar,
-        child_provider_factory: Some(Arc::new(|_kind, _model| {
-            Ok(Box::new(completing_native_child_provider()))
-        })),
+        child_provider_factory: Some(child_provider_factory),
         child_environment_provider: None,
         acp_child_runtime: None,
     });

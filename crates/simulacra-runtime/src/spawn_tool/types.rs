@@ -42,12 +42,16 @@ pub type ChildEnvironmentProvider = Arc<
 
 /// Creates a fresh provider for each spawned child agent.
 ///
-/// The factory receives the resolved provider kind and model for the child.
+/// The factory receives the child's spawn config (so a host can tell which
+/// child a provider serves) and the resolved provider kind and model.
 /// Production callers leave this unset and use the runtime's normal provider
 /// adapter; headless harnesses can inject scripted providers for offline child
 /// orchestration tests.
-pub type ChildProviderFactory =
-    Arc<dyn Fn(&ProviderKind, &str) -> Result<Box<dyn Provider>, RuntimeError> + Send + Sync>;
+pub type ChildProviderFactory = Arc<
+    dyn Fn(&SpawnConfig, &ProviderKind, &str) -> Result<Box<dyn Provider>, RuntimeError>
+        + Send
+        + Sync,
+>;
 
 // ---------------------------------------------------------------------------
 // ProviderKind
