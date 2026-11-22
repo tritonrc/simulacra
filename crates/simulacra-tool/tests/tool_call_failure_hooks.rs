@@ -12,10 +12,24 @@ struct ScriptedTool {
     name: &'static str,
     outcome: Mutex<Option<ToolResult>>,
     owns_hooks: bool,
+    null_hook_input: bool,
+    received_arguments: Option<Arc<Mutex<Option<Value>>>>,
 }
 
 type ToolResult = Result<Value, ToolError>;
 type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
+
+impl ScriptedTool {
+    fn new(name: &'static str, outcome: ToolResult, owns_hooks: bool) -> Self {
+        Self {
+            name,
+            outcome: Mutex::new(Some(outcome)),
+            owns_hooks,
+            null_hook_input: false,
+            received_arguments: None,
+        }
+    }
+}
 
 impl Tool for ScriptedTool {
     fn definition(&self) -> ToolDefinition {
@@ -26,8 +40,19 @@ impl Tool for ScriptedTool {
         }
     }
 
-    fn call(&self, _arguments: Value, _capability: &CapabilityToken) -> ToolFuture<'_> {
+    fn call(&self, arguments: Value, _capability: &CapabilityToken) -> ToolFuture<'_> {
+        if let Some(received) = &self.received_arguments {
+            *received.lock().unwrap() = Some(arguments);
+        }
         Box::pin(ready(self.outcome.lock().unwrap().take().unwrap()))
+    }
+
+    fn hook_input_payload(&self, name: &str, arguments: &Value) -> Value {
+        if self.null_hook_input {
+            json!(null)
+        } else {
+            json!({"tool": name, "arguments": arguments})
+        }
     }
 
     fn handles_own_hooks(&self) -> bool {
@@ -74,34 +99,37 @@ fn register(
     owns_hooks: bool,
 ) {
     registry
-        .register(Box::new(ScriptedTool {
-            name,
-            outcome: Mutex::new(Some(outcome)),
-            owns_hooks,
-        }))
+        .register(Box::new(ScriptedTool::new(name, outcome, owns_hooks)))
         .unwrap();
 }
 
 fn registry(error: ToolError, owns_hooks: bool, hooks: &[&Arc<RecordingHook>]) -> ToolRegistry {
+    let mut registry = hooked_registry(hooks);
+    register(&mut registry, "failing", Err(error), owns_hooks);
+    registry
+}
+
+fn hooked_registry(hooks: &[&Arc<RecordingHook>]) -> ToolRegistry {
     let mut pipeline = HookPipeline::new();
     for hook in hooks {
         pipeline.add(Operation::ToolCall, (*hook).clone());
     }
     let mut registry = ToolRegistry::new();
     registry.set_pipeline(Arc::new(pipeline));
-    register(&mut registry, "failing", Err(error), owns_hooks);
     registry
 }
 
 fn call(registry: &ToolRegistry, name: &str) -> ToolError {
-    let arguments = json!({"input": "original"});
+    call_with_arguments(registry, name, json!({"input": "original"}))
+        .expect_err("the caller must receive a tool error")
+}
+
+fn call_with_arguments(registry: &ToolRegistry, name: &str, arguments: Value) -> ToolResult {
     let token = CapabilityToken::default();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
-    runtime
-        .block_on(registry.call(name, arguments, &token))
-        .expect_err("the caller must receive a tool error")
+    runtime.block_on(registry.call(name, arguments, &token))
 }
 
 #[track_caller]
@@ -296,4 +324,92 @@ fn before_hook_denial_skips_the_after_chain() {
     let expected = ToolError::ExecutionFailed("hook denied tool call: blocked by test".into());
     assert_error(actual, &expected, "before-hook denial");
     assert!(hook.after_calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn after_hook_sees_failure_context_with_custom_tool_payload() {
+    let hook = Arc::new(RecordingHook::new(|_| Verdict::Continue(None)));
+    let mut registry = hooked_registry(&[&hook]);
+    registry
+        .register(Box::new(ScriptedTool {
+            null_hook_input: true,
+            ..ScriptedTool::new("failing", Err(execution_failure()), false)
+        }))
+        .unwrap();
+
+    let actual = call(&registry, "failing");
+    assert_error(actual, &execution_failure(), "tool's own failure");
+    let expected = json!({
+        "tool": "failing",
+        "arguments": {"input": "original"},
+        "error": {"kind": "execution_failed", "detail": "disk unavailable"}
+    });
+    assert_eq!(
+        &*hook.after_calls.lock().unwrap(),
+        &[expected],
+        "after-hook must receive the full failure context"
+    );
+}
+
+#[test]
+fn after_hook_changes_the_failure_kind_and_text() {
+    let hook = Arc::new(RecordingHook::new(|mut context| {
+        context["error"] = json!({"kind": "invalid_arguments", "detail": "choose another path"});
+        amended(context)
+    }));
+    let registry = registry(execution_failure(), false, &[&hook]);
+    let expected = ToolError::InvalidArguments("choose another path".into());
+    assert_error(call(&registry, "failing"), &expected, "replaced tool error");
+}
+
+#[test]
+fn after_hook_returning_invalid_json_preserves_the_tool_error() {
+    assert_failure_survives(
+        |_| Verdict::Continue(Some("not json".into())),
+        "invalid JSON must preserve the tool error",
+    );
+}
+
+fn number_changed_by_json_text() -> Value {
+    let number = json!(51.248178375505404_f64);
+    assert_ne!(
+        serde_json::from_str::<Value>(&number.to_string()).unwrap(),
+        number
+    );
+    number
+}
+
+#[test]
+fn unchanged_hook_context_preserves_the_tool_result() {
+    let expected = json!({"measurement": number_changed_by_json_text()});
+    let hook = Arc::new(RecordingHook::new(|_| Verdict::Continue(None)));
+    let mut registry = hooked_registry(&[&hook]);
+    register(&mut registry, "succeeding", Ok(expected.clone()), false);
+
+    let actual = call_with_arguments(&registry, "succeeding", json!({})).unwrap();
+    assert_eq!(
+        actual, expected,
+        "caller must receive the exact tool result"
+    );
+}
+
+#[test]
+fn unchanged_hook_context_preserves_the_tool_arguments() {
+    let arguments = json!({"measurement": number_changed_by_json_text()});
+    let received = Arc::new(Mutex::new(None));
+    let hook = Arc::new(RecordingHook::new(|_| Verdict::Continue(None)));
+    let mut registry = hooked_registry(&[&hook]);
+    registry
+        .register(Box::new(ScriptedTool {
+            received_arguments: Some(received.clone()),
+            ..ScriptedTool::new("succeeding", Ok(json!("ok")), false)
+        }))
+        .unwrap();
+
+    call_with_arguments(&registry, "succeeding", arguments.clone()).unwrap();
+    assert_eq!(
+        received.lock().unwrap().as_ref(),
+        Some(&arguments),
+        "tool must receive the exact call arguments"
+    );
 }

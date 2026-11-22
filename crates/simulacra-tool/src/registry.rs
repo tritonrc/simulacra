@@ -336,13 +336,11 @@ impl ToolRegistry {
             {
                 let after_ctx = match &result {
                     Ok(value) => tool.tool.hook_output_payload(name, &effective_args, value),
-                    Err(err) => {
-                        let mut payload = tool.tool.hook_input_payload(name, &effective_args);
-                        if let Some(members) = payload.as_object_mut() {
-                            members.insert("error".into(), serde_json::json!(err));
-                        }
-                        payload
-                    }
+                    Err(err) => serde_json::json!({
+                        "tool": name,
+                        "arguments": effective_args,
+                        "error": err,
+                    }),
                 }
                 .to_string();
                 result = match pipeline.run_after(Operation::ToolCall, &after_ctx) {
