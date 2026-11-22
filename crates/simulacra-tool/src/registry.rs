@@ -292,16 +292,16 @@ impl ToolRegistry {
             // the generic before/after wrapping so hooks do not fire twice.
             let tool_owns_hooks = tool.tool.handles_own_hooks();
 
-            // --- BEFORE hook ---
             let effective_args = if let Some(ref pipeline) = self.pipeline
                 && !tool_owns_hooks
             {
                 let before_ctx = tool.tool.hook_input_payload(name, &arguments).to_string();
                 match pipeline.run_before(Operation::ToolCall, &before_ctx) {
                     Ok((verdict, modified_ctx)) => match verdict {
+                        simulacra_hooks::Verdict::Continue(_) if modified_ctx == before_ctx => {
+                            arguments
+                        }
                         simulacra_hooks::Verdict::Continue(_) => {
-                            // If the hook modified the context, extract the
-                            // updated arguments from it.
                             if let Ok(parsed) = serde_json::from_str::<Value>(&modified_ctx) {
                                 tool.tool.arguments_from_hook_input(arguments, &parsed)
                             } else {
@@ -338,7 +338,9 @@ impl ToolRegistry {
                     Ok(value) => tool.tool.hook_output_payload(name, &effective_args, value),
                     Err(err) => {
                         let mut payload = tool.tool.hook_input_payload(name, &effective_args);
-                        payload["error"] = serde_json::json!(err);
+                        if let Some(members) = payload.as_object_mut() {
+                            members.insert("error".into(), serde_json::json!(err));
+                        }
                         payload
                     }
                 }
