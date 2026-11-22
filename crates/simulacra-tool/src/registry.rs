@@ -292,16 +292,16 @@ impl ToolRegistry {
             // the generic before/after wrapping so hooks do not fire twice.
             let tool_owns_hooks = tool.tool.handles_own_hooks();
 
-            // --- BEFORE hook ---
             let effective_args = if let Some(ref pipeline) = self.pipeline
                 && !tool_owns_hooks
             {
                 let before_ctx = tool.tool.hook_input_payload(name, &arguments).to_string();
                 match pipeline.run_before(Operation::ToolCall, &before_ctx) {
                     Ok((verdict, modified_ctx)) => match verdict {
+                        simulacra_hooks::Verdict::Continue(_) if modified_ctx == before_ctx => {
+                            arguments
+                        }
                         simulacra_hooks::Verdict::Continue(_) => {
-                            // If the hook modified the context, extract the
-                            // updated arguments from it.
                             if let Ok(parsed) = serde_json::from_str::<Value>(&modified_ctx) {
                                 tool.tool.arguments_from_hook_input(arguments, &parsed)
                             } else {
@@ -329,50 +329,45 @@ impl ToolRegistry {
                 arguments
             };
 
-            // --- EXECUTE ---
-            let result = tool.tool.call(effective_args.clone(), capability).await;
+            let mut result = tool.tool.call(effective_args.clone(), capability).await;
 
-            // --- AFTER hook ---
-            match result {
-                Ok(result_value) => {
-                    if let Some(ref pipeline) = self.pipeline
-                        && !tool_owns_hooks
-                    {
-                        let after_ctx = tool
-                            .tool
-                            .hook_output_payload(name, &effective_args, &result_value)
-                            .to_string();
-                        match pipeline.run_after(Operation::ToolCall, &after_ctx) {
-                            Ok((_verdict, modified_ctx)) => {
-                                // Extract possibly-modified result
-                                let final_result = if let Ok(parsed) =
-                                    serde_json::from_str::<Value>(&modified_ctx)
-                                {
-                                    tool.tool.result_from_hook_output(result_value, &parsed)
-                                } else {
-                                    result_value
-                                };
-                                let output = tool.tool.output_from_value(final_result.clone());
-                                emit_tool_result_event(name, &output);
-                                Ok(final_result)
+            if let Some(ref pipeline) = self.pipeline
+                && !tool_owns_hooks
+            {
+                let after_ctx = match &result {
+                    Ok(value) => tool.tool.hook_output_payload(name, &effective_args, value),
+                    Err(err) => serde_json::json!({
+                        "tool": name,
+                        "arguments": effective_args,
+                        "error": err,
+                    }),
+                }
+                .to_string();
+                result = match pipeline.run_after(Operation::ToolCall, &after_ctx) {
+                    Ok((_verdict, modified_ctx)) if modified_ctx == after_ctx => result,
+                    Ok((_verdict, modified_ctx)) => {
+                        match (serde_json::from_str::<Value>(&modified_ctx), result) {
+                            (Ok(parsed), Ok(value)) => {
+                                Ok(tool.tool.result_from_hook_output(value, &parsed))
                             }
-                            Err(e) => {
-                                let err = ToolError::ExecutionFailed(format!("hook error: {e}"));
-                                emit_tool_error_event(name, &err);
-                                Err(err)
-                            }
+                            (Ok(parsed), Err(err)) => Err(parsed
+                                .get("error")
+                                .and_then(|amended| serde_json::from_value(amended.clone()).ok())
+                                .unwrap_or(err)),
+                            (Err(_), result) => result,
                         }
-                    } else {
-                        let output = tool.tool.output_from_value(result_value.clone());
-                        emit_tool_result_event(name, &output);
-                        Ok(result_value)
                     }
-                }
-                Err(err) => {
-                    emit_tool_error_event(name, &err);
-                    Err(err)
-                }
+                    Err(e) => Err(ToolError::ExecutionFailed(format!("hook error: {e}"))),
+                };
             }
+
+            match &result {
+                Ok(value) => {
+                    emit_tool_result_event(name, &tool.tool.output_from_value(value.clone()))
+                }
+                Err(err) => emit_tool_error_event(name, err),
+            }
+            result
         }
         .instrument(span)
     }

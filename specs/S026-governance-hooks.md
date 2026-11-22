@@ -162,7 +162,12 @@ Each operation type passes a JSON context. Content varies by phase:
 
 **`tool_call`:**
 - Before: `{"tool": "shell_exec", "arguments": {"command": "git push"}}`
-- After: `{"tool": "shell_exec", "arguments": {"command": "git push"}, "result": "..."}`
+- After, when the tool succeeded: `{"tool": "shell_exec", "arguments": {"command": "git push"}, "result": "..."}`
+- After, when the tool failed: `{"tool": "shell_exec", "arguments": {"command": "git push"}, "error": {"kind": "execution_failed", "detail": "..."}}`
+
+`error` is the `ToolError` the caller would receive. `kind` is `invalid_arguments`,
+`execution_failed` or `capability_denied`. `detail` is the message, or
+`{"operation": "...", "reason": "..."}` for `capability_denied`.
 
 **`llm`:**
 - Before: `{"model": "claude-sonnet-4-6", "message_count": 12}`
@@ -285,6 +290,16 @@ simulacra-types (leaf)
 ### Integration
 
 24. `ToolRegistry::call()` wraps tool invocations through the pipeline's `tool_call` chain.
+    A call the tool failed runs the after-chain too, with `error` in place of `result` and the
+    arguments the tool was called with. The caller receives the `error` the chain returns, so a
+    hook may amend a failure, its kind included. A hook cannot turn a failure into a success:
+    when the returned context has no `error` that reads as a `ToolError`, the tool's own failure
+    stands. The failure context is always `{"tool", "arguments", "error"}`, whatever payloads the
+    tool defines for its other hook contexts. A call a before-hook denied, a call to an unknown
+    tool, and a tool that owns its hooks run no generic after-chain.
+
+    When a chain returns the context it was given, the arguments reach the tool and the result
+    or error reaches the caller as they were, with no round trip through the context text.
 25. Agent loop wraps `provider.chat()` through the pipeline's `llm` chain.
 26. `SpawnAgentTool::call()` wraps spawn through the pipeline's `spawn` chain.
 27. `UreqHttpClient::request()` wraps HTTP through the pipeline's `http_request` chain.
@@ -339,6 +354,17 @@ simulacra-types (leaf)
 - [x] `UreqHttpClient::request()` runs `http_request` hook chain around outbound HTTP.
 - [x] `Kill` verdict propagates to agent loop and terminates with `exit_reason: "PolicyKill"`.
 - [x] Denied tool calls return `ToolError::ExecutionFailed` with the denial reason.
+- [x] A failed tool call runs the `tool_call` after-chain with `{"tool", "arguments", "error"}`, for each `ToolError` kind, and carries the arguments a before-hook rewrote.
+- [x] A failed tool call no after-hook changed returns the tool's own `ToolError`, kind and text unchanged.
+- [x] An after-hook that returns a changed `error` changes the `ToolError` the caller receives.
+- [x] An after-hook that removes `error`, adds a `result`, or returns an `error` that is not a `ToolError` leaves the tool's own failure in place.
+- [x] `Kill` in the after-phase of a failed tool call returns the same hook error as on a successful one.
+- [x] A failed call to a tool that owns its hooks runs no generic after-chain.
+- [x] A call a before-hook denied runs no after-chain.
+- [x] A failed call to a tool that defines its own hook payloads still runs the after-chain with `{"tool", "arguments", "error"}`.
+- [x] An after-hook may change the kind of a failure.
+- [x] An after-hook that returns text that is not JSON leaves the tool's own failure in place.
+- [x] A call whose chain returns the context unchanged passes the arguments to the tool and the result to the caller exactly as they were, including a number that does not survive a round trip through JSON text.
 
 ### Config
 
