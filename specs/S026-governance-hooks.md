@@ -258,7 +258,7 @@ simulacra-types (leaf)
 ### Pipeline execution
 
 1. `HookPipeline::wrap()` runs the before-chain in config order.
-2. If a before-hook returns `Deny`, the operation does not execute. `HookError::Denied` is returned.
+2. If a before-hook returns `Deny`, the operation does not execute. `run_before_attributed` returns the `Deny` verdict and the name of the hook that gave it.
 3. If a before-hook returns `Kill`, the operation does not execute. `HookError::Killed` is returned.
 4. If a before-hook returns `Continue` with modified context, the modified context is passed to the next hook and to the operation.
 5. After all before-hooks pass, the operation executes.
@@ -284,7 +284,7 @@ simulacra-types (leaf)
 19. Before calling JS `invoke`, a wall-clock deadline is set.
 20. QuickJS interrupt callback checks the deadline periodically.
 21. If the deadline passes, JS execution is terminated.
-22. Timeout is treated as `Deny` with reason `"hook timeout after {timeout_ms}ms"`. Fail closed.
+22. A before-hook timeout is treated as `Deny` with reason `"hook timeout after {timeout_ms}ms (fail closed)"`. Fail closed.
 23. Default timeout is 100ms if not configured.
 
 ### Integration
@@ -297,6 +297,13 @@ simulacra-types (leaf)
     stands. The failure context is always `{"tool", "arguments", "error"}`, whatever payloads the
     tool defines for its other hook contexts. A call a before-hook denied, a call to an unknown
     tool, and a tool that owns its hooks run no generic after-chain.
+
+    A call a before-hook denied fails with `ToolError::ExecutionFailed` whose message is the
+    denial reason with nothing added: the hook's reason as the hook wrote it, or the pipeline's
+    timeout text for a hook that timed out. The model reads that message inside the error's own
+    `execution failed: ` framing, so its wording belongs to the hook's author. The registry logs
+    the denial once, at ERROR, as `hook denied tool call` with the tool's name, the hook's name
+    and the error, so a denial can be told from a tool's own failure without reading the message.
 
     When a chain returns the context it was given, the arguments reach the tool and the result
     or error reaches the caller as they were, with no round trip through the context text.
@@ -353,7 +360,7 @@ simulacra-types (leaf)
 - [x] `SpawnAgentTool::call()` runs `spawn` hook chain around child agent execution.
 - [x] `UreqHttpClient::request()` runs `http_request` hook chain around outbound HTTP.
 - [x] `Kill` verdict propagates to agent loop and terminates with `exit_reason: "PolicyKill"`.
-- [x] Denied tool calls return `ToolError::ExecutionFailed` with the denial reason.
+- [x] Denied tool calls return `ToolError::ExecutionFailed` whose message is the denial reason, with nothing added.
 - [x] A failed tool call runs the `tool_call` after-chain with `{"tool", "arguments", "error"}`, for each `ToolError` kind, and carries the arguments a before-hook rewrote.
 - [x] A failed tool call no after-hook changed returns the tool's own `ToolError`, kind and text unchanged.
 - [x] An after-hook that returns a changed `error` changes the `ToolError` the caller receives.
@@ -388,4 +395,5 @@ simulacra-types (leaf)
 - [x] `simulacra.hooks.timeouts` counter with `hook`, `operation` labels.
 - [x] `tracing::info!` on deny or kill with reason.
 - [x] `tracing::warn!` on timeout (treated as deny).
+- [x] A denied tool call logs one ERROR event `hook denied tool call` with `gen_ai.tool.name`, `simulacra.hook.name` and `error`, and no `tool error` event.
 - [x] `tracing::debug!` on each hook invocation.
