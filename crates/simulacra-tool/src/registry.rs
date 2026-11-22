@@ -296,8 +296,8 @@ impl ToolRegistry {
                 && !tool_owns_hooks
             {
                 let before_ctx = tool.tool.hook_input_payload(name, &arguments).to_string();
-                match pipeline.run_before(Operation::ToolCall, &before_ctx) {
-                    Ok((verdict, modified_ctx)) => match verdict {
+                match pipeline.run_before_attributed(Operation::ToolCall, &before_ctx) {
+                    Ok((verdict, modified_ctx, hook)) => match verdict {
                         simulacra_hooks::Verdict::Continue(_) if modified_ctx == before_ctx => {
                             arguments
                         }
@@ -309,10 +309,13 @@ impl ToolRegistry {
                             }
                         }
                         simulacra_hooks::Verdict::Deny(reason) => {
-                            let err = ToolError::ExecutionFailed(format!(
-                                "hook denied tool call: {reason}"
-                            ));
-                            emit_tool_error_event(name, &err);
+                            let err = ToolError::ExecutionFailed(reason);
+                            tracing::error!(
+                                gen_ai.tool.name = name,
+                                simulacra.hook.name = hook.as_deref().unwrap_or_default(),
+                                error = %err,
+                                "hook denied tool call"
+                            );
                             return Err(err);
                         }
                         simulacra_hooks::Verdict::Kill(_) => {

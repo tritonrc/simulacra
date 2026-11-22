@@ -92,6 +92,25 @@ impl HookModule for RecordingHook {
     }
 }
 
+struct TimeoutHook {
+    timeout_ms: u64,
+}
+
+impl HookModule for TimeoutHook {
+    fn name(&self) -> &str {
+        "timeout"
+    }
+
+    fn invoke(&self, phase: Phase, op: Operation, _context: &str) -> Result<Verdict, HookError> {
+        assert_eq!(phase, Phase::Before);
+        assert_eq!(op, Operation::ToolCall);
+        Err(HookError::Timeout {
+            hook: self.name().into(),
+            timeout_ms: self.timeout_ms,
+        })
+    }
+}
+
 fn register(
     registry: &mut ToolRegistry,
     name: &'static str,
@@ -319,11 +338,54 @@ fn before_hook_denial_skips_the_after_chain() {
         before: |_| Verdict::Deny("blocked by test".into()),
         ..RecordingHook::new(kill)
     });
-    let registry = registry(execution_failure(), false, &[&hook]);
+    let received = Arc::new(Mutex::new(None));
+    let mut registry = hooked_registry(&[&hook]);
+    registry
+        .register(Box::new(ScriptedTool {
+            received_arguments: Some(received.clone()),
+            ..ScriptedTool::new("failing", Err(execution_failure()), false)
+        }))
+        .unwrap();
     let actual = call(&registry, "failing");
-    let expected = ToolError::ExecutionFailed("hook denied tool call: blocked by test".into());
+    let expected = ToolError::ExecutionFailed("blocked by test".into());
     assert_error(actual, &expected, "before-hook denial");
+    assert!(received.lock().unwrap().is_none());
     assert!(hook.after_calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn before_hook_timeout_fails_closed_without_running_the_tool() {
+    let mut pipeline = HookPipeline::new();
+    pipeline.add(
+        Operation::ToolCall,
+        Arc::new(TimeoutHook { timeout_ms: 25 }),
+    );
+    let received = Arc::new(Mutex::new(None));
+    let mut registry = ToolRegistry::new();
+    registry.set_pipeline(Arc::new(pipeline));
+    registry
+        .register(Box::new(ScriptedTool {
+            received_arguments: Some(received.clone()),
+            ..ScriptedTool::new("failing", Err(execution_failure()), false)
+        }))
+        .unwrap();
+
+    let actual = call(&registry, "failing");
+    let expected = ToolError::ExecutionFailed("hook timeout after 25ms (fail closed)".into());
+    assert_error(actual, &expected, "before-hook timeout");
+    assert!(received.lock().unwrap().is_none());
+}
+
+#[test]
+fn before_hook_denial_preserves_the_reason_verbatim() {
+    const REASON: &str = " \tRéponse requise :\nConfirmez avec l’humain, puis réessayez. \t\n";
+    let hook = Arc::new(RecordingHook {
+        before: |_| Verdict::Deny(REASON.into()),
+        ..RecordingHook::new(kill)
+    });
+    let registry = registry(execution_failure(), false, &[&hook]);
+    let expected = ToolError::ExecutionFailed(REASON.into());
+    assert_error(call(&registry, "failing"), &expected, "before-hook denial");
 }
 
 #[test]

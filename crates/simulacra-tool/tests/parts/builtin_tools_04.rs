@@ -54,28 +54,51 @@ fn tool_invocation_spans_are_children_of_the_agent_turn_span() {
 }
 
 #[test]
-fn tool_errors_are_logged_at_error_level_with_the_tool_name_and_error_message() {
+fn tool_failures_with_continuing_hooks_log_a_generic_tool_error() {
     let capability = full_capability();
-    let harness = Harness::new(capability.clone(), unlimited_budget());
+    let mut harness = Harness::new(capability.clone(), unlimited_budget());
+    let contexts = Arc::new(Mutex::new(Vec::new()));
+    let mut pipeline = simulacra_hooks::HookPipeline::new();
+    pipeline.add(
+        simulacra_hooks::Operation::ToolCall,
+        Arc::new(RecordingRewriteHook {
+            contexts: contexts.clone(),
+            before_arguments: None,
+        }),
+    );
+    harness.registry.set_pipeline(Arc::new(pipeline));
 
-    let (_, _, events) = capture_async(|| {
-        call_tool(&harness, "file_read", json!({}), &capability)
-    });
+    let (result, _, events) =
+        capture_async(|| call_tool(&harness, "file_read", json!({}), &capability));
+    let error = result.expect_err("file_read should reject missing arguments");
+    assert!(matches!(error, ToolError::InvalidArguments(_)));
+    let phases: Vec<_> = contexts
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(phase, _)| *phase)
+        .collect();
+    assert_eq!(
+        phases,
+        [simulacra_hooks::Phase::Before, simulacra_hooks::Phase::After]
+    );
 
+    let error_message = error.to_string();
     assert!(
         events.iter().any(|event| {
             event.level == "ERROR"
-                && event
-                    .fields
-                    .get("gen_ai.tool.name")
-                    .map(|value| value == "file_read")
-                    .unwrap_or(false)
-                && event
-                    .fields
-                    .values()
-                    .any(|value| value.to_ascii_lowercase().contains("path"))
+                && event.fields.get("message").map(String::as_str) == Some("tool error")
+                && event.fields.get("gen_ai.tool.name").map(String::as_str) == Some("file_read")
+                && event.fields.get("error") == Some(&error_message)
         }),
-        "expected an ERROR log with tool name and message, got {events:#?}"
+        "expected a generic ERROR event for file_read, got {events:#?}"
+    );
+    assert!(
+        events.iter().all(|event| {
+            event.fields.get("message").map(String::as_str) != Some("hook denied tool call")
+                && !event.fields.contains_key("simulacra.hook.name")
+        }),
+        "tool failure events should have no hook denial message or hook name, got {events:#?}"
     );
 }
 
@@ -106,7 +129,7 @@ fn unknown_tool_errors_are_logged_at_error_level_with_the_requested_name() {
 }
 
 #[test]
-fn before_hook_denials_are_logged_at_error_level_with_the_tool_name() {
+fn before_hook_denial_logs_one_error_with_tool_name_hook_name_and_error() {
     let capability = full_capability();
     let mut registry = ToolRegistry::new();
     registry
@@ -116,24 +139,46 @@ fn before_hook_denials_are_logged_at_error_level_with_the_tool_name() {
     pipeline.add(simulacra_hooks::Operation::ToolCall, Arc::new(DenyHook));
     registry.set_pipeline(Arc::new(pipeline));
 
-    let (_, _, events) = capture_async(|| {
-        call_registry(&registry, "arg_echo", json!({}), &capability)
-    });
+    let (_, _, events) =
+        capture_async(|| call_registry(&registry, "arg_echo", json!({}), &capability));
 
+    let errors: Vec<_> = events
+        .iter()
+        .filter(|event| event.level == "ERROR")
+        .collect();
+    assert_eq!(errors.len(), 1, "expected one ERROR event, got {events:#?}");
+    let fields = &errors[0].fields;
+    assert_eq!(
+        fields.get("message").map(String::as_str),
+        Some("hook denied tool call")
+    );
+    assert_eq!(
+        fields.get("gen_ai.tool.name").map(String::as_str),
+        Some("arg_echo")
+    );
+    assert_eq!(
+        fields.get("simulacra.hook.name").map(String::as_str),
+        Some("deny")
+    );
+    assert_eq!(
+        fields.get("error").map(String::as_str),
+        Some("execution failed: blocked by test")
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.fields.get("message").map(String::as_str) == Some("hook denied tool call")
+            })
+            .count(),
+        1,
+        "expected one hook denial event across all levels, got {events:#?}"
+    );
     assert!(
-        events.iter().any(|event| {
-            event.level == "ERROR"
-                && event
-                    .fields
-                    .get("gen_ai.tool.name")
-                    .map(|value| value == "arg_echo")
-                    .unwrap_or(false)
-                && event
-                    .fields
-                    .values()
-                    .any(|value| value.contains("hook denied"))
-        }),
-        "expected an ERROR log for hook denial, got {events:#?}"
+        events
+            .iter()
+            .all(|event| event.fields.get("message").map(String::as_str) != Some("tool error")),
+        "hook denial should have no generic tool error event, got {events:#?}"
     );
 }
 
