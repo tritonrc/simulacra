@@ -364,7 +364,8 @@ pub trait SkillDependencyActivator: Send + Sync + 'static {
 }
 
 /// Errors from tool execution.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum ToolError {
     #[error("capability denied: {0}")]
     CapabilityDenied(#[from] crate::CapabilityDenied),

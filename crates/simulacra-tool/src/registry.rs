@@ -329,50 +329,45 @@ impl ToolRegistry {
                 arguments
             };
 
-            // --- EXECUTE ---
-            let result = tool.tool.call(effective_args.clone(), capability).await;
+            let mut result = tool.tool.call(effective_args.clone(), capability).await;
 
-            // --- AFTER hook ---
-            match result {
-                Ok(result_value) => {
-                    if let Some(ref pipeline) = self.pipeline
-                        && !tool_owns_hooks
-                    {
-                        let after_ctx = tool
-                            .tool
-                            .hook_output_payload(name, &effective_args, &result_value)
-                            .to_string();
-                        match pipeline.run_after(Operation::ToolCall, &after_ctx) {
-                            Ok((_verdict, modified_ctx)) => {
-                                // Extract possibly-modified result
-                                let final_result = if let Ok(parsed) =
-                                    serde_json::from_str::<Value>(&modified_ctx)
-                                {
-                                    tool.tool.result_from_hook_output(result_value, &parsed)
-                                } else {
-                                    result_value
-                                };
-                                let output = tool.tool.output_from_value(final_result.clone());
-                                emit_tool_result_event(name, &output);
-                                Ok(final_result)
-                            }
-                            Err(e) => {
-                                let err = ToolError::ExecutionFailed(format!("hook error: {e}"));
-                                emit_tool_error_event(name, &err);
-                                Err(err)
-                            }
-                        }
-                    } else {
-                        let output = tool.tool.output_from_value(result_value.clone());
-                        emit_tool_result_event(name, &output);
-                        Ok(result_value)
+            if let Some(ref pipeline) = self.pipeline
+                && !tool_owns_hooks
+            {
+                let after_ctx = match &result {
+                    Ok(value) => tool.tool.hook_output_payload(name, &effective_args, value),
+                    Err(err) => {
+                        let mut payload = tool.tool.hook_input_payload(name, &effective_args);
+                        payload["error"] = serde_json::json!(err);
+                        payload
                     }
                 }
-                Err(err) => {
-                    emit_tool_error_event(name, &err);
-                    Err(err)
-                }
+                .to_string();
+                result = match pipeline.run_after(Operation::ToolCall, &after_ctx) {
+                    Ok((_verdict, modified_ctx)) if modified_ctx == after_ctx => result,
+                    Ok((_verdict, modified_ctx)) => {
+                        match (serde_json::from_str::<Value>(&modified_ctx), result) {
+                            (Ok(parsed), Ok(value)) => {
+                                Ok(tool.tool.result_from_hook_output(value, &parsed))
+                            }
+                            (Ok(parsed), Err(err)) => Err(parsed
+                                .get("error")
+                                .and_then(|amended| serde_json::from_value(amended.clone()).ok())
+                                .unwrap_or(err)),
+                            (Err(_), result) => result,
+                        }
+                    }
+                    Err(e) => Err(ToolError::ExecutionFailed(format!("hook error: {e}"))),
+                };
             }
+
+            match &result {
+                Ok(value) => {
+                    emit_tool_result_event(name, &tool.tool.output_from_value(value.clone()))
+                }
+                Err(err) => emit_tool_error_event(name, err),
+            }
+            result
         }
         .instrument(span)
     }
